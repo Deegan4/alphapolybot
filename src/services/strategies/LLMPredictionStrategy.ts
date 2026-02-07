@@ -109,6 +109,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
       this.scanInterval = null
     }
 
+    this.openPositions = 0 // Reset - counter is unreliable across stop/start cycles
     this.setStatus('idle')
     activityLogger.logSystem('LLM Prediction Strategy stopped')
   }
@@ -227,6 +228,22 @@ export class LLMPredictionStrategy extends BaseStrategy {
     size = Math.max(size, 1) // At least $1
 
     return Math.round(size * 100) / 100 // Round to cents
+  }
+
+  /**
+   * Called when a position is closed (sold or market resolved)
+   */
+  closePosition(): void {
+    if (this.openPositions > 0) {
+      this.openPositions--
+    }
+  }
+
+  /**
+   * Get current open position count
+   */
+  getOpenPositionCount(): number {
+    return this.openPositions
   }
 
   /**

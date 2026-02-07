@@ -1,6 +1,7 @@
 import type { Market, OrderRequest, OrderResult, Order } from '@/types'
 import { clobClient } from '@/services/api'
 import { walletService } from '@/services/wallet'
+import { riskManager } from './RiskManager'
 
 export interface TradingConfig {
   maxSlippage: number
@@ -50,6 +51,12 @@ export class TradingService {
     const hasApprovals = await walletService.ensureApprovals(this.config.dryRun)
     if (!hasApprovals) {
       return { success: false, error: 'Failed to ensure token approvals' }
+    }
+
+    // Risk management gate
+    const riskCheck = riskManager.validateTrade(amount)
+    if (!riskCheck.allowed) {
+      return { success: false, error: `Risk check failed: ${riskCheck.reason}` }
     }
 
     // Apply execution cooldown
@@ -134,6 +141,8 @@ export class TradingService {
    * Execute an order with retry logic
    */
   private async executeOrder(request: OrderRequest): Promise<OrderResult> {
+    riskManager.recordTradeAttempt()
+
     // DRY RUN MODE: Simulate order without executing
     if (this.config.dryRun) {
       console.log('[DRY RUN] Would execute order:', {
@@ -146,7 +155,9 @@ export class TradingService {
       
       // Simulate network delay
       await new Promise(r => setTimeout(r, 200 + Math.random() * 300))
-      
+
+      riskManager.recordTradeResult(true)
+
       // Return simulated success
       return {
         success: true,
@@ -169,6 +180,7 @@ export class TradingService {
 
         if (result.success) {
           this.lastOrderTime = Date.now()
+          riskManager.recordTradeResult(true)
           return result
         }
 
@@ -201,6 +213,8 @@ export class TradingService {
         }
       }
     }
+
+    riskManager.recordTradeResult(false)
 
     return {
       success: false,

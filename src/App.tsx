@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { AppLayout } from '@/components/layout'
 import { TradingTerminal, PortfolioView, ActivityView, SettingsView } from '@/views'
 import { useSettingsStore } from '@/stores'
-import { tradingService } from '@/services/trading'
+import { tradingService, riskManager } from '@/services/trading'
 import { strategyManager } from '@/services/strategies'
 import { openRouterService } from '@/services/llm'
 
@@ -21,7 +21,11 @@ const App: React.FC = () => {
 
     const initializeApp = async () => {
       console.log('[App] Initializing AlphaPolyBot...')
-      
+
+      // Initialize risk manager (subscribes to activity logger for error monitoring)
+      riskManager.initialize()
+      console.log('[App] Risk manager initialized')
+
       // Initialize strategy manager (registers LLM + Dip Arb strategies)
       try {
         await strategyManager.initialize()
