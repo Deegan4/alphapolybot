@@ -18,6 +18,9 @@ export default {
           'border': '#1a2f1a',
           'primary': '#00ff00',
           'secondary': '#ffa500',
+          'cyan': '#00ffff',
+          'cyan-dim': '#00cccc',
+          'emerald': '#00ff88',
           'text-primary': '#00ff00',
           'text-secondary': '#00cc00',
           'text-tertiary': '#009900',
@@ -33,12 +36,14 @@ export default {
       },
       fontFamily: {
         'mono': ['JetBrains Mono', 'Fira Code', 'Courier New', 'monospace'],
+        'sans': ['Inter', 'system-ui', 'sans-serif'],
       },
       animation: {
         'matrix-rain': 'matrix-rain 8s linear infinite',
         'glow-pulse': 'glow-pulse 2s ease-in-out infinite',
         'text-flicker': 'text-flicker 3s ease-in-out infinite',
         'data-stream': 'data-stream 1.5s ease-in-out infinite',
+        'shimmer': 'shimmer 2s infinite linear',
       },
       keyframes: {
         'matrix-rain': {
@@ -48,11 +53,11 @@ export default {
           '100%': { transform: 'translateY(100vh)', opacity: '0' },
         },
         'glow-pulse': {
-          '0%, 100%': { 
+          '0%, 100%': {
             boxShadow: '0 0 10px #00ff00, 0 0 20px rgba(0, 255, 0, 0.4)',
             textShadow: '0 0 5px #00ff00',
           },
-          '50%': { 
+          '50%': {
             boxShadow: '0 0 15px #00ff00, 0 0 30px rgba(0, 255, 0, 0.5)',
             textShadow: '0 0 10px #00ff00, 0 0 20px #00ff00',
           },
@@ -67,12 +72,22 @@ export default {
           '50%': { opacity: '1' },
           '100%': { transform: 'translateX(100%)', opacity: '0' },
         },
+        'shimmer': {
+          '0%': { backgroundPosition: '-200% 0' },
+          '100%': { backgroundPosition: '200% 0' },
+        },
       },
       boxShadow: {
         'glow-subtle': '0 0 5px #00ff00, 0 0 10px rgba(0, 255, 0, 0.3)',
         'glow-normal': '0 0 10px #00ff00, 0 0 20px rgba(0, 255, 0, 0.4)',
         'glow-strong': '0 0 15px #00ff00, 0 0 30px rgba(0, 255, 0, 0.5)',
         'glow-error': '0 0 10px #ff0040, 0 0 20px rgba(255, 0, 64, 0.4)',
+        'glow-cyan': '0 0 10px #00ffff, 0 0 20px rgba(0, 255, 255, 0.4)',
+        'glass': 'inset 0 1px 0 0 rgba(0, 255, 0, 0.05)',
+        'glass-cyan': 'inset 0 1px 0 0 rgba(0, 255, 255, 0.05)',
+        'elevation-1': '0 2px 8px rgba(0, 0, 0, 0.4)',
+        'elevation-2': '0 4px 16px rgba(0, 0, 0, 0.5), 0 0 8px rgba(0, 255, 0, 0.05)',
+        'elevation-3': '0 8px 32px rgba(0, 0, 0, 0.6), 0 0 16px rgba(0, 255, 0, 0.1)',
       },
     },
   },

@@ -1,5 +1,6 @@
 import React from 'react'
 import { NavLink } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import { cn } from '@/utils/cn'
 import { useWalletStore } from '@/stores'
 
@@ -50,48 +51,66 @@ const navItems: NavItem[] = [
 ]
 
 /**
- * Sidebar - Main navigation sidebar
+ * Sidebar - Glassmorphism nav with animated active indicator
  */
 export const Sidebar: React.FC = () => {
-  const { isConnected, address, usdcBalance } = useWalletStore()
+  const { isConnected, address, proxyAddress, usdcBalance, balance } = useWalletStore()
 
   const formatAddress = (addr: string) => {
     return `${addr.slice(0, 6)}...${addr.slice(-4)}`
   }
 
   return (
-    <aside className="w-64 bg-matrix-card border-r border-matrix-border flex flex-col h-full">
+    <aside className="w-64 glass-card border-r border-matrix-border/30 flex flex-col h-full">
       {/* Logo */}
-      <div className="p-4 border-b border-matrix-border">
-        <h1 className="text-matrix-primary font-mono text-xl font-bold flex items-center gap-2">
-          <span className="text-2xl">◆</span>
-          <span>ALPHA<span className="text-matrix-secondary">POLY</span>BOT</span>
+      <div className="p-4 border-b border-matrix-border/30">
+        <h1 className="font-mono text-xl font-bold flex items-center gap-2">
+          <span className="text-2xl bg-gradient-to-r from-matrix-primary to-matrix-cyan bg-clip-text text-transparent">◆</span>
+          <span>
+            <span className="bg-gradient-to-r from-matrix-primary to-matrix-cyan bg-clip-text text-transparent">ALPHA</span>
+            <span className="text-matrix-secondary">POLY</span>
+            <span className="text-matrix-primary">BOT</span>
+          </span>
         </h1>
-        <p className="text-matrix-text-secondary text-xs mt-1">
+        <p className="text-matrix-text-muted font-sans text-xs mt-1">
           Polymarket LLM Trading Bot
         </p>
       </div>
 
       {/* Wallet Status */}
-      <div className="p-4 border-b border-matrix-border">
-        <div className="text-xs text-matrix-text-secondary uppercase tracking-wider mb-2">
+      <div className="p-4 border-b border-matrix-border/30">
+        <div className="text-xs text-matrix-text-muted font-sans uppercase tracking-wider mb-2">
           Wallet Status
         </div>
         {isConnected ? (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 bg-matrix-primary rounded-full animate-pulse" />
+              <motion.span
+                className="w-2 h-2 bg-matrix-primary rounded-full"
+                animate={{
+                  boxShadow: ['0 0 4px #00ff00', '0 0 10px #00ff00', '0 0 4px #00ff00'],
+                }}
+                transition={{ duration: 2, repeat: Infinity }}
+              />
               <span className="text-matrix-primary text-sm font-mono">Connected</span>
             </div>
             <div className="text-matrix-text-secondary text-xs font-mono">
               {address ? formatAddress(address) : 'Unknown'}
             </div>
-            <div className="bg-matrix-bg rounded px-2 py-1.5">
-              <span className="text-matrix-text-secondary text-xs">Balance: </span>
-              <span className="text-matrix-primary font-mono">
+            <div className="gradient-border bg-matrix-bg rounded px-2 py-1.5">
+              <span className="text-matrix-text-muted text-xs font-sans">USDC: </span>
+              <span className="text-matrix-primary font-mono tabular-nums">
                 ${usdcBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
               </span>
             </div>
+            <div className="text-matrix-text-muted text-[10px] font-mono">
+              MATIC: {balance.toFixed(4)}
+            </div>
+            {usdcBalance === 0 && balance === 0 && !proxyAddress && (
+              <div className="text-yellow-400/80 text-[10px] font-sans leading-tight">
+                No funds found. If you use Polymarket via email login, set your Proxy Address in Settings → Wallet.
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex items-center gap-2">
@@ -110,15 +129,26 @@ export const Sidebar: React.FC = () => {
                 to={item.path}
                 className={({ isActive }) =>
                   cn(
-                    'flex items-center gap-3 px-3 py-2.5 rounded-md font-mono text-sm transition-all',
+                    'relative flex items-center gap-3 px-3 py-2.5 rounded-md font-mono text-sm transition-colors',
                     isActive
-                      ? 'bg-matrix-primary/10 text-matrix-primary border border-matrix-primary/30'
-                      : 'text-matrix-text-secondary hover:text-matrix-primary hover:bg-matrix-primary/5'
+                      ? 'text-matrix-primary'
+                      : 'text-matrix-text-secondary hover:text-matrix-primary'
                   )
                 }
               >
-                {item.icon}
-                <span>{item.label}</span>
+                {({ isActive }) => (
+                  <>
+                    {isActive && (
+                      <motion.div
+                        layoutId="sidebar-active"
+                        className="absolute inset-0 rounded-md bg-matrix-primary/10 border border-matrix-primary/20"
+                        transition={{ type: 'spring', stiffness: 350, damping: 30 }}
+                      />
+                    )}
+                    <span className="relative z-10">{item.icon}</span>
+                    <span className="relative z-10">{item.label}</span>
+                  </>
+                )}
               </NavLink>
             </li>
           ))}
@@ -126,9 +156,10 @@ export const Sidebar: React.FC = () => {
       </nav>
 
       {/* Version */}
-      <div className="p-4 border-t border-matrix-border">
-        <div className="text-matrix-text-secondary text-xs font-mono">
-          v1.0.0 • Matrix Theme
+      <div className="p-4 border-t border-matrix-border/30">
+        <div className="h-px bg-gradient-to-r from-transparent via-matrix-primary/30 to-transparent mb-3" />
+        <div className="text-matrix-text-muted text-xs font-sans">
+          v1.0.0 • Neo Matrix
         </div>
       </div>
     </aside>

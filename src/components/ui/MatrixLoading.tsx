@@ -1,4 +1,5 @@
 import React from 'react'
+import { motion } from 'framer-motion'
 import { cn } from '@/utils/cn'
 
 interface MatrixLoadingProps {
@@ -32,19 +33,22 @@ export const MatrixLoading: React.FC<MatrixLoadingProps> = ({
           )}
         />
         {/* Animated arc */}
-        <div
+        <motion.div
           className={cn(
-            'absolute top-0 left-0 border-2 border-transparent border-t-matrix-primary rounded-full animate-spin',
+            'absolute top-0 left-0 border-2 border-transparent border-t-matrix-primary rounded-full',
             sizes[size]
           )}
+          animate={{ rotate: 360 }}
+          transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
         />
         {/* Glow effect */}
-        <div
+        <motion.div
           className={cn(
-            'absolute top-0 left-0 border-2 border-transparent border-t-matrix-primary/50 rounded-full animate-spin blur-sm',
+            'absolute top-0 left-0 border-2 border-transparent border-t-matrix-primary/50 rounded-full blur-sm',
             sizes[size]
           )}
-          style={{ animationDuration: '1s' }}
+          animate={{ rotate: 360 }}
+          transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
         />
       </div>
       {text && (
@@ -62,9 +66,14 @@ export const MatrixLoading: React.FC<MatrixLoadingProps> = ({
 export const MatrixLoadingDots: React.FC<{ className?: string }> = ({ className }) => {
   return (
     <div className={cn('flex items-center gap-1', className)}>
-      <span className="w-2 h-2 bg-matrix-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-      <span className="w-2 h-2 bg-matrix-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-      <span className="w-2 h-2 bg-matrix-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+      {[0, 1, 2].map((i) => (
+        <motion.span
+          key={i}
+          className="w-2 h-2 bg-matrix-primary rounded-full"
+          animate={{ y: [0, -6, 0] }}
+          transition={{ repeat: Infinity, duration: 0.6, delay: i * 0.15, ease: 'easeInOut' }}
+        />
+      ))}
     </div>
   )
 }
@@ -80,19 +89,26 @@ export const MatrixLoadingBar: React.FC<{ progress?: number; className?: string 
 
   return (
     <div className={cn('w-full h-1 bg-matrix-border rounded-full overflow-hidden', className)}>
-      <div
-        className={cn(
-          'h-full bg-matrix-primary transition-all duration-300',
-          indeterminate && 'animate-matrix-loading'
-        )}
-        style={!indeterminate ? { width: `${progress}%` } : undefined}
-      />
+      {indeterminate ? (
+        <motion.div
+          className="h-full bg-gradient-to-r from-matrix-primary to-matrix-cyan"
+          animate={{ x: ['-100%', '100%'] }}
+          transition={{ repeat: Infinity, duration: 1.5, ease: 'easeInOut' }}
+          style={{ width: '40%' }}
+        />
+      ) : (
+        <motion.div
+          className="h-full bg-gradient-to-r from-matrix-primary to-matrix-cyan"
+          animate={{ width: `${progress}%` }}
+          transition={{ duration: 0.3 }}
+        />
+      )}
     </div>
   )
 }
 
 /**
- * MatrixSkeleton - Skeleton loading placeholder
+ * MatrixSkeleton - Skeleton loading placeholder with shimmer
  */
 export const MatrixSkeleton: React.FC<{
   className?: string
@@ -107,7 +123,7 @@ export const MatrixSkeleton: React.FC<{
   return (
     <div
       className={cn(
-        'bg-matrix-border/50 animate-pulse',
+        'skeleton-shimmer',
         variants[variant],
         className
       )}

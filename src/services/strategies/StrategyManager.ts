@@ -1,10 +1,14 @@
 import { BaseStrategy } from './BaseStrategy'
 import { LLMPredictionStrategy, llmPredictionStrategy } from './LLMPredictionStrategy'
 import { DipArbStrategy, dipArbStrategy } from './DipArbStrategy'
+import { ProjectFWStrategy, projectFWStrategy } from './ProjectFWStrategy'
+import { BtcUpDownStrategy, btcUpDownStrategy } from './BtcUpDownStrategy'
+import { MicrostructureMomentumStrategy, microMomentumStrategy } from './MicrostructureMomentumStrategy'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import type { StrategyStats } from '@/types'
 
 export interface StrategyState {
+  id: string
   name: string
   enabled: boolean
   status: 'idle' | 'running' | 'paused' | 'error'
@@ -25,6 +29,9 @@ export class StrategyManager {
     // Register built-in strategies
     this.registerStrategy('llm-prediction', llmPredictionStrategy)
     this.registerStrategy('dip-arb', dipArbStrategy)
+    this.registerStrategy('project-fw', projectFWStrategy)
+    this.registerStrategy('btc-updown', btcUpDownStrategy)
+    this.registerStrategy('micro-momentum', microMomentumStrategy)
   }
 
   /**
@@ -84,6 +91,27 @@ export class StrategyManager {
   }
 
   /**
+   * Get ProjectFW Arbitrage strategy (typed)
+   */
+  getProjectFWStrategy(): ProjectFWStrategy {
+    return projectFWStrategy
+  }
+
+  /**
+   * Get BTC Up/Down strategy (typed)
+   */
+  getBtcUpDownStrategy(): BtcUpDownStrategy {
+    return btcUpDownStrategy
+  }
+
+  /**
+   * Get Microstructure Momentum strategy (typed)
+   */
+  getMicroMomentumStrategy(): MicrostructureMomentumStrategy {
+    return microMomentumStrategy
+  }
+
+  /**
    * Enable a strategy
    */
   async enableStrategy(id: string): Promise<void> {
@@ -92,9 +120,8 @@ export class StrategyManager {
       throw new Error(`Strategy ${id} not found`)
     }
 
-    strategy.enable()
-    await strategy.start()
-    
+    await strategy.enable() // enable() internally calls start()
+
     activityLogger.logSystem(`${strategy.name} enabled and started`)
     this.notifyListeners()
   }
@@ -108,9 +135,18 @@ export class StrategyManager {
       throw new Error(`Strategy ${id} not found`)
     }
 
-    await strategy.stop()
-    strategy.disable()
-    
+    await strategy.disable() // disable() internally calls stop()
+
+    // Cancel pending GTD orders for this strategy (dynamic import avoids circular dep)
+    const strategyTag = id === 'llm-prediction' ? 'llm' : id === 'dip-arb' ? 'dip' : id === 'project-fw' ? 'fw' : id === 'btc-updown' ? 'btc' : id === 'micro-momentum' ? 'micro' : null
+    if (strategyTag) {
+      import('@/services/trading/GtcOrderManager').then(({ gtcOrderManager }) => {
+        gtcOrderManager.cancelAllForStrategy(strategyTag as 'llm' | 'dip' | 'fw' | 'btc' | 'micro').then(n => {
+          if (n > 0) activityLogger.logSystem(`Cancelled ${n} pending GTD order(s) for ${strategy.name}`)
+        })
+      }).catch(() => {})
+    }
+
     activityLogger.logSystem(`${strategy.name} disabled`)
     this.notifyListeners()
   }
@@ -135,7 +171,8 @@ export class StrategyManager {
    * Get all strategy states
    */
   getStates(): StrategyState[] {
-    return Array.from(this.strategies.entries()).map(([_id, strategy]) => ({
+    return Array.from(this.strategies.entries()).map(([id, strategy]) => ({
+      id,
       name: strategy.name,
       enabled: strategy.enabled,
       status: strategy.status,
@@ -151,6 +188,7 @@ export class StrategyManager {
     if (!strategy) return undefined
 
     return {
+      id,
       name: strategy.name,
       enabled: strategy.enabled,
       status: strategy.status,
@@ -175,6 +213,13 @@ export class StrategyManager {
         console.error(`[StrategyManager] Failed to stop ${id}:`, error)
       }
     }
+
+    // Cancel all pending GTD orders (emergency stop path)
+    import('@/services/trading/GtcOrderManager').then(({ gtcOrderManager }) => {
+      gtcOrderManager.cancelAll().then(n => {
+        if (n > 0) activityLogger.logSystem(`Cancelled ${n} pending GTD order(s)`)
+      })
+    }).catch(() => {})
 
     this.notifyListeners()
   }

@@ -21,9 +21,9 @@ export interface ScannerConfig {
 const DEFAULT_CONFIG: ScannerConfig = {
   minLiquidity: 1000,
   minVolume: 500,
-  maxAgeHours: 48,
-  minOdds: 0.40,
-  maxOdds: 0.60,
+  maxAgeHours: 0, // 0 = no age limit (scan all active markets)
+  minOdds: 0.15,
+  maxOdds: 0.85,
   excludedCategories: ['Sports'],
   excludedKeywords: [],
 }
@@ -54,8 +54,10 @@ export class MarketScanner {
    */
   async scan(): Promise<ScanResult[]> {
     try {
-      const markets = await gammaClient.getNewMarkets(this.config.maxAgeHours)
-      
+      // maxAgeHours=0 means no age filter — scan all active markets
+      const maxAge = this.config.maxAgeHours > 0 ? this.config.maxAgeHours : undefined
+      const markets = await gammaClient.getActiveMarkets(maxAge)
+
       this.scanResults = markets.map(market => this.evaluateMarket(market))
       this.lastScanTime = new Date()
 
@@ -150,23 +152,38 @@ export class MarketScanner {
       }
     }
 
-    const [price1, price2] = market.outcomePrices
-    const isBalanced = 
-      price1 >= this.config.minOdds && price1 <= this.config.maxOdds &&
-      price2 >= this.config.minOdds && price2 <= this.config.maxOdds
+    // Parse prices to numbers (Gamma API returns strings)
+    const price1 = typeof market.outcomePrices[0] === 'string'
+      ? parseFloat(market.outcomePrices[0] as unknown as string) : market.outcomePrices[0]
+    const price2 = typeof market.outcomePrices[1] === 'string'
+      ? parseFloat(market.outcomePrices[1] as unknown as string) : market.outcomePrices[1]
 
-    if (!isBalanced) {
+    if (isNaN(price1) || isNaN(price2)) {
       return {
         market,
         eligible: false,
         score: 0,
-        reason: `Odds not balanced: ${(price1 * 100).toFixed(1)}% / ${(price2 * 100).toFixed(1)}%`,
+        reason: 'Outcome prices are not valid numbers',
       }
     }
 
-    // Higher score for odds closer to 50/50
+    // At least one side must be within [minOdds, maxOdds]
+    const hasTradeableOdds =
+      (price1 >= this.config.minOdds && price1 <= this.config.maxOdds) ||
+      (price2 >= this.config.minOdds && price2 <= this.config.maxOdds)
+
+    if (!hasTradeableOdds) {
+      return {
+        market,
+        eligible: false,
+        score: 0,
+        reason: `Odds outside range: ${(price1 * 100).toFixed(1)}% / ${(price2 * 100).toFixed(1)}% (need ${(this.config.minOdds * 100).toFixed(0)}–${(this.config.maxOdds * 100).toFixed(0)}%)`,
+      }
+    }
+
+    // Higher score for odds closer to 50/50 (more uncertain = more LLM edge)
     const oddsBalance = 1 - Math.abs(price1 - 0.5)
-    score += oddsBalance * 20 // Max 10 points for balance (since 0.5 gives 1, scaled to 10)
+    score += oddsBalance * 20
 
     // Check outcomes exist
     if (!market.outcomes || market.outcomes.length !== 2) {
@@ -211,9 +228,9 @@ export class MarketScanner {
       }
     }
 
-    // Check market age
+    // Check market age (0 = no age limit)
     const ageHours = (Date.now() - new Date(market.createdAt).getTime()) / (1000 * 60 * 60)
-    if (ageHours > this.config.maxAgeHours) {
+    if (this.config.maxAgeHours > 0 && ageHours > this.config.maxAgeHours) {
       return {
         market,
         eligible: false,
@@ -222,8 +239,8 @@ export class MarketScanner {
       }
     }
 
-    // Newer markets get higher scores
-    const ageScore = Math.max(0, 10 - (ageHours / this.config.maxAgeHours) * 10)
+    // Newer markets get a bonus (max 10 points, decays over 30 days)
+    const ageScore = Math.max(0, 10 - (ageHours / 720) * 10) // 720h = 30 days
     score += ageScore
 
     return {

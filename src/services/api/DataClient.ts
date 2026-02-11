@@ -1,5 +1,5 @@
 import { BaseApiClient } from './BaseApiClient'
-import type { Position, ApiPosition, Trade, PortfolioSummary } from '@/types'
+import type { Position, ApiPosition, Trade, PortfolioSummary, UserActivity } from '@/types'
 
 /**
  * Data API Client
@@ -176,6 +176,57 @@ export class DataClient extends BaseApiClient {
   }
 
   /**
+   * Get user activity feed (deposits, withdrawals, trades, claims)
+   */
+  async getActivity(options: {
+    limit?: number
+    offset?: number
+  } = {}): Promise<UserActivity[]> {
+    if (!this.walletAddress) {
+      console.error('Wallet address not set')
+      return []
+    }
+
+    const { limit = 100, offset = 0 } = options
+
+    try {
+      const response = await this.get<UserActivity[]>(
+        `/activity?user=${this.walletAddress}&limit=${limit}&offset=${offset}`
+      )
+      return response || []
+    } catch (error) {
+      console.error('Failed to fetch activity:', error)
+      return []
+    }
+  }
+
+  /**
+   * Get closed/resolved positions
+   */
+  async getClosedPositions(options: {
+    limit?: number
+    offset?: number
+  } = {}): Promise<Position[]> {
+    if (!this.walletAddress) {
+      console.error('Wallet address not set')
+      return []
+    }
+
+    const { limit = 100, offset = 0 } = options
+
+    try {
+      const response = await this.get<ApiPosition[]>(
+        `/positions?user=${this.walletAddress}&closed=true&limit=${limit}&offset=${offset}`
+      )
+      if (!response || !Array.isArray(response)) return []
+      return response.map(this.convertApiPosition)
+    } catch (error) {
+      console.error('Failed to fetch closed positions:', error)
+      return []
+    }
+  }
+
+  /**
    * Convert API position to our Position type
    */
   private convertApiPosition(apiPos: ApiPosition): Position {
@@ -219,9 +270,11 @@ export class DataClient extends BaseApiClient {
       const sells = marketTrades.filter(t => t.side === 'SELL')
 
       if (sells.length > 0) {
-        const avgBuyPrice = buys.reduce((sum, t) => sum + t.price * t.size, 0) / 
-                           buys.reduce((sum, t) => sum + t.size, 0)
-        
+        const totalBuySize = buys.reduce((sum, t) => sum + t.size, 0)
+        if (totalBuySize === 0) continue // No buys to calculate average from
+
+        const avgBuyPrice = buys.reduce((sum, t) => sum + t.price * t.size, 0) / totalBuySize
+
         for (const sell of sells) {
           const pnl = (sell.price - avgBuyPrice) * sell.size - (sell.fee || 0)
           totalRealizedPnl += pnl

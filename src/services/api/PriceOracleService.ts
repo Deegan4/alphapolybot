@@ -1,0 +1,103 @@
+/**
+ * PriceOracleService - Fetches real-time crypto prices
+ *
+ * Binance primary (no auth, high rate limits), CoinGecko fallback.
+ * 5-second cache to avoid redundant API calls during scan loops.
+ */
+
+export interface AssetPrice {
+  symbol: 'BTC' | 'ETH' | 'SOL'
+  priceUSD: number
+  timestamp: number
+  source: 'binance' | 'coingecko' | 'rtds'
+}
+
+const CACHE_TTL_MS = 5_000
+
+const BINANCE_PAIRS: Record<string, string> = {
+  BTC: 'BTCUSDT',
+  ETH: 'ETHUSDT',
+  SOL: 'SOLUSDT',
+}
+
+const COINGECKO_IDS: Record<string, string> = {
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+  SOL: 'solana',
+}
+
+export class PriceOracleService {
+  private cache = new Map<string, AssetPrice>()
+
+  async getPrice(symbol: 'BTC' | 'ETH' | 'SOL'): Promise<AssetPrice> {
+    // 1. Try RTDS cached price (streaming, <5s old = fresh)
+    try {
+      const { rtdsService } = await import('@/services/realtime/RTDSService')
+      const rtdsPrice = rtdsService.getCachedPrice(symbol)
+      if (rtdsPrice && Date.now() - rtdsPrice.timestamp < CACHE_TTL_MS) {
+        // Convert RTDSAssetPrice to AssetPrice shape
+        return {
+          symbol: rtdsPrice.symbol,
+          priceUSD: rtdsPrice.priceUSD,
+          timestamp: rtdsPrice.timestamp,
+          source: 'rtds',
+        }
+      }
+    } catch {
+      // RTDS not available — fall through to HTTP sources
+    }
+
+    // 2. Local cache (existing behavior)
+    const cached = this.cache.get(symbol)
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return cached
+    }
+
+    // 3. Binance (HTTP fallback)
+    try {
+      const price = await this.fetchBinance(symbol)
+      this.cache.set(symbol, price)
+      return price
+    } catch (err) {
+      console.warn(`[PriceOracle] Binance failed for ${symbol}, trying CoinGecko`, err)
+    }
+
+    // 4. CoinGecko (last resort)
+    try {
+      const price = await this.fetchCoinGecko(symbol)
+      this.cache.set(symbol, price)
+      return price
+    } catch (err) {
+      console.error(`[PriceOracle] All sources failed for ${symbol}`, err)
+      throw new Error(`Failed to fetch ${symbol} price from all sources`)
+    }
+  }
+
+  private async fetchBinance(symbol: 'BTC' | 'ETH' | 'SOL'): Promise<AssetPrice> {
+    const pair = BINANCE_PAIRS[symbol]
+    const res = await fetch(
+      `https://api.binance.com/api/v3/ticker/price?symbol=${pair}`,
+      { signal: AbortSignal.timeout(5000) },
+    )
+    if (!res.ok) throw new Error(`Binance ${res.status}`)
+    const data: { price: string } = await res.json()
+    return { symbol, priceUSD: parseFloat(data.price), timestamp: Date.now(), source: 'binance' }
+  }
+
+  private async fetchCoinGecko(symbol: 'BTC' | 'ETH' | 'SOL'): Promise<AssetPrice> {
+    const id = COINGECKO_IDS[symbol]
+    const res = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`,
+      { signal: AbortSignal.timeout(5000) },
+    )
+    if (!res.ok) throw new Error(`CoinGecko ${res.status}`)
+    const data: Record<string, { usd: number }> = await res.json()
+    return { symbol, priceUSD: data[id].usd, timestamp: Date.now(), source: 'coingecko' }
+  }
+
+  clearCache(): void {
+    this.cache.clear()
+  }
+}
+
+export const priceOracleService = new PriceOracleService()

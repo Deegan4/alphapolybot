@@ -22,6 +22,7 @@ export interface Market {
   resolutionSource?: string
   category?: string
   tags?: string[]
+  negRisk?: boolean
 }
 
 export interface OrderBook {
@@ -47,6 +48,13 @@ export interface PriceData {
   volume24h?: number
 }
 
+export interface PriceUpdate {
+  tokenId: string
+  outcome: 'yes' | 'no'
+  price: number
+  timestamp: number
+}
+
 export interface Order {
   id: string
   tokenId: string
@@ -70,7 +78,9 @@ export interface OrderRequest {
   price: number
   size: number
   type?: 'FOK' | 'FAK' | 'GTC' | 'GTD'
+  expiration?: number  // Unix timestamp for GTD orders (0 = no expiry)
   conditionId?: string
+  negRisk?: boolean
 }
 
 export interface OrderResult {
@@ -80,6 +90,31 @@ export interface OrderResult {
   error?: string
   filledSize?: number
   avgPrice?: number
+  pending?: boolean  // true if GTD order placed but not yet filled
+}
+
+/**
+ * A GTD limit order that has been submitted but not yet filled.
+ * Tracked by GtcOrderManager until fill, expiry, or cancellation.
+ */
+export interface PendingGtcOrder {
+  orderId: string
+  tokenId: string
+  marketId: string
+  conditionId: string
+  outcome: 'yes' | 'no'
+  question: string
+  side: 'BUY' | 'SELL'
+  price: number
+  size: number
+  costBasis: number           // USDC locked
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro'
+  negRisk?: boolean
+  stopLossPercent: number     // SL to apply when filled
+  takeProfitPercent: number   // TP to apply when filled
+  placedAt: number            // Date.now() at placement
+  expiresAt: number           // Unix timestamp (seconds) — matches EIP-712 expiration
+  status: 'pending' | 'filled' | 'cancelled' | 'expired'
 }
 
 export interface Trade {
@@ -209,6 +244,12 @@ export interface DipArbConfig {
   minVolume?: number
   maxConcurrentTrades?: number
   cooldownMs?: number
+  stopLossPercent?: number     // SL for fallback positions (default 0.20)
+  takeProfitPercent?: number   // TP for fallback positions (default 0.10)
+  marketRefreshMs?: number     // Market refresh interval in ms (default 60000)
+  spreadScanEnabled?: boolean  // Enable periodic order book spread scan (default true)
+  spreadScanIntervalMs?: number // Spread scan interval in ms (default 30000)
+  spreadScanBatchSize?: number  // Max markets to check per spread scan (default 30)
 }
 
 export interface DipSignal {
@@ -232,11 +273,107 @@ export interface ArbRound {
   profit?: number
 }
 
+// ProjectFW Arbitrage specific types
+export interface ProjectFWConfig {
+  // Algorithm parameters
+  alpha: number              // FW approximation ratio (0,1), default 0.5
+  epsilonD: number           // Convergence threshold for F(mu), default 0.001
+  epsilon0: number           // Initial contraction parameter, default 0.1
+  maxIterations: number      // Max FW iterations per solve, default 50
+  // Trading parameters
+  tradeSize: number          // USDC per arb bundle, default 3
+  minProfitBps: number       // Min guaranteed profit after fees in bps, default 50
+  maxConcurrentArbs: number  // Max simultaneous arb bundles, default 2
+  scanIntervalMs: number     // Periodic scan interval, default 15000
+  cooldownMs: number         // Per-market cooldown, default 60000
+  // Fee model
+  takerFeeBps: number        // Polymarket taker fee in bps, default 200
+  gasEstimateUSD: number     // Est. gas per transaction, default 0.01
+  // Market filters
+  minLiquidity: number       // Min market liquidity, default 5000
+  minVolume24h: number       // Min 24h volume, default 1000
+  maxSpreadBps: number       // Max bid-ask spread in bps, default 500
+  // Multi-outcome
+  enableMultiOutcome: boolean // Scan multi-market events, default false
+  // Safety
+  stopLossPercent: number    // SL for fallback positions, default 0.15
+  takeProfitPercent: number  // TP for fallback positions, default 0.10
+  // Cross-market analysis (validation-only MVP)
+  enableCrossMarket: boolean       // Feature toggle, default false
+  crossMarketBudgetUSD: number     // Daily LLM budget for dependency analysis, default 0.50
+  mutexConfidenceThreshold: number // Min LLM confidence for mutex classification (0-1), default 0.75
+  crossMarketCacheTTL: number      // Dependency graph cache TTL in ms, default 3600000 (1 hour)
+  maxPairsPerLLMCall: number       // Batch size for dependency classification, default 10
+  minEventLiquidity: number        // Min combined event liquidity to analyze, default 10000
+}
+
+export interface FWArbRound {
+  id: string
+  marketId: string
+  eventId?: string           // For multi-outcome arbs
+  timestamp: number
+  legs: FWArbLeg[]
+  totalCost: number
+  guaranteedProfit: number   // D(mu||theta) - g(mu) minus fees
+  fwGap: number              // g(mu) at convergence
+  klDivergence: number       // D(mu||theta) measuring price incoherence
+  status: 'pending' | 'partial' | 'complete' | 'failed' | 'merged'
+  mergeResult?: { success: boolean; txHash?: string; error?: string }
+}
+
+export interface FWArbLeg {
+  tokenId: string
+  outcome: string            // 'Yes' | 'No' (or market-specific)
+  side: 'BUY' | 'SELL'
+  shares: number
+  price: number
+  orderId?: string
+  executed: boolean
+}
+
+// BTC Up/Down specific types
+export interface BtcUpDownConfig {
+  // Asset toggles
+  enableBtc: boolean           // Trade BTC Up/Down markets (default true)
+  enableEth: boolean           // Trade ETH Up/Down markets (default false)
+  enableSol: boolean           // Trade SOL Up/Down markets (default false)
+  // Bet sizing
+  tradeSize: number            // Fixed USDC per bet (default 2.0)
+  useKellySizing: boolean      // Override tradeSize with Kelly (default true)
+  // Entry filters
+  minConfidence: number        // Min signal confidence 0-1 (default 0.65)
+  maxEntryPrice: number        // Max price to buy an outcome (default 0.70)
+  minWindowRemaining: number   // Min seconds left in window to enter (default 300)
+  // Execution
+  scanIntervalMs: number       // Scan frequency in ms (default 15000)
+  maxConcurrentPositions: number // Max simultaneous positions (default 2)
+  cooldownMs: number           // Per-market cooldown in ms (default 120000)
+  // Risk management
+  stopLossPercent: number      // SL for positions (default 0.25)
+  takeProfitPercent: number    // TP for positions (default 0.20)
+  maxHoldMs: number            // Force exit before resolution (default 840000 = 14min)
+}
+
+export interface MicroMomentumConfig {
+  minCompositeSignal: number    // |compositeSignal| threshold to trade (default 0.4)
+  minSignalConfidence: number   // signalConfidence threshold (default 0.5)
+  maxSpreadFraction: number     // Reject wide-spread markets (default 0.08)
+  tradeSize: number             // USDC per trade (default 2.0, penny mode: $1)
+  scanIntervalMs: number        // Check signals every N ms (default 20000)
+  maxConcurrentPositions: number // Max simultaneous positions (default 3)
+  cooldownMs: number            // Per-market cooldown ms (default 60000)
+  stopLossPercent: number       // SL for positions (default 0.15)
+  takeProfitPercent: number     // TP for positions (default 0.20)
+  maxHoldMs: number             // Force exit after N ms (default 1800000 = 30min)
+  marketBatchSize: number       // Markets to track per scan (default 40)
+}
+
 // LLM Prediction specific types
 export interface LLMPredictionConfig {
   baseSize: number
   confidenceMultiplier: number
   maxPositionSize: number
+  maxTradeSize: number // Hard dollar cap per trade (e.g., 3 = $3 max)
   minOdds: number
   maxOdds: number
   minLiquidity: number
@@ -252,11 +389,26 @@ export interface LLMPredictionConfig {
   maxCapitalExposure: number
   minConfidence: number
   excludedCategories: string[]
+  gtcFallbackEnabled: boolean  // When FOK is killed, resubmit as GTD limit order
+  gtcExpiryMinutes: number     // GTD orders auto-expire after this duration (server-enforced)
 }
 
 // ==========================================
 // API RESPONSE TYPES
 // ==========================================
+
+export interface GammaEvent {
+  id: string
+  title: string
+  slug?: string
+  active: boolean
+  closed: boolean
+  markets: Market[]
+}
+
+export interface GammaEventsResponse {
+  events?: GammaEvent[]
+}
 
 export interface GammaMarketsResponse {
   markets: Market[]
@@ -392,4 +544,129 @@ export interface AdvancedSettings {
   experimentalFeatures: boolean
   customPrompts: boolean
   manualOrderPlacement: boolean
+}
+
+// ==========================================
+// CLOB PRICE HISTORY TYPES
+// ==========================================
+
+export type PriceHistoryInterval = '1m' | '1h' | '6h' | '1d' | '1w' | 'max'
+
+export interface PriceHistoryOptions {
+  interval: PriceHistoryInterval
+  startTs?: number   // Unix timestamp (seconds)
+  endTs?: number     // Unix timestamp (seconds)
+  fidelity?: number  // Data granularity in minutes
+}
+
+export interface PriceHistoryPoint {
+  t: number  // Unix timestamp
+  p: number  // Price
+}
+
+export interface PriceHistoryResponse {
+  history: PriceHistoryPoint[]
+}
+
+// ==========================================
+// CLOB SPREAD TYPES
+// ==========================================
+
+export interface SpreadData {
+  tokenId: string
+  bid: number
+  ask: number
+  spread: number
+  timestamp: number
+}
+
+// ==========================================
+// WEBSOCKET USER CHANNEL TYPES
+// ==========================================
+
+export interface UserChannelAuth {
+  apiKey: string
+  secret: string
+  passphrase: string
+}
+
+export type UserTradeStatus = 'MINED' | 'CONFIRMED' | 'RETRYING' | 'FAILED'
+export type UserOrderEventType = 'PLACEMENT' | 'UPDATE' | 'CANCELLATION'
+
+export interface UserTradeMessage {
+  event_type: 'trade'
+  id: string
+  status: UserTradeStatus
+  asset_id: string
+  market: string
+  side: 'BUY' | 'SELL'
+  size: string
+  price: string
+  fee: string
+  timestamp: string
+  maker_orders?: Array<{
+    order_id: string
+    asset_id: string
+    matched_amount: string
+    price: string
+  }>
+  transaction_hash?: string
+}
+
+export interface UserOrderMessage {
+  event_type: UserOrderEventType
+  order_id: string
+  asset_id: string
+  market: string
+  side: 'BUY' | 'SELL'
+  original_size: string
+  size_matched: string
+  price: string
+  type: 'FOK' | 'FAK' | 'GTC' | 'GTD'
+  timestamp: string
+  associate_trades?: Array<{
+    id: string
+    size: string
+    price: string
+  }>
+}
+
+export type UserChannelMessage = UserTradeMessage | UserOrderMessage
+
+// ==========================================
+// RTDS (Real-Time Data Socket) TYPES
+// ==========================================
+
+export interface RTDSSubscription {
+  topic: string
+  type: string
+  filters?: string
+}
+
+export interface RTDSMessage<T = unknown> {
+  topic: string
+  type: string
+  timestamp: number
+  payload: T
+}
+
+export interface RTDSCryptoPricePayload {
+  symbol: string
+  price: number
+  change24h?: number
+  volume24h?: number
+}
+
+// ==========================================
+// DATA API ENRICHMENT TYPES
+// ==========================================
+
+export interface UserActivity {
+  id: string
+  type: 'trade' | 'deposit' | 'withdrawal' | 'claim'
+  amount: number
+  timestamp: string
+  market?: string
+  side?: 'BUY' | 'SELL'
+  asset_id?: string
 }

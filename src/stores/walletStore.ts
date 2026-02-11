@@ -7,6 +7,7 @@ interface WalletStore extends WalletState {
   // Actions
   connect: (seedPhrase: string) => Promise<boolean>
   disconnect: () => void
+  setProxyAddress: (proxy: string | null) => void
   syncBalances: () => Promise<void>
   checkApprovals: () => Promise<void>
   approveUSDC: () => Promise<boolean>
@@ -19,8 +20,11 @@ export const useWalletStore = create<WalletStore>()(
     (set) => ({
       // Initial state
       address: null,
+      proxyAddress: null,
       balance: 0,
       usdcBalance: 0,
+      usdcBridgedBalance: 0,
+      usdcNativeBalance: 0,
       isConnected: false,
       isConnecting: false,
       chainId: null,
@@ -47,8 +51,11 @@ export const useWalletStore = create<WalletStore>()(
         walletService.disconnect()
         set({
           address: null,
+          proxyAddress: null,
           balance: 0,
           usdcBalance: 0,
+          usdcBridgedBalance: 0,
+          usdcNativeBalance: 0,
           isConnected: false,
           isConnecting: false,
           chainId: null,
@@ -58,12 +65,19 @@ export const useWalletStore = create<WalletStore>()(
         })
       },
 
+      setProxyAddress: (proxy: string | null) => {
+        walletService.setProxyAddress(proxy)
+        set({ proxyAddress: proxy })
+      },
+
       syncBalances: async () => {
         await walletService.syncBalances()
         const state = walletService.getState()
         set({
           balance: state.balance,
           usdcBalance: state.usdcBalance,
+          usdcBridgedBalance: state.usdcBridgedBalance,
+          usdcNativeBalance: state.usdcNativeBalance,
           lastSync: state.lastSync,
         })
       },
@@ -92,10 +106,10 @@ export const useWalletStore = create<WalletStore>()(
       },
 
       ensureApprovals: async () => {
-        const success = await walletService.ensureApprovals()
+        const result = await walletService.ensureApprovals()
         const state = walletService.getState()
         set({ approvals: state.approvals })
-        return success
+        return result.success
       },
     }),
     {
@@ -103,6 +117,7 @@ export const useWalletStore = create<WalletStore>()(
       partialize: (state) => ({
         // Only persist non-sensitive data
         address: state.address,
+        proxyAddress: state.proxyAddress,
         chainId: state.chainId,
       }),
     }

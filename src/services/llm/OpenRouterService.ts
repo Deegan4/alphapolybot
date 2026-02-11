@@ -1,4 +1,5 @@
 import type { Market, PredictionResult, AnalysisRecord, LLMConfig } from '@/types'
+import type { MarketDependency, DependencyType } from '@/services/strategies/projectfw/crossmarket/types'
 
 /**
  * OpenRouter LLM Service
@@ -14,13 +15,20 @@ export class OpenRouterService {
   private apiKey: string
   private baseUrl = 'https://openrouter.ai/api/v1'
   private analysisHistory: AnalysisRecord[] = []
-  
+
+  // Cost tracking — partitioned daily budget enforcement
+  private budgets: Record<string, { limit: number; spent: number; calls: number; lastReset: string }> = {
+    prediction:  { limit: 1.00, spent: 0, calls: 0, lastReset: '' },
+    crossMarket: { limit: 0.50, spent: 0, calls: 0, lastReset: '' },
+  }
+  private totalSpendUSD = 0               // Lifetime spend across all buckets (session only)
+
   private config: LLMConfig = {
     provider: 'openrouter',
-    model: 'anthropic/claude-3.5-sonnet',
+    model: 'meta-llama/llama-3.1-70b-instruct',
     temperature: 0.3,
-    maxTokens: 1500,
-    webSearchEnabled: true,
+    maxTokens: 400,
+    webSearchEnabled: false,
   }
 
   constructor(apiKey?: string) {
@@ -87,10 +95,24 @@ export class OpenRouterService {
       throw new Error('OpenRouter API key not configured')
     }
 
+    // Daily budget enforcement (prediction bucket)
+    this.maybeResetBucket('prediction')
+    const predBudget = this.budgets.prediction
+    if (predBudget.spent >= predBudget.limit) {
+      throw new Error(
+        `Daily LLM budget exhausted: $${predBudget.spent.toFixed(2)} / $${predBudget.limit.toFixed(2)} ` +
+        `(${predBudget.calls} calls today). Resets at midnight.`
+      )
+    }
+
     try {
       const prompt = this.buildAnalysisPrompt(market)
       const response = await this.callOpenRouter(prompt)
-      const result = this.parsePrediction(response)
+
+      // Track cost from API response (prediction bucket)
+      this.recordCost(response.cost, 'prediction')
+
+      const result = this.parsePrediction(response.message)
       
       result.analysisTime = Date.now() - startTime
 
@@ -125,50 +147,116 @@ export class OpenRouterService {
   }
 
   /**
+   * Get a second opinion from a different model for signal fusion.
+   * Used selectively on borderline or high-stakes trades.
+   * Returns null if budget exhausted or API fails (non-blocking).
+   */
+  async getSecondOpinion(market: Market): Promise<PredictionResult | null> {
+    // Budget check (uses prediction bucket)
+    this.maybeResetBucket('prediction')
+    const predBudget = this.budgets.prediction
+    if (predBudget.spent >= predBudget.limit * 0.8) {
+      // Within 80% of budget — skip second opinion to conserve
+      return null
+    }
+
+    // Use a different model for diversity
+    const secondaryModel = this.config.model.includes('llama')
+      ? 'google/gemma-2-9b-it'       // If primary is Llama, use Gemma
+      : 'meta-llama/llama-3.1-70b-instruct' // Otherwise use Llama
+
+    try {
+      const prompt = this.buildAnalysisPrompt(market)
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+          'HTTP-Referer': window.location.origin,
+          'X-Title': 'AlphaPolyBot - Signal Fusion',
+        },
+        body: JSON.stringify({
+          model: secondaryModel,
+          messages: [
+            { role: 'system', content: 'Market analyst. JSON only.' },
+            { role: 'user', content: prompt },
+          ],
+          temperature: this.config.temperature,
+          max_tokens: this.config.maxTokens,
+        }),
+      })
+
+      if (!response.ok) return null
+
+      const data = await response.json()
+      if (!data.choices?.[0]?.message) return null
+
+      // Record cost
+      let cost = 0
+      if (data.usage?.total_cost != null) {
+        cost = data.usage.total_cost
+      } else if (data.usage) {
+        cost = (data.usage.prompt_tokens ?? 0) / 1000 * 0.00059 +
+               (data.usage.completion_tokens ?? 0) / 1000 * 0.00079
+      }
+      this.recordCost(cost, 'prediction')
+
+      return this.parsePrediction(data.choices[0].message)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Fuse primary and secondary predictions into a consensus confidence.
+   * Agreement boosts confidence, disagreement reduces it.
+   */
+  static fuseSignals(
+    primary: PredictionResult,
+    secondary: PredictionResult | null,
+  ): { confidence: number; fusionApplied: boolean } {
+    if (!secondary) {
+      return { confidence: primary.confidence, fusionApplied: false }
+    }
+
+    const sameOutcome = primary.predictedOutcome === secondary.predictedOutcome
+
+    if (sameOutcome) {
+      // Agreement: geometric mean of confidences (boost if both confident)
+      const fused = Math.sqrt(primary.confidence * secondary.confidence)
+      // Slight upward adjustment for agreement
+      return { confidence: Math.min(0.95, fused * 1.1), fusionApplied: true }
+    } else {
+      // Disagreement: penalize primary confidence proportional to secondary's strength
+      const penalty = secondary.confidence * 0.5 // up to 50% reduction
+      return { confidence: Math.max(0.05, primary.confidence * (1 - penalty)), fusionApplied: true }
+    }
+  }
+
+  /**
    * Build the analysis prompt
    */
   private buildAnalysisPrompt(market: Market): string {
     const odds = market.outcomePrices || [0.5, 0.5]
-    
-    return `You are an expert market analyst with access to real-time information and web search capabilities. Analyze this prediction market and predict which outcome is more likely to occur.
+    const desc = market.description
+      ? `\nContext: ${market.description.substring(0, 150)}`
+      : ''
 
-Market Question: "${market.question}"
+    return `Predict this market outcome. Respond ONLY with JSON.
 
-Current Odds:
+Q: "${market.question}"
 - ${market.outcomes?.[0] || 'Yes'}: ${(odds[0] * 100).toFixed(1)}%
 - ${market.outcomes?.[1] || 'No'}: ${(odds[1] * 100).toFixed(1)}%
+- Vol: $${market.volume?.toLocaleString() || '?'}, Liq: $${market.liquidity?.toLocaleString() || '?'}${desc}
 
-Market Context:
-- Created: ${new Date(market.createdAt).toLocaleDateString()}
-- Volume: $${market.volume?.toLocaleString() || 'Unknown'}
-- Liquidity: $${market.liquidity?.toLocaleString() || 'Unknown'}
-${market.description ? `- Description: ${market.description.substring(0, 500)}` : ''}
-${market.resolutionSource ? `- Resolution Source: ${market.resolutionSource}` : ''}
-
-Instructions:
-1. Search for relevant real-world information, news, and data related to this question
-2. Analyze current market sentiment and odds
-3. Consider timing and recency of information
-4. Provide a clear prediction with confidence level (0-100%)
-5. Explain your reasoning with specific evidence
-6. List your sources
-
-IMPORTANT: Respond ONLY with valid JSON in this exact format:
-{
-  "prediction": "yes",
-  "confidence": 75,
-  "reasoning": "Detailed explanation here with specific evidence...",
-  "sources": ["Source 1", "Source 2", "Source 3"]
-}
-
-The prediction field must be either "yes" or "no".
-The confidence field must be a number between 0 and 100.`
+{"prediction":"yes|no","confidence":0-100,"reasoning":"1 sentence"}`
   }
 
   /**
    * Call OpenRouter API
+   * Returns the message content and cost info for budget tracking.
    */
-  private async callOpenRouter(prompt: string): Promise<{ content: string }> {
+  private async callOpenRouter(prompt: string): Promise<{ message: { content: string }; cost: number }> {
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -182,7 +270,7 @@ The confidence field must be a number between 0 and 100.`
         messages: [
           {
             role: 'system',
-            content: 'You are a professional market analyst with web search capabilities. Always respond with valid JSON only, no additional text.',
+            content: 'Market analyst. JSON only.',
           },
           {
             role: 'user',
@@ -200,12 +288,23 @@ The confidence field must be a number between 0 and 100.`
     }
 
     const data = await response.json()
-    
+
     if (!data.choices?.[0]?.message) {
       throw new Error('Invalid response from OpenRouter')
     }
 
-    return data.choices[0].message
+    // Extract cost: OpenRouter returns usage.total_cost (in USD) when available.
+    // Fall back to token-count estimate: ~$0.00059 per 1K input + $0.00079 per 1K output (Llama 3.1 70B rates).
+    let cost = 0
+    if (data.usage?.total_cost != null) {
+      cost = data.usage.total_cost
+    } else if (data.usage) {
+      const inputTokens = data.usage.prompt_tokens ?? 0
+      const outputTokens = data.usage.completion_tokens ?? 0
+      cost = (inputTokens / 1000) * 0.00059 + (outputTokens / 1000) * 0.00079
+    }
+
+    return { message: data.choices[0].message, cost }
   }
 
   /**
@@ -262,6 +361,188 @@ The confidence field must be a number between 0 and 100.`
       }
     }
   }
+
+  // ==========================================
+  // COST TRACKING
+  // ==========================================
+
+  /**
+   * Record cost for a completed API call to a specific budget bucket
+   */
+  private recordCost(cost: number, bucket: string = 'prediction'): void {
+    const b = this.budgets[bucket]
+    if (b) {
+      b.spent += cost
+      b.calls++
+    }
+    this.totalSpendUSD += cost
+  }
+
+  /**
+   * Reset a budget bucket's counters if it's a new day
+   */
+  private maybeResetBucket(bucket: string): void {
+    const b = this.budgets[bucket]
+    if (!b) return
+    const today = new Date().toISOString().slice(0, 10)
+    if (today !== b.lastReset) {
+      b.spent = 0
+      b.calls = 0
+      b.lastReset = today
+    }
+  }
+
+  /**
+   * Set daily LLM budget for a bucket (called from settings UI)
+   */
+  setDailyBudget(budgetUSD: number, bucket: string = 'prediction'): void {
+    const b = this.budgets[bucket]
+    if (b) {
+      b.limit = Math.max(0, budgetUSD)
+    }
+  }
+
+  /**
+   * Get daily budget for a bucket
+   */
+  getDailyBudget(bucket: string = 'prediction'): number {
+    return this.budgets[bucket]?.limit ?? 0
+  }
+
+  /**
+   * Get cost tracking statistics for a budget bucket (for UI display).
+   * Defaults to 'prediction' for backward compatibility.
+   */
+  getCostStats(bucket: string = 'prediction'): {
+    dailySpendUSD: number
+    dailyBudgetUSD: number
+    dailyRemaining: number
+    callCountToday: number
+    totalSpendUSD: number
+    budgetExhausted: boolean
+  } {
+    this.maybeResetBucket(bucket)
+    const b = this.budgets[bucket] ?? { limit: 0, spent: 0, calls: 0, lastReset: '' }
+    return {
+      dailySpendUSD: b.spent,
+      dailyBudgetUSD: b.limit,
+      dailyRemaining: Math.max(0, b.limit - b.spent),
+      callCountToday: b.calls,
+      totalSpendUSD: this.totalSpendUSD,
+      budgetExhausted: b.spent >= b.limit,
+    }
+  }
+
+  // ==========================================
+  // CROSS-MARKET DEPENDENCY CLASSIFICATION
+  // ==========================================
+
+  /**
+   * Classify pairwise dependencies between markets using LLM.
+   * Batches pairs into a single prompt for cost efficiency.
+   * Charges to the 'crossMarket' budget bucket.
+   */
+  async classifyDependencies(
+    pairs: Array<{ marketA: Market; marketB: Market }>,
+  ): Promise<MarketDependency[]> {
+    if (pairs.length === 0) return []
+
+    if (!this.apiKey) {
+      throw new Error('OpenRouter API key not configured')
+    }
+
+    // Budget enforcement (crossMarket bucket)
+    this.maybeResetBucket('crossMarket')
+    const cmBudget = this.budgets.crossMarket
+    if (cmBudget.spent >= cmBudget.limit) {
+      throw new Error(
+        `Cross-market LLM budget exhausted: $${cmBudget.spent.toFixed(2)} / $${cmBudget.limit.toFixed(2)} ` +
+        `(${cmBudget.calls} calls today). Resets at midnight.`,
+      )
+    }
+
+    const prompt = this.buildDependencyPrompt(pairs)
+
+    try {
+      const response = await this.callOpenRouter(prompt)
+      this.recordCost(response.cost, 'crossMarket')
+
+      return this.parseDependencyResponse(response.message.content, pairs)
+    } catch (error) {
+      console.error('[OpenRouterService] Dependency classification failed:', error)
+      return []
+    }
+  }
+
+  /**
+   * Build the batch dependency classification prompt.
+   * Designed for structured JSON output with high classification accuracy.
+   */
+  private buildDependencyPrompt(
+    pairs: Array<{ marketA: Market; marketB: Market }>,
+  ): string {
+    const pairList = pairs
+      .map((p, i) => `${i + 1}. A:"${p.marketA.question}" B:"${p.marketB.question}"`)
+      .join('\n')
+
+    return `Classify market pair relationships. JSON array only.
+
+Types: mutex (at most one YES), conditional (A→B), complementary (exactly one YES), independent
+
+${pairList}
+
+[{"pair":1,"type":"mutex|conditional|complementary|independent","confidence":0-100,"reasoning":"<10 words"}]`
+  }
+
+  /**
+   * Parse the LLM response for dependency classification.
+   */
+  private parseDependencyResponse(
+    content: string,
+    pairs: Array<{ marketA: Market; marketB: Market }>,
+  ): MarketDependency[] {
+    try {
+      const jsonMatch = content.match(/\[[\s\S]*\]/)
+      if (!jsonMatch) {
+        console.error('[OpenRouterService] No JSON array found in dependency response')
+        return []
+      }
+
+      const parsed: Array<{
+        pair: number
+        type: string
+        confidence: number
+        reasoning: string
+      }> = JSON.parse(jsonMatch[0])
+
+      const validTypes: DependencyType[] = ['independent', 'mutex', 'conditional', 'complementary']
+      const now = Date.now()
+
+      return parsed
+        .filter(item => {
+          const idx = item.pair - 1
+          return idx >= 0 && idx < pairs.length && validTypes.includes(item.type as DependencyType)
+        })
+        .map(item => {
+          const idx = item.pair - 1
+          return {
+            marketIdA: pairs[idx].marketA.id,
+            marketIdB: pairs[idx].marketB.id,
+            type: item.type as DependencyType,
+            confidence: Math.max(0, Math.min(1, item.confidence / 100)),
+            reasoning: item.reasoning || '',
+            classifiedAt: now,
+          }
+        })
+    } catch (error) {
+      console.error('[OpenRouterService] Failed to parse dependency response:', error)
+      return []
+    }
+  }
+
+  // ==========================================
+  // ANALYSIS HISTORY
+  // ==========================================
 
   /**
    * Get analysis history

@@ -1,0 +1,33 @@
+[build]
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+# SPA redirect — all routes to index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# API proxy: Gamma (Polymarket market data)
+[[redirects]]
+  from = "/api/gamma/*"
+  to = "https://gamma-api.polymarket.com/:splat"
+  status = 200
+  force = true
+
+# API proxy: Polygon RPC (primary)
+[[redirects]]
+  from = "/api/polygon-rpc"
+  to = "https://polygon-bor-rpc.publicnode.com/"
+  status = 200
+  force = true
+
+# API proxy: Polygon RPC (fallback)
+[[redirects]]
+  from = "/api/polygon-rpc2"
+  to = "https://1rpc.io/matic"
+  status = 200
+  force = true
+
+[build.environment]
+  NODE_VERSION = "20"

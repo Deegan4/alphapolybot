@@ -3,9 +3,16 @@
 // ==========================================
 
 export interface WalletState {
+  /** EOA address (derived from private key / seed phrase) — signs orders */
   address: string | null
+  /** Polymarket proxy address (Gnosis Safe) — holds funds, receives trades */
+  proxyAddress: string | null
   balance: number
   usdcBalance: number
+  /** USDC.e (bridged) balance — this is what Polymarket's exchange uses */
+  usdcBridgedBalance: number
+  /** Native USDC balance — NOT usable on Polymarket exchange */
+  usdcNativeBalance: number
   isConnected: boolean
   isConnecting: boolean
   chainId: number | null
@@ -17,6 +24,12 @@ export interface WalletState {
 export interface TokenApprovals {
   usdc: boolean
   ctf: boolean
+  usdcNegRisk: boolean
+  ctfNegRisk: boolean
+  /** USDC approval for NegRisk Adapter (0xd91E…) — required for NegRisk market trades */
+  usdcNegRiskAdapter: boolean
+  /** CTF approval for NegRisk Adapter (0xd91E…) — required for NegRisk market trades */
+  ctfNegRiskAdapter: boolean
 }
 
 export interface WalletConnection {
@@ -63,8 +76,8 @@ export interface NetworkConfig {
 export const POLYGON_NETWORK: NetworkConfig = {
   chainId: 137,
   name: 'Polygon Mainnet',
-  rpcUrl: import.meta.env.VITE_POLYGON_RPC_URL || 'https://polygon-rpc.com',
-  rpcFallback: import.meta.env.VITE_POLYGON_RPC_FALLBACK || 'https://rpc-mainnet.matic.network',
+  rpcUrl: import.meta.env.VITE_POLYGON_RPC_URL || '/api/polygon-rpc',
+  rpcFallback: import.meta.env.VITE_POLYGON_RPC_FALLBACK || '/api/polygon-rpc2',
   blockExplorer: 'https://polygonscan.com',
   nativeCurrency: {
     name: 'MATIC',
@@ -79,13 +92,16 @@ export const POLYGON_NETWORK: NetworkConfig = {
 
 export const CONTRACT_ADDRESSES = {
   // Polymarket Exchange (CLOB)
-  EXCHANGE: import.meta.env.VITE_POLYMARKET_EXCHANGE_ADDRESS || '0x4bFB41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E',
+  EXCHANGE: import.meta.env.VITE_POLYMARKET_EXCHANGE_ADDRESS || '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E',
   
   // Conditional Token Framework (CTF) - for selling positions
   CTF: import.meta.env.VITE_POLYMARKET_CTF_ADDRESS || '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045',
   
-  // USDC Token on Polygon
+  // USDC.e (Bridged) on Polygon — legacy, 6 decimals
   USDC: import.meta.env.VITE_USDC_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+
+  // USDC (Native) on Polygon — newer Circle-issued, 6 decimals
+  USDC_NATIVE: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
   
   // Neg Risk CTF Exchange
   NEG_RISK_CTF_EXCHANGE: '0xC5d563A36AE78145C45a50134d48A1215220f80a',
@@ -110,6 +126,10 @@ export const CTF_ABI = [
   'function isApprovedForAll(address account, address operator) view returns (bool)',
   'function balanceOf(address account, uint256 id) view returns (uint256)',
   'function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])',
+  // mergePositions: Burns equal amounts of all outcome tokens to redeem collateral (USDC)
+  // parentCollectionId is bytes32(0) for top-level markets
+  // conditionId identifies the market, amount is the number of complete sets to merge
+  'function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)',
 ]
 
 export const EXCHANGE_ABI = [

@@ -158,31 +158,27 @@ export class BaseApiClient {
    */
   private shouldRetry(error: unknown, retryCount: number): boolean {
     if (retryCount >= this.maxRetries) return false
-    
-    if (error instanceof AxiosError) {
-      // Retry on network errors
-      if (!error.response) return true
-      
-      // Retry on specific status codes
-      return this.retryableStatuses.includes(error.response.status)
+
+    // handleError interceptor transforms AxiosError → plain Error with .status
+    const status = (error as { status?: number }).status
+
+    if (status) {
+      // Never retry auth failures — they are structural, not transient
+      if (status === 401 || status === 403) return false
+      return this.retryableStatuses.includes(status)
     }
-    
+
+    // Network errors (no response/status) are retryable
+    if (error instanceof Error) return true
+
     return false
   }
 
   /**
    * Calculate retry delay with exponential backoff
    */
-  private calculateRetryDelay(retryCount: number, error: unknown): number {
+  private calculateRetryDelay(retryCount: number, _error: unknown): number {
     let delay = this.retryDelay * Math.pow(2, retryCount)
-    
-    // If rate limited, use the retry-after header if available
-    if (error instanceof AxiosError && error.response?.status === 429) {
-      const retryAfter = error.response.headers['retry-after']
-      if (retryAfter) {
-        delay = parseInt(retryAfter, 10) * 1000
-      }
-    }
     
     // Add jitter to prevent thundering herd
     delay += Math.random() * 1000
@@ -197,10 +193,21 @@ export class BaseApiClient {
     if (error.response) {
       // Server responded with error status
       const { status, data } = error.response
-      console.error(`API Error ${status}:`, data)
-      
+
+      if (status === 401) {
+        console.error(
+          `[API] 401 Unauthorized on ${error.config?.method?.toUpperCase()} ${error.config?.url}. ` +
+          `POLY_ADDRESS likely does not match the API key's signer, or credentials are revoked/expired. ` +
+          `Fix: Settings → API Keys → "Derive from Wallet" to generate matching credentials.`,
+        )
+      } else {
+        console.error(`API Error ${status}:`, data)
+      }
+
       // Create a more descriptive error
-      const message = (data as { message?: string })?.message || error.message
+      // Polymarket CLOB returns { error: "..." }, not { message: "..." }
+      const dataObj = data as { message?: string; error?: string; errorMsg?: string }
+      const message = dataObj?.error || dataObj?.message || dataObj?.errorMsg || error.message
       const apiError = new Error(`API Error (${status}): ${message}`)
       ;(apiError as Error & { status: number }).status = status
       ;(apiError as Error & { data: unknown }).data = data

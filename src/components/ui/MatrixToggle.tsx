@@ -1,4 +1,5 @@
 import React from 'react'
+import { motion } from 'framer-motion'
 import { cn } from '@/utils/cn'
 
 interface MatrixToggleProps {
@@ -11,8 +12,7 @@ interface MatrixToggleProps {
 }
 
 /**
- * MatrixToggle - ON/OFF switch with Matrix theme
- * Used for strategy enable/disable toggles
+ * MatrixToggle - ON/OFF switch with spring-animated thumb and gradient track
  */
 export const MatrixToggle: React.FC<MatrixToggleProps> = ({
   enabled,
@@ -23,12 +23,12 @@ export const MatrixToggle: React.FC<MatrixToggleProps> = ({
   size = 'md',
 }) => {
   const sizes = {
-    sm: { track: 'w-8 h-4', thumb: 'w-3 h-3', translate: 'translate-x-4' },
-    md: { track: 'w-11 h-6', thumb: 'w-5 h-5', translate: 'translate-x-5' },
-    lg: { track: 'w-14 h-7', thumb: 'w-6 h-6', translate: 'translate-x-7' },
+    sm: { track: 'w-8 h-4', thumb: 'w-3 h-3', offset: 16 },
+    md: { track: 'w-11 h-6', thumb: 'w-5 h-5', offset: 20 },
+    lg: { track: 'w-14 h-7', thumb: 'w-6 h-6', offset: 28 },
   }
 
-  const { track, thumb, translate } = sizes[size]
+  const { track, thumb, offset } = sizes[size]
 
   return (
     <div className="flex items-center justify-between gap-4">
@@ -46,7 +46,7 @@ export const MatrixToggle: React.FC<MatrixToggleProps> = ({
           )}
         </div>
       )}
-      <button
+      <motion.button
         type="button"
         role="switch"
         aria-checked={enabled}
@@ -54,25 +54,32 @@ export const MatrixToggle: React.FC<MatrixToggleProps> = ({
         onClick={() => onChange(!enabled)}
         className={cn(
           'relative inline-flex shrink-0 cursor-pointer rounded-full',
-          'border-2 border-transparent transition-colors duration-200',
+          'border-2 border-transparent',
           'focus:outline-none focus:ring-2 focus:ring-matrix-primary/50 focus:ring-offset-2 focus:ring-offset-matrix-bg',
           'disabled:opacity-50 disabled:cursor-not-allowed',
           track,
           enabled
-            ? 'bg-matrix-primary shadow-[0_0_10px_rgba(0,255,0,0.5)]'
+            ? 'bg-gradient-to-r from-matrix-primary to-matrix-cyan'
             : 'bg-matrix-border'
         )}
+        animate={{
+          boxShadow: enabled
+            ? '0 0 12px rgba(0, 255, 0, 0.5)'
+            : '0 0 0px rgba(0, 255, 0, 0)',
+        }}
+        transition={{ duration: 0.2 }}
       >
         <span className="sr-only">Toggle</span>
-        <span
+        <motion.span
           className={cn(
             'pointer-events-none inline-block rounded-full',
-            'bg-matrix-bg shadow-lg ring-0 transition duration-200 ease-in-out',
-            thumb,
-            enabled ? translate : 'translate-x-0.5'
+            'bg-matrix-bg shadow-lg ring-0',
+            thumb
           )}
+          animate={{ x: enabled ? offset : 2 }}
+          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
         />
-      </button>
+      </motion.button>
     </div>
   )
 }

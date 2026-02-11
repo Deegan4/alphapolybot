@@ -1,5 +1,47 @@
 import { BaseApiClient } from './BaseApiClient'
-import type { Market, GammaMarketsResponse } from '@/types'
+import type { Market, GammaMarketsResponse, GammaEvent, GammaEventsResponse } from '@/types'
+
+/**
+ * Normalize a raw market object from the Gamma API.
+ *
+ * The /events endpoint returns market fields differently than /markets:
+ *   - outcomes, outcomePrices, clobTokenIds come as JSON strings (e.g. '["Yes","No"]')
+ *   - volume, liquidity, volume24hr come as strings (e.g. "225665.41")
+ *
+ * This function safely parses all of these into proper typed values.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeMarket(raw: any): Market {
+  // Parse JSON-string arrays: '["Yes","No"]' → ["Yes","No"]
+  const parseJsonArray = (val: unknown): unknown[] => {
+    if (Array.isArray(val)) return val
+    if (typeof val === 'string') {
+      try { const parsed = JSON.parse(val); return Array.isArray(parsed) ? parsed : [] }
+      catch { return [] }
+    }
+    return []
+  }
+
+  const outcomes = parseJsonArray(raw.outcomes).map(String)
+  const clobTokenIds = parseJsonArray(raw.clobTokenIds).map(String)
+  const outcomePrices = parseJsonArray(raw.outcomePrices).map(
+    (p: unknown) => typeof p === 'string' ? parseFloat(p) : Number(p)
+  )
+
+  return {
+    ...raw,
+    outcomes,
+    clobTokenIds,
+    outcomePrices,
+    volume: typeof raw.volume === 'string' ? parseFloat(raw.volume) || 0 : (raw.volume ?? 0),
+    volume24hr: raw.volume24hr != null
+      ? (typeof raw.volume24hr === 'string' ? parseFloat(raw.volume24hr) || 0 : raw.volume24hr)
+      : undefined,
+    liquidity: typeof raw.liquidity === 'string' ? parseFloat(raw.liquidity) || 0 : (raw.liquidity ?? 0),
+    // Preserve negRisk flag (Gamma API returns enableNegRisk or neg_risk or negRisk)
+    negRisk: Boolean(raw.negRisk ?? raw.enableNegRisk ?? raw.neg_risk ?? false),
+  }
+}
 
 /**
  * Gamma API Client
@@ -31,8 +73,7 @@ export class GammaClient extends BaseApiClient {
       active = true,
       closed = false,
       limit = 100,
-      sort = 'volume24hr',
-      order = 'desc',
+      offset,
       cursor,
     } = options
 
@@ -40,32 +81,26 @@ export class GammaClient extends BaseApiClient {
     params.set('active', String(active))
     params.set('closed', String(closed))
     params.set('limit', String(Math.min(limit, 100)))
-    // params.set('order', order) // Removed due to Gamma API 422 error
-    
-    // Sort mapping for Gamma API
-    // The 'ascending' param is not supported by the Gamma API and causes 422 errors.
-    // const sortMap: Record<string, string> = {
-    //   volume24hr: 'volume24hr',
-    //   createdAt: 'startDate',
-    //   liquidity: 'liquidity',
-    //   volume: 'volume',
-    // }
-    // if (sortMap[sort]) {
-    //   params.set('ascending', order === 'asc' ? 'true' : 'false')
-    // }
-    
+
+    if (offset != null && offset > 0) {
+      params.set('offset', String(offset))
+    }
+
     if (cursor) {
       params.set('next_cursor', cursor)
     }
 
     try {
       const response = await this.get<Market[] | GammaMarketsResponse>(`/markets?${params.toString()}`)
-      
+
       // Handle both array response and object response
-      if (Array.isArray(response)) {
-        return response
-      }
-      return response.markets || []
+      const markets = Array.isArray(response) ? response : (response.markets || [])
+
+      // Normalize: Gamma API returns outcomePrices as strings, parse to numbers
+      return markets.map(m => ({
+        ...m,
+        outcomePrices: (m.outcomePrices ?? []).map(p => typeof p === 'string' ? parseFloat(p) : p),
+      }))
     } catch (error) {
       console.error('Failed to fetch markets:', error)
       throw error
@@ -104,7 +139,8 @@ export class GammaClient extends BaseApiClient {
   async searchMarkets(query: string, limit = 20): Promise<Market[]> {
     try {
       const response = await this.get<{ markets?: Market[] }>(`/search?q=${encodeURIComponent(query)}&limit=${limit}`)
-      return response.markets || []
+      // Normalize raw API response — /search returns JSON-string fields just like /events
+      return (response.markets || []).map(normalizeMarket)
     } catch (error) {
       console.error('Failed to search markets:', error)
       return []
@@ -112,95 +148,80 @@ export class GammaClient extends BaseApiClient {
   }
 
   /**
-   * Get recently created markets (for scanning new opportunities)
+   * Get active markets for scanning by fetching from the /events endpoint.
+   * The /markets endpoint only returns ~16 standalone markets, but /events
+   * contains thousands of active markets nested inside event objects.
+   * Markets are flattened, deduplicated, and normalized before returning.
    */
-  async getNewMarkets(hoursAgo = 24): Promise<Market[]> {
+  async getActiveMarkets(maxAgeHours?: number): Promise<Market[]> {
     try {
-      const allMarkets = await this.getMarkets({
-        active: true,
-        closed: false,
-        limit: 100,
-        sort: 'createdAt',
-        order: 'desc',
-      })
+      const params = new URLSearchParams()
+      params.set('active', 'true')
+      params.set('closed', 'false')
+      params.set('limit', '100')
 
-      const cutoffTime = new Date(Date.now() - hoursAgo * 60 * 60 * 1000)
-      
-      return allMarkets.filter(market => {
-        const createdAt = new Date(market.createdAt)
-        return createdAt > cutoffTime
-      })
+      const response = await this.get<GammaEventsResponse | GammaEvent[]>(
+        `/events?${params.toString()}`
+      )
+
+      // Handle both { events: [...] } and bare array responses
+      const events: GammaEvent[] = Array.isArray(response)
+        ? response
+        : (response.events || [])
+
+      // Flatten nested markets from all events and normalize field types.
+      // The /events endpoint returns outcomes, outcomePrices, clobTokenIds
+      // as JSON strings and volume/liquidity as string numbers.
+      const allMarkets: Market[] = []
+      const seenIds = new Set<string>()
+
+      for (const event of events) {
+        const markets = (event as any).markets || []
+        // Event-level negRisk flag applies to all child markets
+        const eventNegRisk = Boolean((event as any).enableNegRisk ?? (event as any).negRisk ?? false)
+        for (const raw of markets) {
+          if (seenIds.has(raw.id)) continue
+          // Inject event-level negRisk if market doesn't have its own
+          if (eventNegRisk && !raw.negRisk && !raw.enableNegRisk && !raw.neg_risk) {
+            raw.negRisk = true
+          }
+          const m = normalizeMarket(raw)
+          if (!m.active || m.closed) continue
+          seenIds.add(m.id)
+          allMarkets.push(m)
+        }
+      }
+
+      if (maxAgeHours == null) {
+        return allMarkets
+      }
+
+      const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000)
+      return allMarkets.filter(m => new Date(m.createdAt) > cutoff)
     } catch (error) {
-      console.error('Failed to fetch new markets:', error)
+      console.error('Failed to fetch active markets from events:', error)
       return []
     }
   }
 
   /**
-   * Get markets with specific criteria (for trading bot)
-   */
-  async getEligibleMarkets(options: {
-    minLiquidity?: number
-    minVolume?: number
-    maxAge?: number // hours
-    minOdds?: number
-    maxOdds?: number
-  } = {}): Promise<Market[]> {
-    const {
-      minLiquidity = 1000,
-      minVolume = 500,
-      maxAge = 48,
-      minOdds = 0.40,
-      maxOdds = 0.60,
-    } = options
-
-    try {
-      const markets = await this.getNewMarkets(maxAge)
-      
-      return markets.filter(market => {
-        // Check liquidity
-        if (market.liquidity < minLiquidity) return false
-        
-        // Check volume
-        if ((market.volume24hr || market.volume) < minVolume) return false
-        
-        // Check for balanced odds (near 50/50)
-        if (!market.outcomePrices || market.outcomePrices.length !== 2) return false
-        
-        const [price1, price2] = market.outcomePrices
-        const isBalanced = price1 >= minOdds && price1 <= maxOdds && 
-                          price2 >= minOdds && price2 <= maxOdds
-        
-        if (!isBalanced) return false
-        
-        // Check outcomes exist
-        if (!market.outcomes || market.outcomes.length !== 2) return false
-        if (!market.clobTokenIds || market.clobTokenIds.length !== 2) return false
-        
-        return true
-      })
-    } catch (error) {
-      console.error('Failed to fetch eligible markets:', error)
-      return []
-    }
-  }
-
-  /**
-   * Get events (market groups)
+   * Get events (market groups) with their nested markets
    */
   async getEvents(options: {
     active?: boolean
     limit?: number
-  } = {}): Promise<unknown[]> {
+  } = {}): Promise<GammaEvent[]> {
     const { active = true, limit = 50 } = options
-    
+
     try {
       const params = new URLSearchParams()
       params.set('active', String(active))
       params.set('limit', String(limit))
-      
-      const response = await this.get<{ events?: unknown[] }>(`/events?${params.toString()}`)
-      return response.events || []
+
+      const response = await this.get<GammaEventsResponse | GammaEvent[]>(
+        `/events?${params.toString()}`
+      )
+      return Array.isArray(response) ? response : (response.events || [])
     } catch (error) {
       console.error('Failed to fetch events:', error)
       return []
@@ -208,35 +229,45 @@ export class GammaClient extends BaseApiClient {
   }
 
   /**
-   * Get crypto markets (15-minute markets for dip arbitrage)
+   * Get binary markets suitable for dip arbitrage.
+   *
+   * DipArb profits from price dips where YES+NO < $1, then merges for
+   * guaranteed profit. This does NOT require short-dated markets — the
+   * merge itself locks in profit regardless of resolution date.
+   *
+   * Filters: binary (2 outcomes), has CLOB token IDs, has price data.
+   * Volume/liquidity filtering is left to the strategy layer.
    */
-  async getCryptoMarkets(underlyings: string[] = ['BTC', 'ETH', 'SOL']): Promise<Market[]> {
+  async getBinaryMarkets(): Promise<Market[]> {
     try {
-      const allMarkets = await this.getMarkets({
-        active: true,
-        closed: false,
-        limit: 100,
-      })
+      const allMarkets = await this.getActiveMarkets()
 
       return allMarkets.filter(market => {
-        const question = market.question.toLowerCase()
-        
-        // Check if it's a crypto price market
-        const isCrypto = underlyings.some(symbol => 
-          question.includes(symbol.toLowerCase())
-        )
-        
-        // Check if it's a short-term market (15 minutes, 1 hour, etc.)
-        const isShortTerm = question.includes('15 min') || 
-                           question.includes('15-min') ||
-                           question.includes('minute')
-        
-        return isCrypto && isShortTerm
+        // Must be binary (exactly 2 outcomes) for dip arb merge
+        if (!market.outcomes || market.outcomes.length !== 2) return false
+        if (!market.clobTokenIds || market.clobTokenIds.length !== 2) return false
+        // Must have price data
+        if (!market.outcomePrices || market.outcomePrices.length !== 2) return false
+        return true
       })
     } catch (error) {
-      console.error('Failed to fetch crypto markets:', error)
+      console.error('Failed to fetch binary markets:', error)
       return []
     }
+  }
+
+  /**
+   * @deprecated Use getBinaryMarkets() instead.
+   */
+  async getCryptoMarkets(): Promise<Market[]> {
+    return this.getBinaryMarkets()
+  }
+
+  /**
+   * @deprecated Use getBinaryMarkets() instead.
+   */
+  async getShortTermMarkets(): Promise<Market[]> {
+    return this.getBinaryMarkets()
   }
 }
 

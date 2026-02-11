@@ -1,9 +1,21 @@
-import React, { useEffect, useState } from 'react'
-import { MatrixCard, MatrixStatsGrid, MatrixBadge, MatrixLoading } from '@/components/ui'
+import React, { useEffect, useState, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { MatrixCard, MatrixStatsGrid, MatrixBadge, MatrixLoading, MatrixButton, AnimatedCounter } from '@/components/ui'
 import { useWalletStore } from '@/stores'
 import { dataClient } from '@/services/api'
+import { positionLifecycleManager, type PositionStatus } from '@/services/trading'
 import type { Position, Trade } from '@/types'
 import { cn } from '@/utils/cn'
+
+const containerVariants = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.06 } },
+}
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 12 },
+  show: { opacity: 1, y: 0, transition: { type: 'spring', stiffness: 300, damping: 25 } },
+}
 
 /**
  * PortfolioView - Portfolio overview and position management
@@ -11,14 +23,18 @@ import { cn } from '@/utils/cn'
 export const PortfolioView: React.FC = () => {
   const { isConnected, usdcBalance } = useWalletStore()
   const [positions, setPositions] = useState<Position[]>([])
+  const [trackedPositions, setTrackedPositions] = useState<PositionStatus[]>([])
   const [recentTrades, setRecentTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(false)
+  const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set())
+  const [confirmClose, setConfirmClose] = useState<string | null>(null)
+  const [confirmCloseAll, setConfirmCloseAll] = useState(false)
 
-  // Fetch portfolio data
+  // Fetch portfolio data from API
   useEffect(() => {
     const fetchData = async () => {
       if (!isConnected) return
-      
+
       setLoading(true)
       try {
         const [positionsData, tradesData] = await Promise.all([
@@ -35,29 +51,88 @@ export const PortfolioView: React.FC = () => {
     }
 
     fetchData()
-    const interval = setInterval(fetchData, 30000) // Refresh every 30s
+    const interval = setInterval(fetchData, 30000)
     return () => clearInterval(interval)
   }, [isConnected])
 
-  const positionsValue = positions.reduce((sum, p) => sum + (p.currentPrice * p.size), 0)
-  const totalValue = usdcBalance + positionsValue
-  const unrealizedPnL = positions.reduce((sum, p) => sum + (p.pnl?.dollar || 0), 0)
+  // Subscribe to locally tracked positions (PLM)
+  useEffect(() => {
+    // Initial load
+    setTrackedPositions(positionLifecycleManager.getPositions())
 
+    // Subscribe to changes
+    return positionLifecycleManager.onChange(() => {
+      setTrackedPositions(positionLifecycleManager.getPositions())
+    })
+  }, [])
+
+  // Refresh PLM positions periodically (for P&L updates)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTrackedPositions(positionLifecycleManager.getPositions())
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const handleClosePosition = useCallback(async (tokenId: string) => {
+    setClosingPositions(prev => new Set(prev).add(tokenId))
+    setConfirmClose(null)
+
+    try {
+      await positionLifecycleManager.forceClosePosition(tokenId)
+    } catch (error) {
+      console.error('Failed to close position:', error)
+    } finally {
+      setClosingPositions(prev => {
+        const next = new Set(prev)
+        next.delete(tokenId)
+        return next
+      })
+    }
+  }, [])
+
+  const handleCloseAll = useCallback(async () => {
+    setConfirmCloseAll(false)
+    const positions = positionLifecycleManager.getPositions()
+    const tokenIds = positions.map(p => p.tokenId)
+    setClosingPositions(new Set(tokenIds))
+
+    try {
+      await positionLifecycleManager.forceCloseAll()
+    } catch (error) {
+      console.error('Failed to close all positions:', error)
+    } finally {
+      setClosingPositions(new Set())
+    }
+  }, [])
+
+  const positionsValue = positions.reduce((sum, p) => sum + (p.currentPrice * p.size), 0)
+  const trackedValue = trackedPositions.reduce((sum, p) => sum + p.currentPrice * p.size, 0)
+  const totalValue = usdcBalance + positionsValue + trackedValue
+  const unrealizedPnL = positions.reduce((sum, p) => sum + (p.pnl?.dollar || 0), 0)
+    + trackedPositions.reduce((sum, p) => sum + p.pnlUsd, 0)
+
+  const totalPositionCount = positions.length + trackedPositions.length
   const stats: { label: string; value: string; variant?: 'profit' | 'loss' | 'default' }[] = [
     { label: 'Total Value', value: `$${totalValue.toFixed(2)}` },
     { label: 'USDC Balance', value: `$${usdcBalance.toFixed(2)}` },
-    { label: 'Positions Value', value: `$${positionsValue.toFixed(2)}` },
+    { label: 'Positions', value: `${totalPositionCount} (${trackedPositions.length} tracked)` },
     { label: 'Unrealized P&L', value: `$${unrealizedPnL.toFixed(2)}`, variant: unrealizedPnL >= 0 ? 'profit' : 'loss' },
   ]
 
   if (!isConnected) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-center">
+        <motion.div
+          className="text-center"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+        >
           <div className="text-6xl text-matrix-primary/20 mb-4">◇</div>
           <h2 className="text-matrix-primary text-xl font-mono mb-2">Wallet Not Connected</h2>
-          <p className="text-matrix-text-secondary">Connect your wallet in Settings to view portfolio</p>
-        </div>
+          <p className="text-matrix-text-secondary font-sans">Connect your wallet in Settings to view portfolio</p>
+        </motion.div>
       </div>
     )
   }
@@ -69,30 +144,84 @@ export const PortfolioView: React.FC = () => {
 
       {/* Main content */}
       <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
-        {/* Positions */}
-        <MatrixCard title="OPEN POSITIONS" subtitle={`${positions.length} positions`} className="flex flex-col min-h-0">
+        {/* Positions — gradient variant */}
+        <MatrixCard title="OPEN POSITIONS" subtitle={`${totalPositionCount} positions`} variant="gradient" className="flex flex-col min-h-0">
+          {/* Force Close All button — only visible when tracked positions exist */}
+          <AnimatePresence>
+            {trackedPositions.length > 0 && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="mb-3 flex justify-end overflow-hidden"
+              >
+                {confirmCloseAll ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-red-400 text-xs font-mono">Close all {trackedPositions.length} tracked positions?</span>
+                    <MatrixButton variant="danger" size="sm" onClick={handleCloseAll}>
+                      Confirm
+                    </MatrixButton>
+                    <MatrixButton variant="ghost" size="sm" onClick={() => setConfirmCloseAll(false)}>
+                      Cancel
+                    </MatrixButton>
+                  </div>
+                ) : (
+                  <MatrixButton
+                    variant="danger"
+                    size="sm"
+                    onClick={() => setConfirmCloseAll(true)}
+                  >
+                    Force Close All
+                  </MatrixButton>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <div className="flex-1 overflow-auto">
-            {loading ? (
+            {loading && positions.length === 0 && trackedPositions.length === 0 ? (
               <div className="flex justify-center py-8">
                 <MatrixLoading text="Loading positions..." />
               </div>
-            ) : positions.length === 0 ? (
+            ) : positions.length === 0 && trackedPositions.length === 0 ? (
               <div className="text-center py-8 text-matrix-text-secondary">
-                <p>No open positions</p>
-                <p className="text-xs mt-1">Start trading to see positions here</p>
+                <p className="font-sans">No open positions</p>
+                <p className="text-xs mt-1 font-sans">Start trading to see positions here</p>
               </div>
             ) : (
-              <div className="space-y-2">
-                {positions.map((position) => (
-                  <PositionCard key={position.tokenId} position={position} />
+              <motion.div
+                className="space-y-2"
+                variants={containerVariants}
+                initial="hidden"
+                animate="show"
+              >
+                {/* Locally tracked positions (PLM) — with close buttons */}
+                {trackedPositions.map((pos) => (
+                  <motion.div key={pos.tokenId} variants={itemVariants}>
+                    <TrackedPositionCard
+                      position={pos}
+                      isClosing={closingPositions.has(pos.tokenId)}
+                      showConfirm={confirmClose === pos.tokenId}
+                      onRequestClose={() => setConfirmClose(pos.tokenId)}
+                      onConfirmClose={() => handleClosePosition(pos.tokenId)}
+                      onCancelClose={() => setConfirmClose(null)}
+                    />
+                  </motion.div>
                 ))}
-              </div>
+
+                {/* API positions (from Polymarket data API) */}
+                {positions.map((position) => (
+                  <motion.div key={position.tokenId} variants={itemVariants}>
+                    <PositionCard position={position} />
+                  </motion.div>
+                ))}
+              </motion.div>
             )}
           </div>
         </MatrixCard>
 
-        {/* Recent Trades */}
-        <MatrixCard title="RECENT TRADES" subtitle="Last 10 trades" className="flex flex-col min-h-0">
+        {/* Recent Trades — glass variant */}
+        <MatrixCard title="RECENT TRADES" subtitle="Last 10 trades" variant="glass" className="flex flex-col min-h-0">
           <div className="flex-1 overflow-auto">
             {loading ? (
               <div className="flex justify-center py-8">
@@ -100,15 +229,22 @@ export const PortfolioView: React.FC = () => {
               </div>
             ) : recentTrades.length === 0 ? (
               <div className="text-center py-8 text-matrix-text-secondary">
-                <p>No recent trades</p>
-                <p className="text-xs mt-1">Your trade history will appear here</p>
+                <p className="font-sans">No recent trades</p>
+                <p className="text-xs mt-1 font-sans">Your trade history will appear here</p>
               </div>
             ) : (
-              <div className="space-y-2">
+              <motion.div
+                className="space-y-2"
+                variants={containerVariants}
+                initial="hidden"
+                animate="show"
+              >
                 {recentTrades.map((trade) => (
-                  <TradeCard key={trade.id} trade={trade} />
+                  <motion.div key={trade.id} variants={itemVariants}>
+                    <TradeCard trade={trade} />
+                  </motion.div>
                 ))}
-              </div>
+              </motion.div>
             )}
           </div>
         </MatrixCard>
@@ -126,8 +262,17 @@ const PositionCard: React.FC<{ position: Position }> = ({ position }) => {
   const currentValue = position.currentPrice * position.size
 
   return (
-    <div className="bg-matrix-bg border border-matrix-border rounded-lg p-3">
-      <div className="flex items-start justify-between mb-2">
+    <div className={cn(
+      'bg-matrix-bg/60 border rounded-lg p-3 relative overflow-hidden',
+      'border-matrix-border'
+    )}>
+      {/* P&L accent bar */}
+      <div className={cn(
+        'absolute left-0 top-0 bottom-0 w-0.5',
+        isProfit ? 'bg-matrix-primary' : 'bg-red-400'
+      )} />
+
+      <div className="flex items-start justify-between mb-2 pl-2">
         <div className="flex-1 min-w-0">
           <p className="text-matrix-text-primary text-sm font-mono truncate">
             {position.marketQuestion}
@@ -136,28 +281,136 @@ const PositionCard: React.FC<{ position: Position }> = ({ position }) => {
             <MatrixBadge variant={position.outcome.toLowerCase() === 'yes' ? 'success' : 'danger'} size="sm">
               {position.outcome.toUpperCase()}
             </MatrixBadge>
-            <span className="text-matrix-text-secondary text-xs">
+            <span className="text-matrix-text-secondary text-xs font-sans">
               {position.size.toFixed(0)} shares
             </span>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 text-xs font-mono">
+      <div className="grid grid-cols-3 gap-2 text-xs font-mono pl-2">
         <div>
-          <span className="text-matrix-text-secondary">Entry:</span>
+          <span className="text-matrix-text-secondary font-sans">Entry:</span>
           <span className="text-matrix-primary ml-1">{(position.entryPrice * 100).toFixed(1)}¢</span>
         </div>
         <div>
-          <span className="text-matrix-text-secondary">Value:</span>
+          <span className="text-matrix-text-secondary font-sans">Value:</span>
           <span className="text-matrix-primary ml-1">${currentValue.toFixed(2)}</span>
         </div>
         <div>
-          <span className="text-matrix-text-secondary">P&L:</span>
+          <span className="text-matrix-text-secondary font-sans">P&L:</span>
           <span className={cn('ml-1', isProfit ? 'text-matrix-primary' : 'text-red-400')}>
             {isProfit ? '+' : ''}{pnlPercent.toFixed(1)}%
           </span>
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Tracked Position Card — positions managed by PositionLifecycleManager
+ * Shows stop-loss/take-profit levels and a close button
+ */
+const TrackedPositionCard: React.FC<{
+  position: PositionStatus
+  isClosing: boolean
+  showConfirm: boolean
+  onRequestClose: () => void
+  onConfirmClose: () => void
+  onCancelClose: () => void
+}> = ({ position, isClosing, showConfirm, onRequestClose, onConfirmClose, onCancelClose }) => {
+  const isProfit = position.pnlPercent >= 0
+  const currentValue = position.currentPrice * position.size
+
+  return (
+    <div className={cn(
+      'bg-matrix-bg/60 border rounded-lg p-3 relative overflow-hidden',
+      position.isStale ? 'border-yellow-500/30' : 'border-matrix-primary/30'
+    )}>
+      {/* P&L accent bar */}
+      <motion.div
+        className={cn(
+          'absolute left-0 top-0 bottom-0 w-0.5',
+          isProfit ? 'bg-matrix-primary' : 'bg-red-400'
+        )}
+        animate={isProfit ? {
+          boxShadow: ['0 0 4px #00ff00', '0 0 8px #00ff00', '0 0 4px #00ff00']
+        } : {
+          boxShadow: ['0 0 4px #f87171', '0 0 8px #f87171', '0 0 4px #f87171']
+        }}
+        transition={{ duration: 2, repeat: Infinity }}
+      />
+
+      <div className="flex items-start justify-between mb-2 pl-2">
+        <div className="flex-1 min-w-0">
+          <p className="text-matrix-text-primary text-sm font-mono truncate">
+            {position.question}
+          </p>
+          <div className="flex items-center gap-2 mt-1">
+            <MatrixBadge variant={position.outcome === 'yes' ? 'success' : 'danger'} size="sm">
+              {position.outcome.toUpperCase()}
+            </MatrixBadge>
+            <MatrixBadge variant="default" size="sm">
+              {position.strategy.toUpperCase()}
+            </MatrixBadge>
+            {position.isStale && (
+              <span className="text-yellow-400 text-[10px] font-mono">STALE</span>
+            )}
+          </div>
+        </div>
+
+        {/* Close button */}
+        <div className="ml-2 flex-shrink-0">
+          {showConfirm ? (
+            <div className="flex items-center gap-1">
+              <MatrixButton variant="danger" size="sm" onClick={onConfirmClose} disabled={isClosing}>
+                {isClosing ? '...' : 'Yes'}
+              </MatrixButton>
+              <MatrixButton variant="ghost" size="sm" onClick={onCancelClose}>
+                No
+              </MatrixButton>
+            </div>
+          ) : (
+            <MatrixButton
+              variant="danger"
+              size="sm"
+              onClick={onRequestClose}
+              disabled={isClosing}
+              loading={isClosing}
+            >
+              Close
+            </MatrixButton>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2 text-xs font-mono pl-2">
+        <div>
+          <span className="text-matrix-text-secondary font-sans">Entry:</span>
+          <span className="text-matrix-primary ml-1">{(position.entryPrice * 100).toFixed(1)}¢</span>
+        </div>
+        <div>
+          <span className="text-matrix-text-secondary font-sans">Now:</span>
+          <span className="text-matrix-primary ml-1">{(position.currentPrice * 100).toFixed(1)}¢</span>
+        </div>
+        <div>
+          <span className="text-matrix-text-secondary font-sans">Value:</span>
+          <span className="text-matrix-primary ml-1">${currentValue.toFixed(2)}</span>
+        </div>
+        <div>
+          <span className="text-matrix-text-secondary font-sans">P&L:</span>
+          <span className={cn('ml-1', isProfit ? 'text-matrix-primary' : 'text-red-400')}>
+            {isProfit ? '+' : ''}{(position.pnlPercent * 100).toFixed(1)}%
+          </span>
+        </div>
+      </div>
+
+      {/* SL/TP indicators */}
+      <div className="flex items-center gap-4 mt-2 text-[10px] font-mono text-matrix-text-secondary pl-2">
+        <span>SL: -{(position.stopLossPercent * 100).toFixed(0)}%</span>
+        <span>TP: +{(position.takeProfitPercent * 100).toFixed(0)}%</span>
+        <span>Cost: ${position.costBasis.toFixed(2)}</span>
       </div>
     </div>
   )
@@ -171,12 +424,12 @@ const TradeCard: React.FC<{ trade: Trade }> = ({ trade }) => {
   const total = trade.price * trade.size
 
   return (
-    <div className="bg-matrix-bg border border-matrix-border/50 rounded-lg p-3">
+    <div className="bg-matrix-bg/60 border border-matrix-border/50 rounded-lg p-3">
       <div className="flex items-center justify-between mb-1">
         <MatrixBadge variant={isBuy ? 'success' : 'warning'} size="sm">
           {trade.side}
         </MatrixBadge>
-        <span className="text-matrix-text-secondary text-xs">
+        <span className="text-matrix-text-secondary text-xs font-sans">
           {new Date(trade.timestamp).toLocaleString()}
         </span>
       </div>

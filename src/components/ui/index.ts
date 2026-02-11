@@ -21,3 +21,8 @@ export { MatrixNumberInput } from './MatrixNumberInput'
 export type { MatrixNumberInputProps } from './MatrixNumberInput'
 export { MatrixForm, MatrixFieldGroup, MatrixFormRow, MatrixFormActions, MatrixFormSection } from './MatrixForm'
 export type { MatrixFormProps, MatrixFieldGroupProps, MatrixFormRowProps, MatrixFormActionsProps, MatrixFormSectionProps } from './MatrixForm'
+export { MatrixToastContainer } from './MatrixToast'
+
+// Animation utilities
+export { AnimatedCounter } from './AnimatedCounter'
+export { PageTransition } from './PageTransition'

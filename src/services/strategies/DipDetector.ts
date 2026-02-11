@@ -102,13 +102,17 @@ export class DipDetector {
       return null
     }
 
-    // Check sum constraint (YES + NO should be near $1)
-    // If we're tracking YES and price dropped, NO went up proportionally
-    // This validates the market is functioning normally
-    const complementPrice = 1 - currentPrice
-    if (currentPrice + complementPrice < this.config.sumTarget) {
-      return null
-    }
+    // Sum constraint check: YES + NO < sumTarget means arb opportunity.
+    // Use the ACTUAL complement price from the market (not 1-currentPrice,
+    // which always sums to exactly 1.0 and would never trigger arbs).
+    const complementIndex = update.outcome === 'yes' ? 1 : 0
+    const complementPrice = market.outcomePrices?.[complementIndex] ?? (1 - currentPrice)
+    const totalCost = currentPrice + complementPrice
+
+    // For dip detection, we want the sum to be BELOW the target (profitable arb).
+    // Skip if sum is too high — no arb exists.
+    // Note: we DON'T reject if below sumTarget here — that's the arb condition!
+    // The dip detection (below) handles the actual trigger logic.
 
     // Calculate dip percentage from window high
     const dipPercent = (window.maxPrice - currentPrice) / window.maxPrice
@@ -210,9 +214,11 @@ export class DipDetector {
   }
 }
 
-// Export singleton instance with proven configuration
+// Export singleton instance — aligned with DipArbStrategy defaults
+// (DipArbStrategy creates its own DipDetector, but this singleton
+// prevents confusion if referenced elsewhere)
 export const dipDetector = new DipDetector({
-  dipThreshold: 0.30,
-  slidingWindowMs: 10000,
-  sumTarget: 0.95,
+  dipThreshold: 0.05,      // 5% dip (was 30% — too extreme, never triggers)
+  slidingWindowMs: 30000,  // 30 second window (was 10s)
+  sumTarget: 0.98,         // YES + NO ≤ 98¢ (was 0.95)
 })

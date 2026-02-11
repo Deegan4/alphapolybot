@@ -11,13 +11,31 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    port: 4000,
     open: true,
     proxy: {
+      '/api/clob': {
+        target: 'https://clob.polymarket.com',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/api\/clob/, ''),
+        secure: true,
+      },
       '/api/gamma': {
         target: 'https://gamma-api.polymarket.com',
         changeOrigin: true,
         rewrite: path => path.replace(/^\/api\/gamma/, ''),
+        secure: true,
+      },
+      '/api/polygon-rpc2': {
+        target: 'https://1rpc.io/matic',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/api\/polygon-rpc2/, ''),
+        secure: true,
+      },
+      '/api/polygon-rpc': {
+        target: 'https://polygon-bor-rpc.publicnode.com',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/api\/polygon-rpc/, ''),
         secure: true,
       },
     },

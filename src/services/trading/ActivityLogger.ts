@@ -5,11 +5,37 @@ type ActivityCallback = (activity: ActivityItem) => void
 /**
  * Activity Logger Service
  * Centralized logging for all bot activities
+ * Persists to IndexedDB for crash recovery
  */
 export class ActivityLogger {
   private activities: ActivityItem[] = []
   private maxActivities = 500
   private callbacks = new Set<ActivityCallback>()
+  private hydrated = false
+
+  /**
+   * Hydrate activities from IndexedDB on startup
+   * Call once from App.tsx after storage is initialized
+   */
+  async loadFromStorage(): Promise<void> {
+    if (this.hydrated) return
+    this.hydrated = true
+
+    try {
+      // Dynamic import to avoid circular deps (storage imports types from trading)
+      const { indexedDBService } = await import('@/services/storage')
+      const stored = await indexedDBService.loadActivities(this.maxActivities)
+      if (stored.length > 0) {
+        // Merge stored activities (older) with any already-logged in-memory ones (newer)
+        const existingIds = new Set(this.activities.map(a => a.id))
+        const newFromStorage = stored.filter(a => !existingIds.has(a.id))
+        this.activities = [...this.activities, ...newFromStorage].slice(0, this.maxActivities)
+        console.log(`[ActivityLogger] Hydrated ${newFromStorage.length} activities from storage`)
+      }
+    } catch (error) {
+      console.warn('[ActivityLogger] Failed to hydrate from storage:', error)
+    }
+  }
 
   /**
    * Log an activity
@@ -37,9 +63,16 @@ export class ActivityLogger {
     // Notify subscribers
     this.notifySubscribers(activity)
 
+    // Persist to IndexedDB (fire-and-forget — non-critical)
+    import('@/services/storage').then(({ indexedDBService }) => {
+      indexedDBService.storeActivity(activity)
+    }).catch(() => {
+      // Silent fail — persistence is best-effort
+    })
+
     // Also log to console in debug mode
     if (import.meta.env.VITE_DEBUG_MODE === 'true') {
-      const logMethod = type === 'error' ? console.error : 
+      const logMethod = type === 'error' ? console.error :
                        type === 'warning' ? console.warn : console.log
       logMethod(`[${type.toUpperCase()}] ${message}`, data || '')
     }

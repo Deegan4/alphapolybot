@@ -1,4 +1,5 @@
 import React from 'react'
+import { motion } from 'framer-motion'
 import { cn } from '@/utils/cn'
 
 interface MatrixButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -9,7 +10,7 @@ interface MatrixButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement
 }
 
 /**
- * MatrixButton - Neon-styled button with Matrix theme
+ * MatrixButton - Neon-styled button with press animation
  */
 export const MatrixButton: React.FC<MatrixButtonProps> = ({
   variant = 'primary',
@@ -21,7 +22,7 @@ export const MatrixButton: React.FC<MatrixButtonProps> = ({
   ...props
 }) => {
   const baseStyles = `
-    relative font-mono font-medium
+    relative font-mono font-medium rounded-md
     transition-all duration-200
     border border-matrix-primary/30
     disabled:opacity-50 disabled:cursor-not-allowed
@@ -63,21 +64,32 @@ export const MatrixButton: React.FC<MatrixButtonProps> = ({
     lg: 'px-6 py-3 text-base',
   }
 
+  const isDisabled = disabled || loading
+
   return (
-    <button
+    <motion.button
       className={cn(baseStyles, variants[variant], sizes[size], className)}
-      disabled={disabled || loading}
-      {...props}
+      disabled={isDisabled}
+      whileTap={!isDisabled ? { scale: 0.97 } : undefined}
+      whileHover={!isDisabled ? { scale: 1.02 } : undefined}
+      transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+      {...(props as any)}
     >
       {loading ? (
         <span className="flex items-center justify-center gap-2">
-          <span className="animate-spin">◌</span>
+          <motion.span
+            animate={{ rotate: 360 }}
+            transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
+            className="inline-block"
+          >
+            ◌
+          </motion.span>
           <span>{children}</span>
         </span>
       ) : (
         children
       )}
-    </button>
+    </motion.button>
   )
 }
 

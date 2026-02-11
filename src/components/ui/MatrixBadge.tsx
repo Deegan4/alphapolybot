@@ -1,4 +1,5 @@
 import React from 'react'
+import { motion } from 'framer-motion'
 import { cn } from '@/utils/cn'
 
 interface MatrixBadgeProps {
@@ -10,7 +11,7 @@ interface MatrixBadgeProps {
 }
 
 /**
- * MatrixBadge - Status badge with Matrix theme
+ * MatrixBadge - Status badge with pop-in animation
  */
 export const MatrixBadge: React.FC<MatrixBadgeProps> = ({
   variant = 'default',
@@ -24,7 +25,7 @@ export const MatrixBadge: React.FC<MatrixBadgeProps> = ({
     success: 'bg-matrix-primary/10 text-matrix-primary border-matrix-primary/30',
     warning: 'bg-matrix-secondary/10 text-matrix-secondary border-matrix-secondary/30',
     danger: 'bg-red-500/10 text-red-400 border-red-500/30',
-    info: 'bg-blue-500/10 text-blue-400 border-blue-500/30',
+    info: 'bg-matrix-cyan/10 text-matrix-cyan border-matrix-cyan/30',
   }
 
   const sizes = {
@@ -33,7 +34,11 @@ export const MatrixBadge: React.FC<MatrixBadgeProps> = ({
   }
 
   return (
-    <span
+    <motion.span
+      initial={{ scale: 0.8, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+      layout
       className={cn(
         'inline-flex items-center gap-1.5 font-mono border rounded',
         variants[variant],
@@ -49,7 +54,7 @@ export const MatrixBadge: React.FC<MatrixBadgeProps> = ({
               variant === 'success' && 'bg-matrix-primary',
               variant === 'warning' && 'bg-matrix-secondary',
               variant === 'danger' && 'bg-red-400',
-              variant === 'info' && 'bg-blue-400',
+              variant === 'info' && 'bg-matrix-cyan',
               variant === 'default' && 'bg-matrix-text-secondary'
             )}
           />
@@ -59,14 +64,14 @@ export const MatrixBadge: React.FC<MatrixBadgeProps> = ({
               variant === 'success' && 'bg-matrix-primary',
               variant === 'warning' && 'bg-matrix-secondary',
               variant === 'danger' && 'bg-red-400',
-              variant === 'info' && 'bg-blue-400',
+              variant === 'info' && 'bg-matrix-cyan',
               variant === 'default' && 'bg-matrix-text-secondary'
             )}
           />
         </span>
       )}
       {children}
-    </span>
+    </motion.span>
   )
 }
 
