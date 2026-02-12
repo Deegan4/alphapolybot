@@ -745,6 +745,76 @@ export class CLOBClient extends BaseApiClient {
     }
   }
 
+  /**
+   * Test the full order signing pipeline against the live CLOB.
+   * Places a $1 GTC limit buy well below best ask (won't fill), then cancels it.
+   * Returns success/failure with error details.
+   */
+  async testOrderCycle(): Promise<{ success: boolean; error?: string; orderId?: string }> {
+    try {
+      if (!this.wallet || !this.creds) {
+        return { success: false, error: 'Wallet or CLOB credentials not initialized' }
+      }
+
+      // Find a liquid binary market via GammaClient
+      const { gammaClient } = await import('@/services/api')
+      const markets = await gammaClient.getMarkets({
+        active: true,
+        closed: false,
+        limit: 10,
+        sort: 'volume24hr',
+      })
+
+      const binary = markets.find(m =>
+        m.clobTokenIds && m.clobTokenIds.length === 2 && m.outcomes?.length === 2
+      )
+      if (!binary || !binary.clobTokenIds?.[0]) {
+        return { success: false, error: 'No active binary markets found' }
+      }
+
+      const tokenId = binary.clobTokenIds[0] // YES token
+      console.log(`[CLOBClient] Test order: using market "${binary.question}" token=${tokenId.slice(0, 10)}...`)
+
+      // Get best ask to price our order well below it
+      const prices = await this.getBestPrices(tokenId)
+      if (!prices || prices.ask <= 0) {
+        return { success: false, error: 'Could not get order book prices' }
+      }
+
+      // Get tick size for proper rounding
+      const tickSize = await this.getTickSize(tokenId)
+      const testPrice = Math.max(tickSize, prices.ask - tickSize * 5) // 5 ticks below ask
+
+      // Place a $1 GTC limit buy (will sit on book, not fill)
+      const result = await this.placeOrder({
+        tokenId,
+        side: 'BUY',
+        price: testPrice,
+        size: 1.0,
+        orderType: 'GTC',
+        negRisk: binary.negRisk ?? false,
+      })
+
+      if (!result.success || !result.orderId) {
+        return { success: false, error: result.error ?? 'Order placement failed' }
+      }
+
+      console.log(`[CLOBClient] Test order placed: ${result.orderId}, cancelling...`)
+
+      // Cancel it immediately
+      const cancelled = await this.cancelOrder(result.orderId)
+      if (!cancelled) {
+        console.warn(`[CLOBClient] Test order cancel failed — order may still be on book`)
+      }
+
+      console.log(`[CLOBClient] Test order cycle complete — signing pipeline verified`)
+      return { success: true, orderId: result.orderId }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      return { success: false, error: msg }
+    }
+  }
+
   async getOpenOrders(tokenId?: string): Promise<Order[]> {
     try {
       if (!this.wallet) return []

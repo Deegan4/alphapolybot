@@ -183,6 +183,14 @@ export class CalibrationTracker {
   }
 
   /**
+   * Get total number of recorded predictions (resolved + unresolved).
+   * Used to decide whether enough data exists to trust calibration adjustments.
+   */
+  getTotalPredictions(): number {
+    return this.predictions.length
+  }
+
+  /**
    * Get number of unresolved predictions (markets we're tracking).
    */
   get unresolvedCount(): number {

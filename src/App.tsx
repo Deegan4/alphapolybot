@@ -160,6 +160,43 @@ const App: React.FC = () => {
     initializeApp()
   }, [])
 
+  // Tab lifecycle safety: warn before closing/refreshing with live strategies running
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const currentDryRun = useSettingsStore.getState().dryRun
+      if (currentDryRun) return // No warning in dry-run mode — nothing at stake
+
+      const states = strategyManager.getStates()
+      const anyLive = states.some(s => s.status === 'running')
+      const trackedPositions = positionLifecycleManager.count
+      if (anyLive || trackedPositions > 0) {
+        e.preventDefault()
+        // Modern browsers ignore custom messages, but setting returnValue triggers the dialog
+        e.returnValue = 'Strategies are running with real money. Are you sure you want to leave?'
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'hidden') return
+      const currentDryRun = useSettingsStore.getState().dryRun
+      if (currentDryRun) return
+
+      const states = strategyManager.getStates()
+      const anyLive = states.some(s => s.status === 'running')
+      if (anyLive) {
+        // Fire-and-forget toast warning via activity logger
+        activityLogger.logWarning('Tab hidden — WebSocket connections may degrade. SL/TP monitoring continues but may be slower.')
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [])
+
   // Sync dry run + GTC fallback state with trading service on startup and changes
   useEffect(() => {
     tradingService.setConfig({

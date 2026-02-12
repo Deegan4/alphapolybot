@@ -347,6 +347,8 @@ export const useSettingsStore = create<SettingsStore>()(
             consecutiveFailureLimit: 8,
             microMinCompositeSignal: 0.30,
             fwMinProfitBps: 30,
+            btcEnableBtc: true,
+            btcEnableEth: true,
           })
           // Push to singletons via dynamic imports (same pattern as individual setters)
           import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({
@@ -361,6 +363,9 @@ export const useSettingsStore = create<SettingsStore>()(
           import('@/services/strategies/MicrostructureMomentumStrategy').then(m => m.microMomentumStrategy.setMicroConfig({
             minCompositeSignal: 0.30,
           })).catch(() => {})
+          import('@/services/strategies/LLMPredictionStrategy').then(m => m.llmPredictionStrategy.setLLMConfig?.({
+            excludedCategories: ['Crypto Price'],
+          })).catch(() => {})
         } else {
           // Restore conservative defaults
           set({
@@ -372,6 +377,8 @@ export const useSettingsStore = create<SettingsStore>()(
             consecutiveFailureLimit: DEFAULT_SETTINGS.consecutiveFailureLimit,
             microMinCompositeSignal: DEFAULT_SETTINGS.microMinCompositeSignal,
             fwMinProfitBps: DEFAULT_SETTINGS.fwMinProfitBps,
+            btcEnableBtc: DEFAULT_SETTINGS.btcEnableBtc,
+            btcEnableEth: DEFAULT_SETTINGS.btcEnableEth,
           })
           import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({
             dailyLossLimit: DEFAULT_SETTINGS.dailyLossLimit,

@@ -361,6 +361,8 @@ const WalletSettings: React.FC = () => {
   const [proxyInput, setProxyInput] = useState(proxyAddress || '')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'pass' | 'fail'>('idle')
+  const [testError, setTestError] = useState('')
 
   const handleConnect = async () => {
     if (!seedPhrase.trim()) {
@@ -484,6 +486,47 @@ const WalletSettings: React.FC = () => {
                 <MatrixButton onClick={handleApprove} loading={loading} size="sm">
                   Approve Tokens
                 </MatrixButton>
+              )}
+            </div>
+
+            {/* Test Connection — verify order signing pipeline */}
+            <div className="bg-agent-bg/60 rounded-lg p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-agent-text text-sm font-bold">Test Connection</h4>
+                  <p className="text-agent-text-muted text-xs">Places and cancels a $1 GTC order to verify signing works</p>
+                </div>
+                <MatrixButton
+                  size="sm"
+                  loading={testStatus === 'testing'}
+                  onClick={async () => {
+                    setTestStatus('testing')
+                    setTestError('')
+                    try {
+                      const { clobClient } = await import('@/services/api')
+                      const result = await clobClient.testOrderCycle()
+                      if (result.success) {
+                        setTestStatus('pass')
+                        const { readinessChecker } = await import('@/services/trading/ReadinessChecker')
+                        readinessChecker.setTestOrderResult(result)
+                      } else {
+                        setTestStatus('fail')
+                        setTestError(result.error ?? 'Unknown error')
+                      }
+                    } catch (err) {
+                      setTestStatus('fail')
+                      setTestError(err instanceof Error ? err.message : 'Test failed')
+                    }
+                  }}
+                >
+                  {testStatus === 'pass' ? 'Passed' : testStatus === 'fail' ? 'Retry' : 'Test'}
+                </MatrixButton>
+              </div>
+              {testStatus === 'pass' && (
+                <div className="text-green-400 text-xs font-mono">Order signed, placed, and cancelled successfully</div>
+              )}
+              {testStatus === 'fail' && testError && (
+                <div className="text-red-400 text-xs font-mono">{testError}</div>
               )}
             </div>
 

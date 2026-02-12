@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useSettingsStore, useWalletStore } from '@/stores'
-import { riskManager, rejectionTracker } from '@/services/trading'
+import { riskManager, rejectionTracker, readinessChecker } from '@/services/trading'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import type { RejectionSummary } from '@/services/trading/RejectionTracker'
 
@@ -122,6 +122,21 @@ function computeBanner(ctx: {
         label: 'Go to Settings',
         onClick: () => { window.location.hash = ''; window.location.pathname = '/settings' },
       },
+    }
+  }
+
+  // 2b. Critical readiness checks failing (balance, credentials, etc.)
+  const readiness = readinessChecker.getReport()
+  if (!readiness.allCriticalPass && readiness.failCount > 0) {
+    const firstFail = readiness.checks.find(c => c.status === 'fail')
+    return {
+      severity: 'yellow',
+      message: `SETUP INCOMPLETE (${readiness.failCount})`,
+      detail: firstFail?.detail ?? 'Check readiness panel for details',
+      action: firstFail?.action ? {
+        label: firstFail.action.label,
+        onClick: () => { window.location.pathname = firstFail!.action!.route },
+      } : undefined,
     }
   }
 

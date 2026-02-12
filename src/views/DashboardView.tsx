@@ -7,6 +7,7 @@ import { RecentTradesGrid } from '@/components/dashboard/RecentTradesGrid'
 import { ActivitySidebar } from '@/components/dashboard/ActivitySidebar'
 import { HistoryView } from '@/components/dashboard/HistoryView'
 import { DiagnosticsBanner } from '@/components/dashboard/DiagnosticsBanner'
+import { ReadinessPanel } from '@/components/dashboard/ReadinessPanel'
 import { useBalanceHistory } from '@/hooks/useBalanceHistory'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import { positionLifecycleManager, activityLogger } from '@/services/trading'
@@ -63,8 +64,9 @@ const DashboardView: React.FC = () => {
         <>
         <DiagnosticsBanner />
         <div className="flex-1 flex gap-3 p-4 min-h-0">
-          {/* Left column — Portfolio */}
+          {/* Left column — Readiness + Portfolio */}
           <div className="w-[280px] shrink-0 flex flex-col min-h-0">
+            <ReadinessPanel />
             <PortfolioPanel />
           </div>
 

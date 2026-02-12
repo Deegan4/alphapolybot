@@ -9,11 +9,23 @@ interface StrategyDropdownProps {
 /** Short display labels for each strategy */
 const SHORT_NAMES: Record<string, string> = {
   'llm-prediction': 'LLM',
-  'dip-arb': 'Dip Arb',
-  'project-fw': 'FW Arb',
   'btc-updown': 'BTC Up/Down',
   'micro-momentum': 'Micro Mom',
+  'project-fw': 'FW Arb',
+  'dip-arb': 'Dip Arb',
 }
+
+/** Subtitle descriptions for each strategy */
+const SUBTITLES: Record<string, string> = {
+  'llm-prediction': 'AI analysis',
+  'btc-updown': '15-min crypto',
+  'micro-momentum': 'Order flow',
+  'project-fw': 'Spread arb (rare)',
+  'dip-arb': 'Dip arb (rare)',
+}
+
+/** Display order — most likely to trade first */
+const STRATEGY_ORDER = ['llm-prediction', 'btc-updown', 'micro-momentum', 'project-fw', 'dip-arb']
 
 const STATUS_DOT: Record<string, string> = {
   running: 'bg-agent-green',
@@ -111,16 +123,27 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
 
       {/* Strategy rows */}
       <div className="py-1">
-        {strategies.map((s) => (
+        {[...strategies].sort((a, b) => {
+          const ai = STRATEGY_ORDER.indexOf(a.id)
+          const bi = STRATEGY_ORDER.indexOf(b.id)
+          return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi)
+        }).map((s) => (
           <div
             key={s.id}
             className="flex items-center justify-between px-3 py-1.5 hover:bg-agent-elevated/50 transition-colors"
           >
             <div className="flex items-center gap-2">
               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[s.status] || STATUS_DOT.idle}`} />
-              <span className="text-xs font-mono text-agent-text">
-                {SHORT_NAMES[s.id] || s.name}
-              </span>
+              <div className="flex flex-col">
+                <span className="text-xs font-mono text-agent-text leading-tight">
+                  {SHORT_NAMES[s.id] || s.name}
+                </span>
+                {SUBTITLES[s.id] && (
+                  <span className="text-[9px] font-mono text-agent-text-muted leading-tight">
+                    {SUBTITLES[s.id]}
+                  </span>
+                )}
+              </div>
               {s.status === 'error' && (
                 <span className="text-[8px] font-mono text-agent-red">ERR</span>
               )}

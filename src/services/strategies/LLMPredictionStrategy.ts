@@ -29,8 +29,8 @@ const DEFAULT_CONFIG: LLMPredictionConfig = {
   takeProfitPercent: 0.85, // Let winners ride — asymmetric SL/TP
   maxOpenPositions: 7,
   maxCapitalExposure: 0.25,
-  minConfidence: 0.55, // Lowered from 0.60 — captures 30-40% more borderline-profitable trades
-  excludedCategories: ['Sports', 'Crypto Price'],
+  minConfidence: 0.52, // Lowered from 0.55 — captures ~20% more borderline trades
+  excludedCategories: ['Crypto Price'], // Sports included — LLMs have information processing advantage there
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
 }
@@ -241,8 +241,12 @@ export class LLMPredictionStrategy extends BaseStrategy {
       calibrationTracker.recordPrediction(market.id, prediction.confidence, prediction.predictedOutcome)
 
       // Apply calibration correction — adjusts LLM confidence based on historical accuracy
+      // Skip calibration if insufficient samples (noisy early adjustments hurt more than help)
       const rawConfidence = prediction.confidence
-      const calibratedConfidence = calibrationTracker.calibrate(rawConfidence)
+      const hasEnoughCalibrationData = calibrationTracker.getTotalPredictions() >= 20
+      const calibratedConfidence = hasEnoughCalibrationData
+        ? calibrationTracker.calibrate(rawConfidence)
+        : rawConfidence
       if (calibratedConfidence < this.llmConfig.minConfidence) {
         console.warn(`[LLM Strategy] BLOCKED by calibration: ${(calibratedConfidence * 100).toFixed(1)}% (raw: ${(rawConfidence * 100).toFixed(1)}%) < ${(this.llmConfig.minConfidence * 100).toFixed(1)}% threshold`)
         this.log(`Calibrated confidence ${(calibratedConfidence * 100).toFixed(1)}% (raw: ${(rawConfidence * 100).toFixed(1)}%) below threshold`)

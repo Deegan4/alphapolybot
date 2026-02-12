@@ -72,6 +72,8 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     this.setStatus('idle')
   }
 
+  private warmupUntil = 0 // Timestamp when warmup completes
+
   async start(): Promise<void> {
     if (this._status === 'running') return
 
@@ -92,6 +94,12 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     // Discover and subscribe to markets
     await this.refreshMarkets()
 
+    // 2-minute warmup — collect microstructure snapshots before first trade attempt
+    const WARMUP_MS = 2 * 60 * 1000
+    this.warmupUntil = Date.now() + WARMUP_MS
+    this.log(`Warming up for ${WARMUP_MS / 1000}s — collecting microstructure snapshots before trading`)
+    this.emit('warmup', { endsAt: this.warmupUntil })
+
     // Start scanning for signals
     this.scanInterval = window.setInterval(
       () => this.scanForSignals(),
@@ -104,7 +112,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       5 * 60 * 1000,
     )
 
-    activityLogger.logSystem('Microstructure Momentum Strategy started')
+    activityLogger.logSystem('Microstructure Momentum Strategy started (warming up)')
   }
 
   async stop(): Promise<void> {
@@ -130,6 +138,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     this.subscribedTokens.clear()
     this.positionMarkets.clear()
     this.lastTradeTimes.clear()
+    this.warmupUntil = 0
 
     this.setStatus('idle')
     activityLogger.logSystem('Microstructure Momentum Strategy stopped')
@@ -188,6 +197,13 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
   private async scanForSignals(): Promise<void> {
     if (!this._enabled || this._status !== 'running') return
+
+    // Warmup gate — don't trade until we've collected enough microstructure data
+    if (Date.now() < this.warmupUntil) {
+      const remaining = Math.ceil((this.warmupUntil - Date.now()) / 1000)
+      this.log(`[Warmup] ${remaining}s remaining — collecting snapshots, not trading yet`)
+      return
+    }
 
     // Check position limits
     let microPositionCount = 0
