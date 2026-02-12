@@ -124,6 +124,16 @@ export class RTDSService {
    * Subscribe to crypto price updates for given symbols.
    * Must be called after connect().
    */
+  /** Map our short symbols to Polymarket RTDS trading pair notation */
+  private static SYMBOL_MAP: Record<string, string> = {
+    BTC: 'BTCUSDT', ETH: 'ETHUSDT', SOL: 'SOLUSDT',
+  }
+
+  /** Reverse map: BTCUSDT -> BTC */
+  private static PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL'> = {
+    BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL',
+  }
+
   subscribeCryptoPrices(symbols: ('BTC' | 'ETH' | 'SOL')[]): void {
     if (this.ws?.readyState !== WebSocket.OPEN) {
       console.warn('[RTDS] Cannot subscribe — not connected')
@@ -132,8 +142,8 @@ export class RTDSService {
 
     const subscriptions = symbols.map(symbol => ({
       topic: 'crypto_prices',
-      type: 'price_update',
-      filters: symbol,
+      type: 'update',
+      filters: JSON.stringify({ symbol: RTDSService.SYMBOL_MAP[symbol] || `${symbol}USDT` }),
     }))
 
     this.ws.send(JSON.stringify({
@@ -152,8 +162,8 @@ export class RTDSService {
 
     const subscriptions = symbols.map(symbol => ({
       topic: 'crypto_prices',
-      type: 'price_update',
-      filters: symbol,
+      type: 'update',
+      filters: JSON.stringify({ symbol: RTDSService.SYMBOL_MAP[symbol] || `${symbol}USDT` }),
     }))
 
     this.ws.send(JSON.stringify({
@@ -196,37 +206,79 @@ export class RTDSService {
 
   private handleMessage(data: string): void {
     this.messageCount++
-    if (this.messageCount === 1) {
-      console.log('[RTDS] First message received — pipeline active')
+    if (this.messageCount <= 3) {
+      console.log(`[RTDS] Message #${this.messageCount}:`, data.substring(0, 300))
     }
 
+    // Skip empty or whitespace-only messages (connection ack frames)
+    if (!data || !data.trim()) return
+
     try {
-      const msg = JSON.parse(data) as RTDSMessage
+      const msg = JSON.parse(data)
 
       // Ignore pong keepalive
       if (msg.type === 'pong') return
 
-      if (msg.topic === 'crypto_prices') {
+      // Try structured format: { topic: 'crypto_prices', payload: { symbol, price } }
+      if (msg.topic === 'crypto_prices' && msg.payload) {
         this.handleCryptoPriceUpdate(msg.payload as RTDSCryptoPricePayload)
-      } else {
-        console.debug('[RTDS] Unknown topic:', msg.topic)
+        return
+      }
+
+      // Try flat format: { symbol: 'BTC', price: 97000 } or { asset: 'BTC', price: 97000 }
+      if (msg.price != null && (msg.symbol || msg.asset)) {
+        this.handleCryptoPriceUpdate({
+          symbol: (msg.symbol || msg.asset) as string,
+          price: msg.price,
+          change24h: msg.change24h ?? msg.change_24h,
+          volume24h: msg.volume24h ?? msg.volume_24h,
+        })
+        return
+      }
+
+      // Try nested data format: { type: 'price_update', data: { symbol, price } }
+      if (msg.data?.price != null && (msg.data?.symbol || msg.data?.asset)) {
+        this.handleCryptoPriceUpdate({
+          symbol: (msg.data.symbol || msg.data.asset) as string,
+          price: msg.data.price,
+        })
+        return
+      }
+
+      // Try array of prices: { prices: [{ symbol: 'BTC', price: 97000 }, ...] }
+      if (Array.isArray(msg.prices)) {
+        for (const p of msg.prices) {
+          if (p.symbol && p.price != null) {
+            this.handleCryptoPriceUpdate({ symbol: p.symbol, price: p.price })
+          }
+        }
+        return
+      }
+
+      if (this.messageCount <= 5) {
+        console.warn('[RTDS] Unrecognized message format:', Object.keys(msg))
       }
     } catch (error) {
       console.error('[RTDS] Failed to parse message:', error)
     }
   }
 
-  private handleCryptoPriceUpdate(payload: RTDSCryptoPricePayload): void {
-    if (!payload?.symbol || !payload?.price) return
+  private handleCryptoPriceUpdate(payload: Record<string, unknown>): void {
+    if (!payload?.symbol) return
 
-    // Normalize symbol to our format
-    const symbol = payload.symbol.toUpperCase() as 'BTC' | 'ETH' | 'SOL'
+    // Payload uses `value` (per Polymarket docs) or `price` (our fallback)
+    const priceValue = (payload.value ?? payload.price) as number | undefined
+    if (priceValue == null || priceValue <= 0) return
+
+    // Normalize symbol: "solusdt" -> "SOLUSDT" -> "SOL", or "BTC" -> "BTC"
+    const rawSymbol = (payload.symbol as string).toUpperCase().replace(/USDT$|\/USD$/i, '')
+    const symbol = rawSymbol as 'BTC' | 'ETH' | 'SOL'
     if (!['BTC', 'ETH', 'SOL'].includes(symbol)) return
 
     const price: RTDSAssetPrice = {
       symbol,
-      priceUSD: payload.price,
-      timestamp: Date.now(),
+      priceUSD: priceValue,
+      timestamp: (payload.timestamp as number) || Date.now(),
       source: 'rtds',
     }
 

@@ -9,6 +9,7 @@ import { KellySizer } from '@/services/trading/KellySizer'
 import { calibrationTracker } from '@/services/trading/CalibrationTracker'
 import { microstructureAnalyzer } from '@/services/trading/MicrostructureAnalyzer'
 import { tradeLogger } from '@/services/trading/TradeLogger'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 const DEFAULT_CONFIG: LLMPredictionConfig = {
   baseSize: 0.05, // 5% of capital
@@ -20,12 +21,12 @@ const DEFAULT_CONFIG: LLMPredictionConfig = {
   minLiquidity: 1000, // Lowered: was 2000
   minVolume24h: 500, // Lowered: was 1000
   maxSpread: 0.05,
-  maxCreatedHours: 0, // 0 = no age limit (was 48 — killed all established markets)
+  maxCreatedHours: 0, // 0 = no age limit — scan ALL active markets (was 24h, too restrictive)
   orderType: 'FOK',
   maxSlippage: 0.02,
   executionCooldown: 5000,
   stopLossPercent: 0.15,
-  takeProfitPercent: 0.30,
+  takeProfitPercent: 0.85, // Let winners ride — asymmetric SL/TP
   maxOpenPositions: 7,
   maxCapitalExposure: 0.25,
   minConfidence: 0.55, // Lowered from 0.60 — captures 30-40% more borderline-profitable trades
@@ -97,11 +98,11 @@ export class LLMPredictionStrategy extends BaseStrategy {
       clearInterval(this.scanInterval)
     }
 
-    // Start scanning loop with adaptive timing
-    this.startAdaptiveScanLoop()
-
-    // Run first scan immediately
+    // Run first scan immediately, then start the adaptive loop
     await this.runScanCycle()
+
+    // Start scanning loop with adaptive timing (tick() will schedule the NEXT scan)
+    this.startAdaptiveScanLoop()
 
     activityLogger.logSystem('LLM Prediction Strategy started')
   }
@@ -153,7 +154,8 @@ export class LLMPredictionStrategy extends BaseStrategy {
       this.scanInterval = window.setTimeout(() => tick(), nextDelay)
     }
 
-    tick()
+    // Schedule the first repeat after default delay (start() already ran the initial scan)
+    this.scanInterval = window.setTimeout(() => tick(), 45_000)
   }
 
   /**
@@ -194,11 +196,13 @@ export class LLMPredictionStrategy extends BaseStrategy {
         .filter(p => p.strategy === 'llm').length
       if (llmPositionCount >= this.llmConfig.maxOpenPositions) {
         this.log(`Maximum open positions reached (${llmPositionCount}/${this.llmConfig.maxOpenPositions}), skipping analysis`)
+        activityLogger.logWarning(`LLM scan skipped: ${llmPositionCount}/${this.llmConfig.maxOpenPositions} positions open — close or remove stale positions to resume trading`)
+        rejectionTracker.record('position_limit', 'llm', `${llmPositionCount}/${this.llmConfig.maxOpenPositions} positions`)
         return
       }
 
       // Analyze top markets
-      for (const market of eligible.slice(0, 5)) {
+      for (const market of eligible.slice(0, 15)) {
         if (!this._enabled) break
 
         await this.analyzeAndTrade(market)
@@ -229,6 +233,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
       // Check confidence threshold
       if (prediction.confidence < this.llmConfig.minConfidence) {
         this.log(`Confidence ${(prediction.confidence * 100).toFixed(1)}% below threshold ${(this.llmConfig.minConfidence * 100).toFixed(1)}%`)
+        rejectionTracker.record('confidence', 'llm', `${(prediction.confidence * 100).toFixed(1)}% < ${(this.llmConfig.minConfidence * 100).toFixed(1)}%`)
         return
       }
 
@@ -241,6 +246,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
       if (calibratedConfidence < this.llmConfig.minConfidence) {
         console.warn(`[LLM Strategy] BLOCKED by calibration: ${(calibratedConfidence * 100).toFixed(1)}% (raw: ${(rawConfidence * 100).toFixed(1)}%) < ${(this.llmConfig.minConfidence * 100).toFixed(1)}% threshold`)
         this.log(`Calibrated confidence ${(calibratedConfidence * 100).toFixed(1)}% (raw: ${(rawConfidence * 100).toFixed(1)}%) below threshold`)
+        rejectionTracker.record('calibration', 'llm', `calibrated ${(calibratedConfidence * 100).toFixed(1)}% < ${(this.llmConfig.minConfidence * 100).toFixed(1)}%`)
         return
       }
 
@@ -257,6 +263,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
             finalConfidence = fusion.confidence
             if (finalConfidence < this.llmConfig.minConfidence) {
               this.log(`Fused confidence ${(finalConfidence * 100).toFixed(1)}% below threshold after disagreement — skipping`)
+              rejectionTracker.record('confidence', 'llm', `fusion disagreement: ${(finalConfidence * 100).toFixed(1)}%`)
               return
             }
           }
@@ -281,6 +288,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
           if (finalConfidence < this.llmConfig.minConfidence) {
             console.warn(`[LLM Strategy] Microstructure penalty dropped confidence below threshold (market: ${market.question.substring(0, 50)})`)
             activityLogger.logInfo(`Microstructure penalty rejection: ${market.question.substring(0, 40)}...`)
+            rejectionTracker.record('microstructure', 'llm', `penalized to ${(finalConfidence * 100).toFixed(1)}%`)
             return
           }
         }

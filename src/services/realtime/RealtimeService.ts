@@ -372,6 +372,11 @@ export class RealtimeService {
     const sells = message.sells || []
     const bestBid = buys.length > 0 ? parseFloat(String(buys[0].price)) : 0
     const bestAsk = sells.length > 0 ? parseFloat(String(sells[0].price)) : 0
+
+    // Skip empty book events — no bids AND no asks means the book was cleared,
+    // not that the price is 0. Emitting mid=0 causes PLM to false-trigger SL at -100%.
+    if (bestBid <= 0 && bestAsk <= 0) return
+
     const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : (bestBid || bestAsk)
 
     const priceData: PriceData = {

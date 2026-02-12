@@ -220,10 +220,23 @@ export class UserChannelService {
       console.log('[UserChannel] First message received — pipeline active')
     }
 
+    // Handle non-JSON responses (bare 'pong', 'PONG', 'INVALID OPERATION', etc.)
+    // Same approach as RealtimeService: skip anything that isn't JSON-shaped
+    if (!data.startsWith('{') && !data.startsWith('[')) {
+      const upper = data.trim().toUpperCase()
+      if (upper === 'PONG') return  // Normal keepalive response — silent
+      if (upper === 'INVALID OPERATION') {
+        console.error('[UserChannel] Server rejected operation — check auth credentials or subscription payload')
+      } else if (data.trim().length > 0) {
+        console.warn(`[UserChannel] Non-JSON message: "${data.trim().slice(0, 200)}"`)
+      }
+      return
+    }
+
     try {
       const msg = JSON.parse(data) as Record<string, unknown>
 
-      // Ignore pong keepalive responses
+      // Also ignore JSON-wrapped pong (in case server format varies)
       if (msg.type === 'pong' || msg.event_type === 'pong') return
 
       const eventType = (msg.event_type as string) || ''
@@ -241,7 +254,9 @@ export class UserChannelService {
         console.debug('[UserChannel] Unknown event_type:', eventType, msg)
       }
     } catch (error) {
-      console.error('[UserChannel] Failed to parse message:', error)
+      // JSON.parse should never fail here (we already checked for '{' / '[' prefix)
+      // but guard against malformed JSON just in case
+      console.error('[UserChannel] Failed to parse JSON message:', error, `data="${data.slice(0, 200)}"`)
     }
   }
 
@@ -271,7 +286,9 @@ export class UserChannelService {
     this.stopPingInterval()
     this.pingInterval = window.setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: 'ping' }))
+        // Polymarket CLOB WS expects bare 'ping' string, NOT JSON
+        // (same as market channel in RealtimeService)
+        this.ws.send('ping')
       }
     }, 30_000) // 30s keepalive, same as market channel
   }

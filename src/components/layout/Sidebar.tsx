@@ -51,9 +51,9 @@ const navItems: NavItem[] = [
 ]
 
 /**
- * Sidebar - Glassmorphism nav with animated active indicator
+ * SidebarContent — the inner content, reused in both desktop and mobile drawer
  */
-export const Sidebar: React.FC = () => {
+const SidebarContent: React.FC<{ onNavigate?: () => void }> = ({ onNavigate }) => {
   const { isConnected, address, proxyAddress, usdcBalance, balance } = useWalletStore()
 
   const formatAddress = (addr: string) => {
@@ -61,7 +61,7 @@ export const Sidebar: React.FC = () => {
   }
 
   return (
-    <aside className="w-64 glass-card border-r border-matrix-border/30 flex flex-col h-full">
+    <>
       {/* Logo */}
       <div className="p-4 border-b border-matrix-border/30">
         <h1 className="font-mono text-xl font-bold flex items-center gap-2">
@@ -108,7 +108,7 @@ export const Sidebar: React.FC = () => {
             </div>
             {usdcBalance === 0 && balance === 0 && !proxyAddress && (
               <div className="text-yellow-400/80 text-[10px] font-sans leading-tight">
-                No funds found. If you use Polymarket via email login, set your Proxy Address in Settings → Wallet.
+                No funds found. If you use Polymarket via email login, set your Proxy Address in Settings.
               </div>
             )}
           </div>
@@ -121,12 +121,13 @@ export const Sidebar: React.FC = () => {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-2">
+      <nav className="flex-1 p-2" aria-label="Main navigation">
         <ul className="space-y-1">
           {navItems.map((item) => (
             <li key={item.path}>
               <NavLink
                 to={item.path}
+                onClick={onNavigate}
                 className={({ isActive }) =>
                   cn(
                     'relative flex items-center gap-3 px-3 py-2.5 rounded-md font-mono text-sm transition-colors',
@@ -159,10 +160,51 @@ export const Sidebar: React.FC = () => {
       <div className="p-4 border-t border-matrix-border/30">
         <div className="h-px bg-gradient-to-r from-transparent via-matrix-primary/30 to-transparent mb-3" />
         <div className="text-matrix-text-muted text-xs font-sans">
-          v1.0.0 • Neo Matrix
+          v1.0.0
         </div>
       </div>
+    </>
+  )
+}
+
+/**
+ * Sidebar - Desktop: fixed left column. Mobile: hidden (uses MobileDrawer from AppLayout).
+ */
+export const Sidebar: React.FC = () => {
+  return (
+    <aside className="hidden md:flex w-64 glass-card border-r border-matrix-border/30 flex-col h-full">
+      <SidebarContent />
     </aside>
+  )
+}
+
+/**
+ * MobileDrawer - Slide-over nav for small screens
+ */
+export const MobileDrawer: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClose }) => {
+  return (
+    <>
+      {/* Backdrop */}
+      {open && (
+        <motion.div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onClick={onClose}
+        />
+      )}
+
+      {/* Drawer panel */}
+      <motion.aside
+        className="fixed top-0 left-0 bottom-0 w-64 glass-card border-r border-matrix-border/30 flex flex-col z-50 md:hidden"
+        initial={{ x: '-100%' }}
+        animate={{ x: open ? 0 : '-100%' }}
+        transition={{ type: 'spring', stiffness: 350, damping: 30 }}
+      >
+        <SidebarContent onNavigate={onClose} />
+      </motion.aside>
+    </>
   )
 }
 

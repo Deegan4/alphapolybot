@@ -9,6 +9,7 @@ import { tradeLogger } from '@/services/trading/TradeLogger'
 import { KellySizer } from '@/services/trading/KellySizer'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 // ==========================================
 // DEFAULTS
@@ -25,7 +26,7 @@ const DEFAULT_CONFIG: MicroMomentumConfig = {
   stopLossPercent: 0.15,
   takeProfitPercent: 0.20,
   maxHoldMs: 30 * 60 * 1000, // 30 minutes
-  marketBatchSize: 40,
+  marketBatchSize: 80,
 }
 
 // ==========================================
@@ -197,6 +198,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     } catch { /* PLM not available */ }
 
     if (microPositionCount >= this.microConfig.maxConcurrentPositions) {
+      rejectionTracker.record('position_limit', 'micro', `${microPositionCount}/${this.microConfig.maxConcurrentPositions} micro positions`)
       return
     }
 
@@ -227,10 +229,16 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       // All must pass for a trade to fire
 
       // 1. Composite signal strength
-      if (Math.abs(signal.compositeSignal) < this.microConfig.minCompositeSignal) continue
+      if (Math.abs(signal.compositeSignal) < this.microConfig.minCompositeSignal) {
+        rejectionTracker.record('confidence', 'micro', `composite ${signal.compositeSignal.toFixed(2)} too weak`)
+        continue
+      }
 
       // 2. Signal confidence (data quality)
-      if (signal.signalConfidence < this.microConfig.minSignalConfidence) continue
+      if (signal.signalConfidence < this.microConfig.minSignalConfidence) {
+        rejectionTracker.record('confidence', 'micro', `signal confidence ${(signal.signalConfidence * 100).toFixed(0)}% too low`)
+        continue
+      }
 
       // 3. Spread not widening (avoid uncertainty regimes)
       if (signal.spreadWidening) continue

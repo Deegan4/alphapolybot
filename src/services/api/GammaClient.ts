@@ -229,6 +229,43 @@ export class GammaClient extends BaseApiClient {
   }
 
   /**
+   * Get a single event by its exact slug.
+   * Used for BTC/ETH/SOL Up/Down 15-min market discovery where slugs
+   * follow the pattern: {asset}-updown-15m-{windowStartUnix}
+   */
+  async getEventBySlug(slug: string): Promise<GammaEvent | null> {
+    try {
+      const response = await this.get<GammaEventsResponse | GammaEvent[]>(
+        `/events?slug=${encodeURIComponent(slug)}`
+      )
+      const events: GammaEvent[] = Array.isArray(response)
+        ? response
+        : (response.events || [])
+
+      if (events.length === 0) return null
+
+      const event = events[0]
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawMarkets = (event as any).markets || []
+      const eventNegRisk = Boolean((event as any).enableNegRisk ?? (event as any).negRisk ?? false)
+
+      // Normalize nested markets (same pattern as getActiveMarkets)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      event.markets = rawMarkets.map((raw: any) => {
+        if (eventNegRisk && !raw.negRisk && !raw.enableNegRisk && !raw.neg_risk) {
+          raw.negRisk = true
+        }
+        return normalizeMarket(raw)
+      })
+
+      return event
+    } catch (error) {
+      console.error(`[GammaClient] Failed to fetch event by slug ${slug}:`, error)
+      return null
+    }
+  }
+
+  /**
    * Get binary markets suitable for dip arbitrage.
    *
    * DipArb profits from price dips where YES+NO < $1, then merges for

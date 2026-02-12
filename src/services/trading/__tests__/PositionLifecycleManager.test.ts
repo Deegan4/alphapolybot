@@ -50,8 +50,16 @@ vi.mock('../ActivityLogger', () => ({
   },
 }))
 
-// Strategies mock no longer needed — PLM no longer notifies strategy of close
-// (LLMPredictionStrategy now queries PLM directly for position count)
+// Mock stores (PLM reads dryRun from settingsStore)
+vi.mock('@/stores', () => ({
+  useSettingsStore: {
+    getState: () => ({ dryRun: false }),
+  },
+  useWalletStore: {
+    getState: () => ({}),
+    subscribe: vi.fn(),
+  },
+}))
 
 // ==========================================
 // HELPERS
@@ -443,7 +451,7 @@ describe('PositionLifecycleManager', () => {
       await vi.advanceTimersByTimeAsync(2100)  // retry backoff, attempt 2
       await vi.advanceTimersByTimeAsync(4100)  // retry backoff, attempt 3
 
-      expect(mockRecordTradeResult).toHaveBeenCalledWith(false)
+      expect(mockRecordTradeResult).toHaveBeenCalledWith(false, 0, 'structural')
 
       vi.useRealTimers()
     })

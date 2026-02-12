@@ -7,6 +7,8 @@ import { riskManager } from './RiskManager'
 import { orderBookDepth } from './OrderBookDepth'
 import { gasOracle } from './GasOracle'
 import { tradeLogger } from './TradeLogger'
+import { rejectionTracker } from './RejectionTracker'
+import { activityLogger } from './ActivityLogger'
 
 export interface TradingConfig {
   maxSlippage: number
@@ -83,14 +85,19 @@ export class TradingService {
     // Ensure approvals (skip actual transactions in dry run mode)
     const approvalResult = await walletService.ensureApprovals(this.config.dryRun)
     if (!approvalResult.success) {
-      console.warn(`[TradingService] BLOCKED by approvals: ${approvalResult.error}`)
-      return { success: false, error: approvalResult.error ?? 'Failed to ensure token approvals' }
+      const reason = approvalResult.error ?? 'Failed to ensure token approvals'
+      console.warn(`[TradingService] BLOCKED by approvals: ${reason}`)
+      rejectionTracker.record('approval', 'system', reason)
+      activityLogger.logWarning(`Trade blocked: ${reason}`)
+      return { success: false, error: reason }
     }
 
     // Risk management gate (pass conditionId for per-market concentration check)
     const riskCheck = riskManager.validateTrade(amount, market.conditionId)
     if (!riskCheck.allowed) {
       console.warn(`[TradingService] BLOCKED by risk check: ${riskCheck.reason}`)
+      rejectionTracker.record('risk', 'system', riskCheck.reason)
+      activityLogger.logWarning(`Trade blocked by risk manager: ${riskCheck.reason}`)
       return { success: false, error: `Risk check failed: ${riskCheck.reason}` }
     }
 
@@ -173,11 +180,15 @@ export class TradingService {
     let sellPrice = price
     if (!sellPrice) {
       const midPrice = await clobClient.getMidPrice(tokenId)
-      if (!midPrice) {
-        return { success: false, error: 'Could not determine market price' }
+      if (!midPrice || midPrice < 0.01) {
+        return { success: false, error: `Could not determine market price (mid=${midPrice})` }
       }
       sellPrice = midPrice * (1 - this.config.maxSlippage) // Sell slightly below mid
     }
+
+    // Clamp sell price to Polymarket valid range (0.01, 0.99)
+    // Mid prices at/near 1.0 (resolved markets) or 0 produce invalid orders
+    sellPrice = Math.min(0.99, Math.max(0.01, Math.round(sellPrice * 100) / 100))
 
     // Cancel any existing orders for this token first
     await clobClient.cancelAllOrders(tokenId)
@@ -220,6 +231,7 @@ export class TradingService {
     // Catch this before signing and submitting to avoid wasted API calls.
     const orderDollarValue = request.price * request.size
     if (request.side === 'BUY' && orderDollarValue < 1.00) {
+      rejectionTracker.record('order_too_small', 'system', `$${orderDollarValue.toFixed(2)} < $1.00 minimum`)
       return {
         success: false,
         error: `Order too small: $${orderDollarValue.toFixed(2)} (Polymarket minimum is $1.00)`,
@@ -236,6 +248,7 @@ export class TradingService {
 
     // DRY RUN MODE: Simulate order without executing
     if (this.config.dryRun) {
+      rejectionTracker.record('dry_run', 'system', `Simulated ${request.side} $${orderDollarValue.toFixed(2)}`)
       console.log('[DRY RUN] Would execute order:', {
         tokenId: request.tokenId,
         side: request.side,
@@ -324,6 +337,8 @@ export class TradingService {
               `on-chain $${onChainBalance.toFixed(2)} USDC.e (need $${requiredAmount.toFixed(2)}). ` +
               `Your funds may be in native USDC — Polymarket requires bridged USDC.e (0x2791…Aa84174)`
             console.error(`[TradingService] ${msg}`)
+            rejectionTracker.record('balance', 'system', msg)
+            activityLogger.logWarning(`Trade blocked: insufficient balance`)
             this.inFlightTrades.delete(tradeId)
             return { success: false, error: msg }
           }

@@ -1,5 +1,6 @@
 import type { PriceData } from '@/types'
 import { realtimeService } from '@/services/realtime'
+import { useSettingsStore } from '@/stores'
 import { tradingService } from './TradingService'
 import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
@@ -101,6 +102,14 @@ export class PositionLifecycleManager {
 
       for (const position of stored) {
         if (this.positions.has(position.tokenId)) continue
+
+        // Skip positions older than maxHoldMs (would have been auto-exited)
+        const maxHold = position.maxHoldMs ?? 4 * 60 * 60 * 1000
+        if (maxHold > 0 && Date.now() - position.entryTime > maxHold) {
+          indexedDBService.removePosition(position.tokenId).catch(() => {})
+          skipped++
+          continue
+        }
 
         // Validate: check if the market is still active
         const isValid = await this.validateHydratedPosition(position)
@@ -259,6 +268,36 @@ export class PositionLifecycleManager {
   }
 
   /**
+   * Abandon a position without selling — removes from tracking and IndexedDB.
+   * Use for zombie positions that can't be sold (resolved markets, empty books, etc.)
+   */
+  abandonPosition(tokenId: string): boolean {
+    const pos = this.positions.get(tokenId)
+    if (!pos) return false
+
+    const pnlUsd = -pos.costBasis // Assume total loss
+    activityLogger.logWarning(
+      `ABANDONED: ${pos.question.substring(0, 40)}... (write-off $${pos.costBasis.toFixed(2)})`,
+      { tokenId, strategy: pos.strategy, costBasis: pos.costBasis }
+    )
+    riskManager.recordTradeResult(false, pnlUsd)
+    this.removePosition(tokenId)
+    return true
+  }
+
+  /**
+   * Abandon ALL tracked positions without selling.
+   */
+  abandonAll(): number {
+    const tokenIds = Array.from(this.positions.keys())
+    let count = 0
+    for (const tokenId of tokenIds) {
+      if (this.abandonPosition(tokenId)) count++
+    }
+    return count
+  }
+
+  /**
    * Get all tracked positions with current P&L
    */
   getPositions(): PositionStatus[] {
@@ -315,6 +354,11 @@ export class PositionLifecycleManager {
     }
 
     const currentPrice = priceData.mid
+    // Guard: ignore zero/near-zero prices from empty order books.
+    // An empty book sends bid=0, ask=0 → mid=0, which looks like -100% PnL
+    // but is just missing data, not a real price signal.
+    if (currentPrice <= 0.001) return
+
     const pnlPercent = (currentPrice - position.entryPrice) / position.entryPrice
 
     // Check TIME-BASED EXIT: max hold duration exceeded
@@ -431,45 +475,70 @@ export class PositionLifecycleManager {
    * as a fallback for gap-throughs.
    */
   private placeRestingExitOrders(position: TrackedPosition): void {
+    // Skip resting orders in dry-run mode — no real positions to exit
+    if (useSettingsStore.getState().dryRun) {
+      console.log(`[PLM] Dry-run mode — skipping resting exit orders for ${position.tokenId.slice(0, 8)}…`)
+      return
+    }
+
     const { tokenId, entryPrice, size, stopLossPercent, takeProfitPercent, negRisk } = position
 
     // Stop-loss price: entry minus SL%
     const slPrice = Math.max(0.01, Math.round((entryPrice * (1 - stopLossPercent)) * 100) / 100)
-    // Take-profit price: entry plus TP% plus taker fee
+    // Take-profit price: entry plus TP% plus taker fee (clamped to Polymarket's 0-1 range)
     const tpPrice = Math.min(0.99, Math.round((entryPrice * (1 + takeProfitPercent + TAKER_FEE_PERCENT)) * 100) / 100)
+
+    // Validate prices are in valid Polymarket range (0, 1) exclusive
+    const slValid = slPrice > 0 && slPrice < 1
+    const tpValid = tpPrice > 0 && tpPrice < 1
+    if (!slValid) {
+      console.warn(`[PLM] Computed SL price ${slPrice} out of range for entry ${entryPrice} — skipping resting SL order`)
+    }
+    if (!tpValid) {
+      console.warn(`[PLM] Computed TP price ${tpPrice} out of range for entry ${entryPrice} — skipping resting TP order`)
+    }
+    if (!slValid && !tpValid) return
 
     // Place both as fire-and-forget GTC limit sells
     import('@/services/api').then(async ({ clobClient }) => {
-      try {
-        const slResult = await clobClient.placeOrder({
-          tokenId,
-          side: 'SELL',
-          price: slPrice,
-          size,
-          type: 'GTC',
-          negRisk,
-        })
-        if (slResult.success) {
-          console.log(`[PLM] Resting SL sell at ${(slPrice * 100).toFixed(0)}¢ for ${tokenId.slice(0, 8)}…`)
+      if (slValid) {
+        try {
+          const slResult = await clobClient.placeOrder({
+            tokenId,
+            side: 'SELL',
+            price: slPrice,
+            size,
+            type: 'GTC',
+            negRisk,
+          })
+          if (slResult.success) {
+            console.log(`[PLM] Resting SL sell at ${(slPrice * 100).toFixed(0)}¢ for ${tokenId.slice(0, 8)}…`)
+          } else {
+            console.warn(`[PLM] SL order rejected: ${slResult.error}`)
+          }
+        } catch {
+          // Limit order failed — real-time monitoring is the fallback
         }
-      } catch {
-        // Limit order failed — real-time monitoring is the fallback
       }
 
-      try {
-        const tpResult = await clobClient.placeOrder({
-          tokenId,
-          side: 'SELL',
-          price: tpPrice,
-          size,
-          type: 'GTC',
-          negRisk,
-        })
-        if (tpResult.success) {
-          console.log(`[PLM] Resting TP sell at ${(tpPrice * 100).toFixed(0)}¢ for ${tokenId.slice(0, 8)}…`)
+      if (tpValid) {
+        try {
+          const tpResult = await clobClient.placeOrder({
+            tokenId,
+            side: 'SELL',
+            price: tpPrice,
+            size,
+            type: 'GTC',
+            negRisk,
+          })
+          if (tpResult.success) {
+            console.log(`[PLM] Resting TP sell at ${(tpPrice * 100).toFixed(0)}¢ for ${tokenId.slice(0, 8)}…`)
+          } else {
+            console.warn(`[PLM] TP order rejected: ${tpResult.error}`)
+          }
+        } catch {
+          // Limit order failed — real-time monitoring is the fallback
         }
-      } catch {
-        // Limit order failed — real-time monitoring is the fallback
       }
     }).catch(() => {})
   }
@@ -508,6 +577,7 @@ export class PositionLifecycleManager {
             entryPrice: position.entryPrice,
             exitPrice,
             pnlUsd,
+            costBasis: position.costBasis,
             orderId: result.orderId,
           }
         )
@@ -545,12 +615,13 @@ export class PositionLifecycleManager {
         attempts: this.maxSellRetries,
       })
 
-      riskManager.recordTradeResult(false)
+      // Sell failures are structural (market resolved/illiquid) — don't trigger circuit breaker
+      riskManager.recordTradeResult(false, 0, 'structural')
       this.sellInProgress.delete(tokenId)
       return false
     } catch (error) {
       console.error('[PLM] Sell execution error:', error)
-      riskManager.recordTradeResult(false)
+      riskManager.recordTradeResult(false, 0, 'structural')
       this.sellInProgress.delete(tokenId)
       return false
     }

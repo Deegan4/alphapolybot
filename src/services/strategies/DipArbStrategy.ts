@@ -12,6 +12,7 @@ import { useWalletStore } from '@/stores/walletStore'
 import { KellySizer } from '@/services/trading/KellySizer'
 import { gasOracle } from '@/services/trading/GasOracle'
 import { tradeLogger } from '@/services/trading/TradeLogger'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 /**
  * Proven configuration with 86% ROI
@@ -29,7 +30,7 @@ const DEFAULT_CONFIG: DipArbConfig = {
   cooldownMs: 30000, // 30 seconds between trades on same market
   spreadScanEnabled: true, // Periodic order book spread scan (new)
   spreadScanIntervalMs: 15_000, // Check order books every 15s — arb windows are brief
-  spreadScanBatchSize: 75, // Check top N markets per scan (wider net)
+  spreadScanBatchSize: 150, // Check top N markets per scan (wider net, was 75)
 }
 
 /**
@@ -401,8 +402,10 @@ export class DipArbStrategy extends BaseStrategy {
           await this.handleDipEvent(dipEvent)
           arbsFound++
         }
-      } catch {
-        // Order book fetch failed — skip this market silently
+      } catch (err) {
+        // Order book fetch failed — log and skip
+        console.warn(`[DipArb] Order book fetch failed for market:`, err)
+        rejectionTracker.record('liquidity', 'dip', 'order book fetch failed')
       }
     }
 
@@ -411,9 +414,11 @@ export class DipArbStrategy extends BaseStrategy {
       this.log(`Spread scan: ${marketsChecked} checked, closest askSum=${(closestAskSum * 100).toFixed(2)}¢, arbs=${arbsFound}`)
     }
 
-    if (arbsFound > 0) {
-      activityLogger.logSystem(`Spread scan found ${arbsFound} arb(s) from ${marketsChecked} markets checked`)
-    }
+    // Always surface results to Activity Feed so the user sees the strategy working
+    activityLogger.logScan(
+      `DipArb spread: ${marketsChecked} books checked, closest ${closestAskSum < Infinity ? (closestAskSum * 100).toFixed(1) + '¢' : 'N/A'}, arbs: ${arbsFound}`,
+      { total: marketsChecked, eligible: arbsFound }
+    )
   }
 
   /**
@@ -436,6 +441,7 @@ export class DipArbStrategy extends BaseStrategy {
     const maxConcurrent = this.dipConfig.maxConcurrentTrades || 3
     if (this.activeTrades >= maxConcurrent) {
       this.log('Max concurrent trades reached, skipping dip')
+      rejectionTracker.record('position_limit', 'dip', `${this.activeTrades}/${maxConcurrent} concurrent trades`)
       return
     }
 
@@ -444,6 +450,7 @@ export class DipArbStrategy extends BaseStrategy {
     const lastTradeTime = this.lastTradeTimes.get(event.market.id) || 0
     if (Date.now() - lastTradeTime < cooldownMs) {
       this.log(`Market ${event.market.id} on cooldown, skipping`)
+      rejectionTracker.record('cooldown', 'dip', `market ${event.market.id.slice(0, 8)} on cooldown`)
       return
     }
 
@@ -516,10 +523,12 @@ export class DipArbStrategy extends BaseStrategy {
       }
 
       // Gas check: skip if gas would eat most of the arb profit
+      // Only the merge is on-chain; CLOB order placement is off-chain (sign + API POST = zero gas)
       try {
-        const gasCost = await gasOracle.estimateCostUSD(3) // 2 legs + merge
+        const gasCost = await gasOracle.estimateCostUSD(1, 'merge') // only merge is on-chain
         if (gasCost > expectedProfit * tradeAmount * 0.70) {
           this.log(`Gas too expensive: $${gasCost.toFixed(4)} > 70% of expected profit — skipping`)
+          rejectionTracker.record('gas', 'dip', `gas $${gasCost.toFixed(4)} > 70% of profit`)
           activityLogger.logInfo('DipArb skipped: gas too expensive', {
             gasCost,
             expectedProfit: expectedProfit * tradeAmount,

@@ -360,6 +360,7 @@ export class RiskManager {
 
   /**
    * Reduce category exposure when a position closes.
+   * Also cleans up marketToCategory mapping when exposure hits zero.
    */
   reduceCategoryExposure(conditionId: string, amountUSDC: number): void {
     const category = this.marketToCategory.get(conditionId)
@@ -370,6 +371,10 @@ export class RiskManager {
       this.categoryExposure.delete(category)
     } else {
       this.categoryExposure.set(category, remaining)
+    }
+    // Clean up reverse lookup if market has no more exposure
+    if (!this.marketExposure.has(conditionId)) {
+      this.marketToCategory.delete(conditionId)
     }
   }
 
@@ -470,6 +475,27 @@ export class RiskManager {
    */
   get emergencyStopped(): boolean {
     return this._emergencyStopped
+  }
+
+  /**
+   * Prune in-memory collections. Called periodically from App.tsx.
+   * Removes expired rolling-window entries that validateTrade()
+   * would also clean, but this ensures cleanup even during idle periods.
+   */
+  pruneInMemory(): void {
+    const oneHourAgo = Date.now() - 60 * 60 * 1000
+    const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
+
+    const oldTimestamps = this.tradeTimestamps.length
+    this.tradeTimestamps = this.tradeTimestamps.filter(t => t > oneHourAgo)
+
+    const oldPnLs = this.tradePnLs.length
+    this.tradePnLs = this.tradePnLs.filter(t => t.timestamp > oneWeekAgo)
+
+    const pruned = (oldTimestamps - this.tradeTimestamps.length) + (oldPnLs - this.tradePnLs.length)
+    if (pruned > 0) {
+      console.log(`[RiskManager] Pruned ${pruned} expired in-memory entries`)
+    }
   }
 
   /**

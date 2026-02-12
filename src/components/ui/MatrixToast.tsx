@@ -9,11 +9,11 @@ import type { Notification, NotificationType } from '@/types'
 // ==========================================
 
 const typeStyles: Record<NotificationType, { border: string; icon: string; text: string }> = {
-  trade: { border: 'border-matrix-primary/50', icon: '⚡', text: 'text-matrix-primary' },
-  success: { border: 'border-matrix-primary/50', icon: '✓', text: 'text-matrix-primary' },
+  trade: { border: 'border-agent-green/50', icon: '⚡', text: 'text-agent-green' },
+  success: { border: 'border-agent-green/50', icon: '✓', text: 'text-agent-green' },
   error: { border: 'border-red-500/50', icon: '✕', text: 'text-red-400' },
-  warning: { border: 'border-matrix-secondary/50', icon: '⚠', text: 'text-matrix-secondary' },
-  info: { border: 'border-matrix-cyan/50', icon: 'ℹ', text: 'text-matrix-cyan' },
+  warning: { border: 'border-agent-orange/50', icon: '⚠', text: 'text-agent-orange' },
+  info: { border: 'border-agent-cyan/50', icon: 'ℹ', text: 'text-agent-cyan' },
 }
 
 interface MatrixToastProps {
@@ -40,8 +40,8 @@ const MatrixToast: React.FC<MatrixToastProps> = ({ notification, onDismiss }) =>
       exit={{ x: 100, opacity: 0 }}
       transition={{ type: 'spring', stiffness: 300, damping: 25 }}
       className={cn(
-        'w-80 border rounded-lg p-3 shadow-elevation-2',
-        'glass-card',
+        'w-full sm:w-80 border rounded-lg p-3 shadow-lg',
+        'bg-agent-card/60 backdrop-blur-md border-agent-border/50',
         style.border
       )}
     >
@@ -51,13 +51,13 @@ const MatrixToast: React.FC<MatrixToastProps> = ({ notification, onDismiss }) =>
           <p className={cn('text-xs font-mono font-bold', style.text)}>
             {notification.title}
           </p>
-          <p className="text-xs text-matrix-text-secondary font-sans mt-0.5 truncate">
+          <p className="text-xs text-agent-text-muted font-sans mt-0.5 truncate">
             {notification.message}
           </p>
         </div>
         <button
           onClick={() => onDismiss(notification.id)}
-          className="text-matrix-text-secondary hover:text-matrix-primary text-xs p-1 transition-colors"
+          className="text-agent-text-muted hover:text-agent-green text-xs p-1 transition-colors"
         >
           ✕
         </button>
@@ -74,7 +74,7 @@ export const MatrixToastContainer: React.FC = () => {
   const { notifications, dismissNotification } = useNotificationStore()
 
   return (
-    <div className="fixed top-4 right-4 z-50 space-y-2">
+    <div className="fixed top-4 right-2 sm:right-4 z-50 space-y-2 max-w-[calc(100vw-1rem)] sm:max-w-sm">
       <AnimatePresence>
         {notifications.map((n) => (
           <MatrixToast key={n.id} notification={n} onDismiss={dismissNotification} />

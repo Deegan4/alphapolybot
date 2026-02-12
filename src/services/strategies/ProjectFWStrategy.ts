@@ -17,6 +17,7 @@ import { useWalletStore } from '@/stores/walletStore'
 import { KellySizer } from '@/services/trading/KellySizer'
 import { gasOracle } from '@/services/trading/GasOracle'
 import { tradeLogger } from '@/services/trading/TradeLogger'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 const DEFAULT_CONFIG: ProjectFWConfig = {
   // Algorithm parameters
@@ -286,6 +287,7 @@ export class ProjectFWStrategy extends BaseStrategy {
       // "isCoherent" means the combined prices are consistent (no real mispricing).
       if (cmOpp.mutexValidation.isCoherent) {
         this.log(`  [CROSS-MKT] BLOCKED: mutex pair is coherent — no real mispricing`)
+        rejectionTracker.record('market_filter', 'fw', `mutex coherent: ${opp.market.question?.substring(0, 40)}`)
         activityLogger.logWarning('FW arb blocked by cross-market validation: mutex pair coherent', {
           market: opp.market.question.substring(0, 50),
           combinedPriceSum: cmOpp.mutexValidation.combinedPriceSum,
@@ -301,11 +303,12 @@ export class ProjectFWStrategy extends BaseStrategy {
       this.lastTradeTimes.set(opp.market.id, Date.now())
 
       // Gas check: skip if gas cost would eat the profit
+      // Only the merge is on-chain; CLOB order legs are off-chain (sign + API POST = zero gas)
       try {
-        const numLegs = opp.result.tradeLegs.length
-        const gasCost = await gasOracle.estimateCostUSD(numLegs + 1) // legs + merge
+        const gasCost = await gasOracle.estimateCostUSD(1, 'merge') // only merge is on-chain
         if (gasCost > opp.netProfitUSD * 0.5) {
           this.log(`Gas too expensive: $${gasCost.toFixed(4)} > 50% of profit $${opp.netProfitUSD.toFixed(4)} — skipping`)
+          rejectionTracker.record('gas', 'fw', `$${gasCost.toFixed(4)} > 50% of $${opp.netProfitUSD.toFixed(4)} profit`)
           activityLogger.logInfo('FW arb skipped: gas too expensive', {
             gasCost,
             netProfit: opp.netProfitUSD,

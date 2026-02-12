@@ -75,7 +75,7 @@ export const ActivityView: React.FC = () => {
     <div className="h-full flex flex-col gap-4">
       {/* Stats Row */}
       <motion.div
-        className="grid grid-cols-5 gap-4"
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4"
         initial="hidden"
         animate="show"
         variants={containerVariants}
@@ -95,9 +95,9 @@ export const ActivityView: React.FC = () => {
         className="flex-1 flex flex-col min-h-0"
       >
         {/* Toolbar */}
-        <div className="flex items-center justify-between mb-4 pb-4 border-b border-matrix-border/50">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4 pb-4 border-b border-matrix-border/50">
           {/* Filters — sliding indicator */}
-          <div className="flex items-center gap-1 relative">
+          <div className="flex items-center gap-1 relative flex-wrap">
             {filters.map(f => (
               <button
                 key={f.value}

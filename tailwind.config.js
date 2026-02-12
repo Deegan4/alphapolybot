@@ -8,6 +8,29 @@ export default {
     extend: {
       colors: {
         // Matrix Theme Colors
+        // Agent Dashboard Colors (muted navy/dark palette)
+        'agent': {
+          'bg': '#0a0e1a',
+          'card': '#0d1117',
+          'elevated': '#161b22',
+          'border': '#1a1f2e',
+          'border-subtle': '#21262d',
+          'text': '#e6edf3',
+          'text-muted': '#6b7280',
+          'text-label': '#484f58',
+          'green': '#22c55e',
+          'green-dim': '#15803d',
+          'red': '#ef4444',
+          'red-dim': '#b91c1c',
+          'cyan': '#22d3ee',
+          'orange': '#f97316',
+          'purple': '#a855f7',
+        },
+        // Crypto asset brand colors
+        'btc': '#f7931a',
+        'eth': '#627eea',
+        'sol': '#9945ff',
+        // Matrix Theme Colors
         'matrix': {
           'bg': '#000a00',
           'bg-primary': '#000000',

@@ -10,3 +10,4 @@ export { OrderBookDepthAnalyzer, orderBookDepth, type DepthCheck } from './Order
 export { TradeLogger, tradeLogger, type TradeRecord, type BacktestSummary } from './TradeLogger'
 export { CalibrationTracker, calibrationTracker, type CalibrationBucket, type CalibrationResult } from './CalibrationTracker'
 export { MicrostructureAnalyzer, microstructureAnalyzer, type MicrostructureSignal } from './MicrostructureAnalyzer'
+export { rejectionTracker, type RejectionCategory, type RejectionEvent, type RejectionSummary } from './RejectionTracker'

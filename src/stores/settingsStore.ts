@@ -55,6 +55,9 @@ export interface AppSettingsState {
   // Aggressive Mode (meta-toggle — relaxes conservative defaults)
   aggressiveMode: boolean
 
+  // LLM Web Search (OpenRouter :online mode)
+  llmWebSearchEnabled: boolean
+
   // Microstructure Momentum Strategy
   microMinCompositeSignal: number
   microMinSignalConfidence: number
@@ -98,6 +101,7 @@ interface SettingsStore extends AppSettingsState {
   setBtcMinWindowRemaining: (seconds: number) => void
   setBtcStopLossPercent: (percent: number) => void
   setBtcTakeProfitPercent: (percent: number) => void
+  setLlmWebSearchEnabled: (enabled: boolean) => void
   setMicroMinCompositeSignal: (value: number) => void
   setMicroMinSignalConfidence: (value: number) => void
   setMicroMaxSpreadFraction: (value: number) => void
@@ -138,10 +142,11 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   btcUseKellySizing: true,
   btcMinConfidence: 0.40,
   btcMaxEntryPrice: 0.75,
-  btcMinWindowRemaining: 300,
+  btcMinWindowRemaining: 120, // 2 min before resolution (was 300)
   btcStopLossPercent: 0.25,
   btcTakeProfitPercent: 0.20,
   aggressiveMode: false,
+  llmWebSearchEnabled: false,
   microMinCompositeSignal: 0.4,
   microMinSignalConfidence: 0.5,
   microMaxSpreadFraction: 0.08,
@@ -297,6 +302,11 @@ export const useSettingsStore = create<SettingsStore>()(
         import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ takeProfitPercent: percent }))
       },
 
+      setLlmWebSearchEnabled: (enabled: boolean) => {
+        set({ llmWebSearchEnabled: enabled })
+        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ webSearchEnabled: enabled }))
+      },
+
       setMicroMinCompositeSignal: (value: number) => {
         set({ microMinCompositeSignal: value })
         import('@/services/strategies/MicrostructureMomentumStrategy').then(m => m.microMomentumStrategy.setMicroConfig({ minCompositeSignal: value }))
@@ -384,7 +394,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'alphapolybot-settings',
-      version: 8, // Bump when defaults change — triggers migrate()
+      version: 10, // Bump when defaults change — triggers migrate()
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
         if (version < 1) {
@@ -460,6 +470,14 @@ export const useSettingsStore = create<SettingsStore>()(
             state.btcEnableBtc = false
           }
         }
+        if (version < 9) {
+          // v8→v9: Add LLM web search toggle (opt-in, default off)
+          if (state.llmWebSearchEnabled === undefined) state.llmWebSearchEnabled = false
+        }
+        if (version < 10) {
+          // v9→v10: BTC strategy slug-based discovery — relax timing for 15-min windows
+          if (state.btcMinWindowRemaining === 300) state.btcMinWindowRemaining = 120
+        }
         return state as AppSettingsState
       },
       partialize: (state) => ({
@@ -496,6 +514,7 @@ export const useSettingsStore = create<SettingsStore>()(
         btcStopLossPercent: state.btcStopLossPercent,
         btcTakeProfitPercent: state.btcTakeProfitPercent,
         aggressiveMode: state.aggressiveMode,
+        llmWebSearchEnabled: state.llmWebSearchEnabled,
         microMinCompositeSignal: state.microMinCompositeSignal,
         microMinSignalConfidence: state.microMinSignalConfidence,
         microMaxSpreadFraction: state.microMaxSpreadFraction,

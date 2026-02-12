@@ -7,7 +7,7 @@ Browser-based TypeScript/React Polymarket trading bot. Vite 4, React 18, Zustand
 ```bash
 npm run dev          # Vite dev server on :4000 (auto-opens browser)
 npm run build        # Production build (uses vite build, NOT tsc)
-npm test             # Vitest single run (236 tests)
+npm test             # Vitest single run (247 tests)
 npm run test:watch   # Vitest watch mode
 npm run lint         # ESLint (.eslintrc.cjs)
 npm run preview      # Preview production build
@@ -37,15 +37,18 @@ npm run preview      # Preview production build
 src/
 ├── components/
 │   ├── charts/        # MatrixLineChart, MatrixAreaChart, MatrixPieChart
-│   ├── dashboard/     # MatrixDataTable, MatrixStatWidget, MatrixTimeline
-│   ├── layout/        # AppLayout, Header, Sidebar, MatrixRain
+│   ├── dashboard/     # 15 components: ActivePositionsCard, AssetCard, AssetCardsRow,
+│   │                  # HistoryView, PortfolioPanel, RecentTradesGrid, SniperTopBar,
+│   │                  # StrategyDropdown, WindowTimer, MatrixDataTable, MatrixStatWidget, etc.
+│   ├── layout/        # AppLayout, DashboardLayout, SettingsLayout, Header, Sidebar, MatrixRain
 │   └── ui/            # 18 Matrix-themed components (Button, Card, Modal, Toast, etc.)
-├── hooks/             # useWallet
+├── hooks/             # useWallet, useBalanceHistory, useCryptoPrices
 ├── services/
 │   ├── api/           # CLOBClient, GammaClient, DataClient, PriceOracleService
 │   ├── llm/           # OpenRouterService (multi-model, budget-bucketed)
 │   ├── notifications/ # NotificationService (toast + browser + Web Audio)
-│   ├── realtime/      # RealtimeService, RTDSService (crypto prices), UserChannelService (auth push)
+│   ├── realtime/      # RealtimeService, RTDSService (crypto), UserChannelService (auth push),
+│   │                  # BinanceWSService
 │   ├── storage/       # IndexedDBService (v4, 6 object stores)
 │   ├── strategies/    # BaseStrategy, LLMPrediction, DipArb, ProjectFW, BtcUpDown, MicroMomentum
 │   │   ├── __tests__/ # DipArb, FW Optimizer, FW Strategy tests
@@ -55,10 +58,10 @@ src/
 │   │   │              # CalibrationTracker, MicrostructureAnalyzer
 │   │   └── __tests__/ # RiskManager, PLM, KellySizer tests
 │   └── wallet/        # WalletService (Ethers.js wrapper)
-├── stores/            # settingsStore (v7), walletStore, notificationStore (Zustand)
+├── stores/            # settingsStore (v7), walletStore, notificationStore, balanceHistoryStore
 ├── types/             # api.ts, wallet.ts, index.ts
 ├── utils/             # secureStorage, cn (tailwind-merge)
-└── views/             # TradingTerminal, PortfolioView, ActivityView, SettingsView
+└── views/             # TradingTerminal, DashboardView, PortfolioView, ActivityView, SettingsView
 ```
 
 ## Critical Gotchas
@@ -91,6 +94,13 @@ src/
 
 ### FW Optimizer
 - Large `epsilonD` (e.g., 0.1) causes early convergence before finding profit for small incoherence. Needs >20% price gap for loose convergence.
+- **Coherence filter direction**: `Math.abs(sum - 1.0) < X` is a "reject-if-within" filter. Larger X rejects MORE markets (bigger exclusion zone). Smaller X rejects FEWER. Current: 0.001 (0.1%).
+
+### Order Signing (CLOBClient)
+- **`signatureType`**: On-chain `Signatures.sol` dispatches to 3 different verification functions: `verifyEOASignature()` (type 0), `verifyPolyProxySignature()` (type 1), `verifyPolySafeSignature()` (type 2). Wrong type = instant "invalid signature". Standard Polymarket proxy = type 1. Type 2 is only for actual Gnosis Safe wallets.
+- **`side` field has TWO formats**: EIP-712 signed data uses uint8 `0`/`1`. The API request body uses `"BUY"`/`"SELL"` strings. Server maps them back internally. Sending `"0"`/`"1"` in the body causes "invalid signature".
+- **Tick size is per-token**: Markets have tick sizes of 0.1, 0.01, 0.001, or 0.0001. Must query `/tick-size?token_id=X`. `ROUNDING_CONFIG` maps tick to decimal places. "invalid signature" can also mean tick-size precision violation.
+- **`VITE_SIGNATURE_TYPE` env var**: Override auto-detection with explicit 0/1/2.
 
 ### Environment
 - Project lives on external drive: `/Volumes/SAMSUNG 1TB/alphapolybot` — paths have spaces, always quote.
@@ -101,7 +111,7 @@ src/
 
 - **Framework**: Vitest + jsdom + @testing-library/react
 - **Config**: `vitest.config.ts` (globals enabled, jsdom environment)
-- **236 tests** across 10 files: RiskManager (31), PLM (25), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (15)
+- **247 tests** across 10 files: RiskManager (31), PLM (25), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (15)
 - Test files live in `__tests__/` directories next to the code they test
 
 ## Environment Setup

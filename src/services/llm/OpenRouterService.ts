@@ -161,12 +161,30 @@ export class OpenRouterService {
     }
 
     // Use a different model for diversity
-    const secondaryModel = this.config.model.includes('llama')
+    const baseSecondaryModel = this.config.model.includes('llama')
       ? 'google/gemma-2-9b-it'       // If primary is Llama, use Gemma
       : 'meta-llama/llama-3.1-70b-instruct' // Otherwise use Llama
+    const secondaryModel = this.config.webSearchEnabled
+      ? `${baseSecondaryModel}:online`
+      : baseSecondaryModel
 
     try {
       const prompt = this.buildAnalysisPrompt(market)
+      const body: Record<string, unknown> = {
+        model: secondaryModel,
+        messages: [
+          { role: 'system', content: this.config.webSearchEnabled
+            ? 'Market analyst with web research. Use search results to make informed predictions. JSON only.'
+            : 'Market analyst. JSON only.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: this.config.temperature,
+        max_tokens: this.config.webSearchEnabled ? 600 : this.config.maxTokens,
+      }
+      if (this.config.webSearchEnabled) {
+        body.plugins = [{ id: 'web', max_results: 3 }]
+      }
+
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -175,15 +193,7 @@ export class OpenRouterService {
           'HTTP-Referer': window.location.origin,
           'X-Title': 'AlphaPolyBot - Signal Fusion',
         },
-        body: JSON.stringify({
-          model: secondaryModel,
-          messages: [
-            { role: 'system', content: 'Market analyst. JSON only.' },
-            { role: 'user', content: prompt },
-          ],
-          temperature: this.config.temperature,
-          max_tokens: this.config.maxTokens,
-        }),
+        body: JSON.stringify(body),
       })
 
       if (!response.ok) return null
@@ -198,6 +208,9 @@ export class OpenRouterService {
       } else if (data.usage) {
         cost = (data.usage.prompt_tokens ?? 0) / 1000 * 0.00059 +
                (data.usage.completion_tokens ?? 0) / 1000 * 0.00079
+        if (this.config.webSearchEnabled) {
+          cost += 0.012 // Exa search cost
+        }
       }
       this.recordCost(cost, 'prediction')
 
@@ -242,6 +255,27 @@ export class OpenRouterService {
       ? `\nContext: ${market.description.substring(0, 150)}`
       : ''
 
+    // When web search is enabled, use an expanded prompt that instructs the LLM
+    // to research the topic using injected search results before predicting.
+    if (this.config.webSearchEnabled) {
+      const today = new Date().toISOString().slice(0, 10)
+      return `You are a prediction market analyst. Today is ${today}. Research this question using web search results, then predict the outcome.
+
+MARKET: "${market.question}"
+- ${market.outcomes?.[0] || 'Yes'}: ${(odds[0] * 100).toFixed(1)}% current odds
+- ${market.outcomes?.[1] || 'No'}: ${(odds[1] * 100).toFixed(1)}% current odds
+- Volume: $${market.volume?.toLocaleString() || '?'}, Liquidity: $${market.liquidity?.toLocaleString() || '?'}${desc}
+
+Instructions:
+1. Search for the latest news, polls, expert analysis, or data relevant to this question
+2. Assess whether the current market odds are accurate or mispriced
+3. If you find strong evidence for one side, predict that side with high confidence
+4. If evidence is mixed or insufficient, respond with low confidence
+
+Respond ONLY with JSON:
+{"prediction":"yes|no","confidence":0-100,"reasoning":"2-3 sentences citing evidence found","sources":["url1","url2"]}`
+    }
+
     return `Predict this market outcome. Respond ONLY with JSON.
 
 Q: "${market.question}"
@@ -256,7 +290,35 @@ Q: "${market.question}"
    * Call OpenRouter API
    * Returns the message content and cost info for budget tracking.
    */
-  private async callOpenRouter(prompt: string): Promise<{ message: { content: string }; cost: number }> {
+  private async callOpenRouter(prompt: string): Promise<{ message: { content: string; annotations?: Array<{ type: string; url?: string; title?: string }> }; cost: number }> {
+    // When web search is enabled, append :online to model slug and add plugins config
+    const model = this.config.webSearchEnabled
+      ? `${this.config.model}:online`
+      : this.config.model
+
+    const body: Record<string, unknown> = {
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: this.config.webSearchEnabled
+            ? 'Market analyst with web research. Use search results to make informed predictions. JSON only.'
+            : 'Market analyst. JSON only.',
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      temperature: this.config.temperature,
+      max_tokens: this.config.webSearchEnabled ? 600 : this.config.maxTokens,
+    }
+
+    // Add web search plugin config for result count control
+    if (this.config.webSearchEnabled) {
+      body.plugins = [{ id: 'web', max_results: 3 }]
+    }
+
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -265,21 +327,7 @@ Q: "${market.question}"
         'HTTP-Referer': window.location.origin,
         'X-Title': 'AlphaPolyBot - Polymarket LLM Trading',
       },
-      body: JSON.stringify({
-        model: this.config.model,
-        messages: [
-          {
-            role: 'system',
-            content: 'Market analyst. JSON only.',
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        temperature: this.config.temperature,
-        max_tokens: this.config.maxTokens,
-      }),
+      body: JSON.stringify(body),
     })
 
     if (!response.ok) {
@@ -295,6 +343,7 @@ Q: "${market.question}"
 
     // Extract cost: OpenRouter returns usage.total_cost (in USD) when available.
     // Fall back to token-count estimate: ~$0.00059 per 1K input + $0.00079 per 1K output (Llama 3.1 70B rates).
+    // When web search is enabled, add Exa search cost: $0.004 per result × 3 results = $0.012.
     let cost = 0
     if (data.usage?.total_cost != null) {
       cost = data.usage.total_cost
@@ -302,6 +351,9 @@ Q: "${market.question}"
       const inputTokens = data.usage.prompt_tokens ?? 0
       const outputTokens = data.usage.completion_tokens ?? 0
       cost = (inputTokens / 1000) * 0.00059 + (outputTokens / 1000) * 0.00079
+      if (this.config.webSearchEnabled) {
+        cost += 0.012 // Exa search: $0.004/result × 3 results
+      }
     }
 
     return { message: data.choices[0].message, cost }
@@ -310,13 +362,13 @@ Q: "${market.question}"
   /**
    * Parse the LLM response into a prediction
    */
-  private parsePrediction(response: { content: string }): PredictionResult {
+  private parsePrediction(response: { content: string; annotations?: Array<{ type: string; url?: string; title?: string }> }): PredictionResult {
     const content = response.content || ''
-    
+
     try {
       // Try to extract JSON from the response
       const jsonMatch = content.match(/\{[\s\S]*\}/)
-      
+
       if (!jsonMatch) {
         throw new Error('No JSON found in response')
       }
@@ -334,11 +386,18 @@ Q: "${market.question}"
         throw new Error(`Invalid confidence: ${parsed.confidence}`)
       }
 
+      // Merge sources from JSON response and OpenRouter web search annotations
+      const jsonSources: string[] = Array.isArray(parsed.sources) ? parsed.sources.map(String) : []
+      const annotationSources: string[] = (response.annotations || [])
+        .filter(a => a.type === 'url_citation' && a.url)
+        .map(a => a.url as string)
+      const allSources = [...new Set([...jsonSources, ...annotationSources])]
+
       return {
         predictedOutcome: prediction as 'yes' | 'no',
         confidence: confidence / 100, // Convert to 0-1 scale
         reasoning: String(parsed.reasoning || 'No reasoning provided'),
-        sources: Array.isArray(parsed.sources) ? parsed.sources.map(String) : [],
+        sources: allSources,
         analysisTime: 0,
       }
     } catch (parseError) {

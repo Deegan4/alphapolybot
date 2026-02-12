@@ -26,6 +26,7 @@ export const PortfolioView: React.FC = () => {
   const [trackedPositions, setTrackedPositions] = useState<PositionStatus[]>([])
   const [recentTrades, setRecentTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set())
   const [confirmClose, setConfirmClose] = useState<string | null>(null)
   const [confirmCloseAll, setConfirmCloseAll] = useState(false)
@@ -36,6 +37,7 @@ export const PortfolioView: React.FC = () => {
       if (!isConnected) return
 
       setLoading(true)
+      setError(null)
       try {
         const [positionsData, tradesData] = await Promise.all([
           dataClient.getPositions(),
@@ -43,8 +45,9 @@ export const PortfolioView: React.FC = () => {
         ])
         setPositions(positionsData)
         setRecentTrades(tradesData)
-      } catch (error) {
-        console.error('Failed to fetch portfolio:', error)
+      } catch (err) {
+        console.error('Failed to fetch portfolio:', err)
+        setError(err instanceof Error ? err.message : 'Failed to fetch portfolio data')
       } finally {
         setLoading(false)
       }
@@ -142,8 +145,16 @@ export const PortfolioView: React.FC = () => {
       {/* Stats */}
       <MatrixStatsGrid stats={stats} />
 
+      {/* Error banner */}
+      {error && (
+        <div className="flex items-center gap-2 bg-red-900/10 border border-red-500/20 rounded-lg px-4 py-2 text-red-400 text-sm font-mono">
+          <span>✕</span>
+          <span>{error}</span>
+        </div>
+      )}
+
       {/* Main content */}
-      <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
+      <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 min-h-0">
         {/* Positions — gradient variant */}
         <MatrixCard title="OPEN POSITIONS" subtitle={`${totalPositionCount} positions`} variant="gradient" className="flex flex-col min-h-0">
           {/* Force Close All button — only visible when tracked positions exist */}

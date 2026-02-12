@@ -8,6 +8,7 @@ import { tradeLogger } from '@/services/trading/TradeLogger'
 import { KellySizer } from '@/services/trading/KellySizer'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 // ==========================================
 // TYPES
@@ -42,10 +43,10 @@ const DEFAULT_CONFIG: BtcUpDownConfig = {
   useKellySizing: true,
   minConfidence: 0.40,  // Was 0.55 — too high for the 5-factor formula's output range
   maxEntryPrice: 0.75,
-  minWindowRemaining: 300,
+  minWindowRemaining: 120, // 2 min before resolution (was 300 — wasted 1/3 of 15-min window)
   scanIntervalMs: 15_000,
   maxConcurrentPositions: 2,
-  cooldownMs: 120_000,
+  cooldownMs: 30_000, // 30s per-market cooldown (was 120s — blocked re-entry on same window)
   stopLossPercent: 0.25,
   takeProfitPercent: 0.20,
   maxHoldMs: 14 * 60 * 1000,
@@ -59,6 +60,13 @@ const ASSET_NAMES: Record<string, string> = {
   SOL: 'Solana',
 }
 
+/** Slug prefix for each asset's 15-min Up/Down events on Polymarket */
+const ASSET_SLUG_PREFIX: Record<string, string> = {
+  BTC: 'btc-updown-15m-',
+  ETH: 'eth-updown-15m-',
+  SOL: 'sol-updown-15m-',
+}
+
 // ==========================================
 // STRATEGY
 // ==========================================
@@ -69,11 +77,12 @@ const ASSET_NAMES: Record<string, string> = {
  * Trades 15-minute binary markets where the outcome is "Up" if the asset's
  * price finishes >= the window-start price, "Down" otherwise.
  *
- * Market discovery via gammaClient.searchMarkets() since these ephemeral
- * markets don't appear in the /events active list.
+ * Market discovery via slug-based lookup: slugs follow the pattern
+ * {asset}-updown-15m-{windowStartUnix} where windowStartUnix aligns to
+ * 900-second boundaries. Two lookups per asset per scan (current + next window).
  *
- * computeSignal() is the USER CONTRIBUTION POINT — replace the placeholder
- * with your own 5-10 lines of directional logic.
+ * "Price to beat" is captured from the live price oracle at window start,
+ * since the Gamma API doesn't include it in the market data.
  */
 export class BtcUpDownStrategy extends BaseStrategy {
   name = 'BTC Up/Down'
@@ -93,13 +102,28 @@ export class BtcUpDownStrategy extends BaseStrategy {
   private positionsByWindow = new Map<string, boolean>()
   private lastTradeTimes = new Map<string, number>()
   private priceHistory = new Map<string, Array<{ price: number; timestamp: number }>>()
-  /** Consecutive search failures — triggers fallback to /events after 2 failures */
-  // Removed: searchFailures counter — /search endpoint requires auth we don't have.
-  // Always use /events filtering instead (same results, no 401).
+  /** Cached live price at window start — keyed by "{asset}:{windowStartMs}" */
+  private windowOpenPriceCache = new Map<string, number>()
+  /** Last computed signal per asset — exposed for dashboard display */
+  private _lastSignals = new Map<string, { signal: Signal; windowOpenPrice: number; currentPrice: number }>()
 
   constructor(config?: Partial<BtcUpDownConfig>) {
     super()
-    if (config) this.btcConfig = { ...DEFAULT_CONFIG, ...config }
+    // Hydrate from persisted settings (same pattern as TradingService.ts line 45)
+    const s = useSettingsStore.getState()
+    const persisted: Partial<BtcUpDownConfig> = {
+      enableBtc: s.btcEnableBtc,
+      enableEth: s.btcEnableEth,
+      enableSol: s.btcEnableSol,
+      minConfidence: s.btcMinConfidence,
+      maxEntryPrice: s.btcMaxEntryPrice,
+      minWindowRemaining: s.btcMinWindowRemaining,
+      tradeSize: s.btcTradeSize,
+      useKellySizing: s.btcUseKellySizing,
+      stopLossPercent: s.btcStopLossPercent,
+      takeProfitPercent: s.btcTakeProfitPercent,
+    }
+    this.btcConfig = { ...DEFAULT_CONFIG, ...persisted, ...config }
     this._config = { enabled: false, ...this.btcConfig }
   }
 
@@ -145,6 +169,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
     this.positionsByWindow.clear()
     this.lastTradeTimes.clear()
     this.priceHistory.clear()
+    this.windowOpenPriceCache.clear()
+    this._lastSignals.clear()
 
     this.setStatus('idle')
     activityLogger.logSystem('BTC Up/Down Strategy stopped')
@@ -161,6 +187,13 @@ export class BtcUpDownStrategy extends BaseStrategy {
       // 1. Discover markets for enabled assets
       await this.discoverMarkets()
 
+      if (this.activeMarkets.size === 0) {
+        const msg = 'BTC: No Up/Down markets found — these 15-min markets may be unavailable right now'
+        console.log(`[BTC Scan] ${msg}`)
+        activityLogger.logScan(msg, { total: 0, eligible: 0 })
+        return
+      }
+
       // 2. Check position limits
       let btcPositionCount = 0
       try {
@@ -170,6 +203,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
       } catch { /* PLM not available */ }
 
       if (btcPositionCount >= this.btcConfig.maxConcurrentPositions) {
+        rejectionTracker.record('position_limit', 'btc', `${btcPositionCount}/${this.btcConfig.maxConcurrentPositions} BTC positions`)
         return
       }
 
@@ -198,63 +232,62 @@ export class BtcUpDownStrategy extends BaseStrategy {
     if (this.btcConfig.enableEth) assets.push('ETH')
     if (this.btcConfig.enableSol) assets.push('SOL')
 
-    // Evict expired markets first
+    // Evict expired markets and associated tracking data
     const now = Date.now()
     for (const [id, entry] of this.activeMarkets) {
       if (entry.windowEndMs < now) {
         this.activeMarkets.delete(id)
         this.positionsByWindow.delete(id)
+        this.lastTradeTimes.delete(id)
+      }
+    }
+
+    // Prune stale priceHistory and windowOpenPriceCache entries
+    const activeAssets = new Set<string>()
+    for (const entry of this.activeMarkets.values()) activeAssets.add(entry.asset)
+    for (const asset of this.priceHistory.keys()) {
+      if (!activeAssets.has(asset)) this.priceHistory.delete(asset)
+    }
+    for (const key of this.windowOpenPriceCache.keys()) {
+      // Key format: "{asset}:{windowStartMs}" — prune if asset not active
+      const cachedAsset = key.split(':')[0]
+      if (!activeAssets.has(cachedAsset) && !assets.includes(cachedAsset as 'BTC' | 'ETH' | 'SOL')) {
+        this.windowOpenPriceCache.delete(key)
       }
     }
 
     for (const asset of assets) {
       try {
-        const assetName = ASSET_NAMES[asset]
-        let markets: Market[] = []
+        const markets = await this.discoverBySlug(asset)
 
-        // Use /events endpoint (public, no auth required) and filter by question text.
-        // The /search endpoint requires auth tokens we don't have (returns 401).
-        markets = await this.discoverViaEvents(assetName)
+        this.log(`[Discovery] ${markets.length} slug results for ${asset}`)
+        console.log(`[BTC Discovery] ${asset}: ${markets.length} markets found via slug`)
 
-        this.log(`[Discovery] ${markets.length} results for ${assetName}`)
+        if (markets.length === 0) {
+          console.log(`[BTC Discovery] No ${asset} Up/Down markets currently active on Polymarket`)
+        }
 
         for (const market of markets) {
-          if (!market.active || market.closed) {
-            this.log(`[Discovery] Skipped ${market.id}: active=${market.active}, closed=${market.closed}`)
-            continue
-          }
+          if (!market.active || market.closed) continue
           if (this.activeMarkets.has(market.id)) continue
 
-          // Must be binary (Polymarket uses "Yes"/"No" outcomes, not "Up"/"Down")
-          if (!market.outcomes || market.outcomes.length !== 2) {
-            this.log(`[Discovery] Skipped ${market.id}: not binary (${market.outcomes?.length} outcomes)`)
-            continue
-          }
-
-          // Verify this is an Up/Down market from the question text
-          const questionUpper = market.question.toUpperCase()
-          if (!questionUpper.includes('UP') && !questionUpper.includes('DOWN')) {
-            this.log(`[Discovery] Skipped ${market.id}: no UP/DOWN in question`)
-            continue
-          }
-
-          // Parse window-open price from question (e.g., "$95,432.50")
-          const windowOpenPrice = this.parseWindowOpenPrice(market)
-          if (!windowOpenPrice) {
-            this.log(`[Discovery] Skipped ${market.id}: no price in question "${market.question.substring(0, 50)}"`)
-            continue
-          }
+          // Must be binary (Up/Down markets have exactly 2 outcomes)
+          if (!market.outcomes || market.outcomes.length !== 2) continue
 
           // Check time remaining
           const windowEndMs = new Date(market.endDate).getTime()
           const timeRemaining = windowEndMs - now
           if (timeRemaining < this.btcConfig.minWindowRemaining * 1000) {
-            this.log(`[Discovery] Skipped ${market.id}: only ${Math.round(timeRemaining / 1000)}s left (need ${this.btcConfig.minWindowRemaining}s)`)
+            this.log(`[Discovery] ${market.id}: only ${Math.round(timeRemaining / 1000)}s left (need ${this.btcConfig.minWindowRemaining}s)`)
             continue
           }
 
+          // Capture "price to beat" from live oracle (not from question text — it's not there)
+          const windowStartMs = windowEndMs - WINDOW_DURATION_MS
+          const windowOpenPrice = await this.getWindowOpenPrice(asset, windowStartMs)
+
           this.activeMarkets.set(market.id, { market, windowOpenPrice, asset, windowEndMs })
-          this.log(`Found: ${market.question.substring(0, 60)}... (${Math.round(timeRemaining / 1000)}s left)`)
+          this.log(`Found: ${market.question.substring(0, 60)}... (${Math.round(timeRemaining / 1000)}s left, open $${windowOpenPrice.toFixed(2)})`)
         }
       } catch (error) {
         this.logError(`Discovery failed for ${asset}`, error)
@@ -263,28 +296,68 @@ export class BtcUpDownStrategy extends BaseStrategy {
   }
 
   /**
-   * Fallback market discovery via /events endpoint when /search returns 401.
-   * Fetches all active markets and filters by question text.
+   * Slug-based market discovery for Up/Down 15-minute markets.
+   * Slugs follow the pattern: {asset}-updown-15m-{windowStartUnix}
+   * where windowStartUnix aligns to 900-second (15-min) boundaries.
+   *
+   * Queries current window + next window (2 API calls per asset).
    */
-  private async discoverViaEvents(assetName: string): Promise<Market[]> {
-    const allMarkets = await gammaClient.getActiveMarkets()
-    const nameUpper = assetName.toUpperCase()
-    return allMarkets.filter(m => {
-      const q = m.question.toUpperCase()
-      return q.includes(nameUpper) && (q.includes('UP') || q.includes('DOWN'))
-    })
+  private async discoverBySlug(asset: 'BTC' | 'ETH' | 'SOL'): Promise<Market[]> {
+    const prefix = ASSET_SLUG_PREFIX[asset]
+    const nowSec = Math.floor(Date.now() / 1000)
+    const currentWindowStart = Math.floor(nowSec / 900) * 900
+    const nextWindowStart = currentWindowStart + 900
+
+    const slugs = [
+      `${prefix}${currentWindowStart}`,
+      `${prefix}${nextWindowStart}`,
+    ]
+
+    const markets: Market[] = []
+
+    for (const slug of slugs) {
+      try {
+        const event = await gammaClient.getEventBySlug(slug)
+        if (!event) continue
+
+        // Event contains child markets — extract them
+        const eventMarkets = event.markets || []
+        for (const m of eventMarkets) {
+          if (m.active && !m.closed) {
+            markets.push(m)
+          }
+        }
+      } catch (error) {
+        this.log(`[Discovery] Slug lookup failed for ${slug}: ${error}`)
+      }
+    }
+
+    return markets
   }
 
   /**
-   * Extract window-open price from market question text.
-   * Example: "Will Bitcoin be UP or DOWN from $95,432.50 at 10:15 PM?"
+   * Get the "price to beat" for a window.
+   * Captures live BTC/ETH/SOL price from oracle and caches per window.
+   * If discovered mid-window, uses current price as approximation
+   * (momentum factor degrades gracefully with approximate open price).
    */
-  private parseWindowOpenPrice(market: Market): number | null {
-    const text = `${market.question} ${market.description || ''}`
-    const match = text.match(/\$([0-9,]+\.?[0-9]*)/)
-    if (!match) return null
-    const price = parseFloat(match[1].replace(/,/g, ''))
-    return isNaN(price) ? null : price
+  private async getWindowOpenPrice(asset: 'BTC' | 'ETH' | 'SOL', windowStartMs: number): Promise<number> {
+    const cacheKey = `${asset}:${windowStartMs}`
+
+    // Return cached if we already captured for this window
+    const cached = this.windowOpenPriceCache.get(cacheKey)
+    if (cached !== undefined) return cached
+
+    // Capture live price
+    try {
+      const { priceUSD } = await priceOracleService.getPrice(asset)
+      this.windowOpenPriceCache.set(cacheKey, priceUSD)
+      return priceUSD
+    } catch (error) {
+      this.logError(`Failed to capture open price for ${asset}`, error)
+      // Fallback: return a rough estimate that won't break signal computation
+      return asset === 'BTC' ? 97000 : asset === 'ETH' ? 2600 : 150
+    }
   }
 
   // ==========================================
@@ -306,22 +379,32 @@ export class BtcUpDownStrategy extends BaseStrategy {
       if (history.length > 20) history.shift()
       this.priceHistory.set(asset, history)
 
-      // Polymarket uses "Yes"/"No" outcomes, not "Up"/"Down".
-      // "Yes" = the event in the question (UP or DOWN) happens.
-      // Determine direction from question text, then map to Yes/No indices.
-      const yesIndex = market.outcomes.indexOf('Yes')
-      const noIndex = market.outcomes.indexOf('No')
-      if (yesIndex < 0 || noIndex < 0) return
+      // BTC Up/Down markets use ["Up", "Down"] outcomes (NOT ["Yes", "No"]).
+      // Detect format and map to conceptual up/down prices for signal computation.
+      let upIndex: number, downIndex: number
+      let upPrice: number, downPrice: number
 
-      // Detect what "Yes" means from the question text
-      const questionUpper = market.question.toUpperCase()
-      const questionMeansUp = questionUpper.includes('UP')
-      // "Yes" price = price of the thing the question asks about
-      const yesPrice = market.outcomePrices[yesIndex]
-      const noPrice = market.outcomePrices[noIndex]
-      // Map to conceptual up/down prices for signal computation
-      const upPrice = questionMeansUp ? yesPrice : noPrice
-      const downPrice = questionMeansUp ? noPrice : yesPrice
+      const hasUpDown = market.outcomes.includes('Up') && market.outcomes.includes('Down')
+      const hasYesNo = market.outcomes.includes('Yes') && market.outcomes.includes('No')
+
+      if (hasUpDown) {
+        upIndex = market.outcomes.indexOf('Up')
+        downIndex = market.outcomes.indexOf('Down')
+        upPrice = market.outcomePrices[upIndex]
+        downPrice = market.outcomePrices[downIndex]
+      } else if (hasYesNo) {
+        // Fallback for legacy markets that use Yes/No with question-text direction
+        const yesIndex = market.outcomes.indexOf('Yes')
+        const noIndex = market.outcomes.indexOf('No')
+        const questionMeansUp = market.question.toUpperCase().includes('UP')
+        upIndex = questionMeansUp ? yesIndex : noIndex
+        downIndex = questionMeansUp ? noIndex : yesIndex
+        upPrice = market.outcomePrices[upIndex]
+        downPrice = market.outcomePrices[downIndex]
+      } else {
+        console.warn(`[BTC] Unrecognized outcomes: ${JSON.stringify(market.outcomes)}`)
+        return
+      }
 
       // Build signal input
       const windowEndMs = new Date(market.endDate).getTime()
@@ -343,6 +426,10 @@ export class BtcUpDownStrategy extends BaseStrategy {
       // Multi-factor mechanical signal
       const signal = this.computeSignal(signalInput)
 
+      // Store for dashboard display + emit event for real-time UI updates
+      this._lastSignals.set(asset, { signal, windowOpenPrice, currentPrice })
+      this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice })
+
       // Log signal details for diagnostics
       this.log(
         `${asset} signal: ${signal.direction.toUpperCase()} conf=${(signal.confidence * 100).toFixed(0)}% ` +
@@ -352,19 +439,18 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Gate: confidence
       if (signal.confidence < this.btcConfig.minConfidence) {
-        this.log(`${asset} signal REJECTED: conf=${(signal.confidence * 100).toFixed(0)}% < min ${(this.btcConfig.minConfidence * 100).toFixed(0)}%`)
+        console.log(`[BTC Signal] ${asset} REJECTED: conf=${(signal.confidence * 100).toFixed(0)}% < min ${(this.btcConfig.minConfidence * 100).toFixed(0)}%`)
+        rejectionTracker.record('confidence', 'btc', `${asset} ${(signal.confidence * 100).toFixed(0)}% < ${(this.btcConfig.minConfidence * 100).toFixed(0)}%`)
         return
       }
 
       // Gate: max entry price
-      // Map signal direction → outcome index:
-      // If question asks about "UP" and signal is "up", buy YES. If signal is "down", buy NO.
-      // If question asks about "DOWN" and signal is "down", buy YES. If signal is "up", buy NO.
-      const buyYes = (signal.direction === 'up') === questionMeansUp
-      const targetIndex = buyYes ? yesIndex : noIndex
+      // Map signal direction → outcome index directly (Up/Down format is 1:1)
+      const targetIndex = signal.direction === 'up' ? upIndex : downIndex
       const targetPrice = market.outcomePrices[targetIndex]
       if (targetPrice > this.btcConfig.maxEntryPrice) {
         this.log(`${asset} ${signal.direction.toUpperCase()} at ${(targetPrice * 100).toFixed(0)}c exceeds max ${(this.btcConfig.maxEntryPrice * 100).toFixed(0)}c`)
+        rejectionTracker.record('market_filter', 'btc', `${asset} price ${(targetPrice * 100).toFixed(0)}c > ${(this.btcConfig.maxEntryPrice * 100).toFixed(0)}c max`)
         return
       }
 
@@ -378,9 +464,12 @@ export class BtcUpDownStrategy extends BaseStrategy {
       )
 
       // Execute trade
+      // TradingService.placeBet() expects 'yes'/'no' but we pass explicit outcomeIndex
+      // which overrides the yes/no mapping. Map index 0 → 'yes', index 1 → 'no'.
+      const outcomeStr: 'yes' | 'no' = targetIndex === 0 ? 'yes' : 'no'
       const result = await tradingService.placeBet(
         market,
-        buyYes ? 'yes' : 'no',
+        outcomeStr,
         positionSize,
         { skipGtcFallback: true, outcomeIndex: targetIndex },
       )
@@ -405,7 +494,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
           tokenId: market.clobTokenIds[targetIndex],
           marketId: market.id,
           conditionId: market.conditionId,
-          outcome: buyYes ? 'yes' : 'no',
+          outcome: outcomeStr,
           question: market.question,
           entryPrice: targetPrice,
           size: filledSize,
@@ -429,7 +518,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
         outcomes: market.outcomes,
         strategy: 'btc',
         side: 'BUY',
-        outcome: buyYes ? 'Yes' : 'No',
+        outcome: market.outcomes[targetIndex] || (targetIndex === 0 ? 'Yes' : 'No'),
         marketPrice: targetPrice,
         kellyFraction: fStar,
         kellyBetSize: KellySizer.sizeBet({
@@ -520,16 +609,15 @@ export class BtcUpDownStrategy extends BaseStrategy {
       // Dynamic import to avoid adding to critical path — fire-and-forget pattern
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { microstructureAnalyzer } = require('@/services/trading/MicrostructureAnalyzer')
-      const yesTokenId = input.market.clobTokenIds?.[input.market.outcomes.indexOf('Yes')]
-      if (yesTokenId) {
-        const signal = microstructureAnalyzer.getSignal(yesTokenId)
+      // Use the first token (Up outcome) — measures general order flow imbalance
+      const firstTokenId = input.market.clobTokenIds?.[0]
+      if (firstTokenId) {
+        const signal = microstructureAnalyzer.getSignal(firstTokenId)
         if (signal && signal.signalConfidence > 0.3) {
-          // compositeSignal is -1 to 1: positive = bullish for YES outcome
-          // Determine if YES = UP from question text
-          const qMeansUp = input.market.question.toUpperCase().includes('UP')
-          // If question asks about UP: YES bullish = UP bullish
-          // If question asks about DOWN: YES bullish = DOWN bullish (inverted for our signal)
-          const adjustedSignal = qMeansUp ? signal.compositeSignal : -signal.compositeSignal
+          // compositeSignal is -1 to 1: positive = bullish for first outcome
+          // First outcome is typically "Up" — positive signal = bullish for Up
+          const isFirstUp = input.market.outcomes[0] === 'Up' || input.market.question.toUpperCase().includes('UP')
+          const adjustedSignal = isFirstUp ? signal.compositeSignal : -signal.compositeSignal
           imbalanceScore = direction === 'up' ? adjustedSignal : -adjustedSignal
         }
       }
@@ -603,6 +691,42 @@ export class BtcUpDownStrategy extends BaseStrategy {
     const kellyFraction = useSettingsStore.getState().kellyFraction
     const fStar = KellySizer.polymarketKelly(confidence, marketPrice)
     return Math.round(KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar }) * 100) / 100
+  }
+
+  // ==========================================
+  // DASHBOARD DATA API
+  // ==========================================
+
+  /** Get the latest computed signal for an asset (for dashboard gauge display) */
+  getLastSignal(asset: 'BTC' | 'ETH' | 'SOL'): { signal: Signal; windowOpenPrice: number; currentPrice: number } | null {
+    return this._lastSignals.get(asset) ?? null
+  }
+
+  /** Get the current active window timing (for dashboard timer display) */
+  getActiveWindow(): { asset: string; windowStartMs: number; windowEndMs: number } | null {
+    for (const entry of this.activeMarkets.values()) {
+      return {
+        asset: entry.asset,
+        windowStartMs: entry.windowEndMs - WINDOW_DURATION_MS,
+        windowEndMs: entry.windowEndMs,
+      }
+    }
+    return null
+  }
+
+  /** Get all active market entries (for dashboard asset cards) */
+  getActiveMarketEntries(): Array<{
+    asset: 'BTC' | 'ETH' | 'SOL'
+    windowOpenPrice: number
+    windowEndMs: number
+    marketId: string
+  }> {
+    return Array.from(this.activeMarkets.entries()).map(([id, entry]) => ({
+      asset: entry.asset,
+      windowOpenPrice: entry.windowOpenPrice,
+      windowEndMs: entry.windowEndMs,
+      marketId: id,
+    }))
   }
 
   // ==========================================

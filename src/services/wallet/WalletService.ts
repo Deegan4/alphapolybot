@@ -8,7 +8,7 @@ import {
   type TokenApprovals,
   type TransactionResult,
 } from '@/types'
-import { clobClient, dataClient } from '@/services/api'
+import { CLOBClient, clobClient, dataClient } from '@/services/api'
 
 /**
  * Wallet Service
@@ -80,9 +80,10 @@ export class WalletService {
   }
 
   /**
-   * Set the Polymarket proxy (funder) address.
-   * Call before connect() so it's available during initialization.
-   * This is typically the Polymarket proxy wallet that holds your funds.
+   * Set the Polymarket proxy (funder) address manually.
+   * NOTE: connect() now auto-computes the correct proxy via CREATE2.
+   * This method is kept for backward compatibility but the computed
+   * proxy will override it during connect() if there's a mismatch.
    */
   setProxyAddress(proxy: string | null): void {
     const normalized = proxy?.trim() || null
@@ -90,7 +91,7 @@ export class WalletService {
 
     if (normalized) {
       clobClient.setFunder(normalized)
-      console.log(`[WalletService] Proxy address set: ${normalized}`)
+      console.log(`[WalletService] Proxy address set (manual): ${normalized}`)
     } else {
       clobClient.setFunder(null)
       console.log('[WalletService] Proxy address cleared — using EOA directly')
@@ -133,23 +134,35 @@ export class WalletService {
         throw new Error(`Wrong network. Expected Polygon (${POLYGON_NETWORK.chainId}), got ${network.chainId}`)
       }
 
-      // Detect Polymarket proxy wallet:
-      // If user stored a proxy address previously, use it.
-      // Otherwise, check if the EOA itself is a contract (shouldn't be for a private key import).
-      const storedProxy = this.state.proxyAddress
-      let proxyAddress = storedProxy
+      // ─── Compute the deterministic Polymarket proxy wallet address ───
+      // Polymarket's on-chain verifyPolyProxySignature() checks that the
+      // order's `maker` field matches the CREATE2-derived proxy address for
+      // the signer EOA. If these don't match → "invalid signature".
+      //
+      // We compute it deterministically from the signer's address using the
+      // same CREATE2 formula as the on-chain PolyProxyLib.
+      const computedProxy = CLOBClient.computePolyProxyAddress(address)
+      console.log(`[WalletService] Computed proxy for signer ${address}: ${computedProxy}`)
 
-      // If no stored proxy, try to auto-detect by checking if the CLOB API returns one
-      // (For now, rely on user-provided proxy from setProxyAddress())
-      if (proxyAddress) {
-        // Validate the proxy is actually a contract on-chain
-        const code = await this.provider.getCode(proxyAddress)
-        if (code === '0x') {
-          console.warn(`[WalletService] Proxy address ${proxyAddress} is NOT a contract — ignoring`)
-          proxyAddress = null
-        } else {
-          console.log(`[WalletService] Proxy wallet confirmed: ${proxyAddress}`)
-        }
+      // Verify the computed proxy is actually deployed on-chain
+      let proxyAddress: string | null = null
+      const code = await this.provider.getCode(computedProxy)
+      if (code !== '0x') {
+        proxyAddress = computedProxy
+        console.log(`[WalletService] Proxy wallet confirmed on-chain: ${proxyAddress}`)
+      } else {
+        console.warn(`[WalletService] Computed proxy ${computedProxy} is NOT deployed — using EOA mode`)
+      }
+
+      // Warn if user had a different proxy stored (common source of "invalid signature")
+      const storedProxy = this.state.proxyAddress
+      if (storedProxy && proxyAddress && storedProxy.toLowerCase() !== proxyAddress.toLowerCase()) {
+        console.warn(
+          `[WalletService] ⚠️ PROXY MISMATCH DETECTED!\n` +
+          `  Stored proxy:   ${storedProxy}\n` +
+          `  Computed proxy: ${proxyAddress}\n` +
+          `  Using computed proxy (CREATE2-derived) — stored value was incorrect.`,
+        )
       }
 
       // Initialize API clients with wallet + proxy info

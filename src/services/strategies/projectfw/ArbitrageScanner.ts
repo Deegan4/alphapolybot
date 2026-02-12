@@ -139,7 +139,7 @@ export class ArbitrageScanner {
     // Lower-liquidity markets are more likely to have wider spreads (arb opportunities)
     // but we need SOME liquidity for fills. Sort by liquidity ascending to
     // check the "sweet spot" markets first, then cap at maxOrderBookChecks.
-    const maxOrderBookChecks = 75
+    const maxOrderBookChecks = 150
     allCandidates.sort((a, b) => (a.liquidity ?? 0) - (b.liquidity ?? 0))
     const candidates = allCandidates.slice(0, maxOrderBookChecks)
 
@@ -458,13 +458,16 @@ export class ArbitrageScanner {
   /**
    * Compute net profit in USD after taker fees and gas.
    *
-   * netProfit = (guaranteedProfit * tradeSize) - (takerFee * tradeSize * numLegs) - (gas * numLegs)
+   * netProfit = (guaranteedProfit * tradeSize) - (takerFee * tradeSize * numLegs) - mergeGas
+   *
+   * Note: CLOB order legs are off-chain (zero gas). Only the merge tx is on-chain.
+   * Taker fees apply per-leg because each CLOB fill charges the fee.
    */
   computeNetProfit(guaranteedProfitRatio: number, numLegs: number): number {
     const grossProfit = guaranteedProfitRatio * this.config.tradeSize
     const totalFees = (this.config.takerFeeBps / 10000) * this.config.tradeSize * numLegs
-    const totalGas = this.config.gasEstimateUSD * numLegs
-    return grossProfit - totalFees - totalGas
+    const mergeGas = this.config.gasEstimateUSD // single merge tx, not per-leg
+    return grossProfit - totalFees - mergeGas
   }
 
   /**

@@ -1,9 +1,10 @@
 import React, { Suspense, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
-import { AppLayout } from '@/components/layout'
+// AppLayout is no longer used — Settings now uses SettingsLayout
 import { useSettingsStore, useWalletStore } from '@/stores'
 import { tradingService, riskManager, positionLifecycleManager, gtcOrderManager, activityLogger } from '@/services/trading'
 import { indexedDBService } from '@/services/storage'
+import { secureStorage } from '@/utils/secureStorage'
 import { strategyManager } from '@/services/strategies'
 import { openRouterService } from '@/services/llm'
 import { notificationService } from '@/services/notifications'
@@ -11,10 +12,9 @@ import { MatrixToastContainer } from '@/components/ui'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 
 // Lazy-load route views — Vite code-splits each into its own chunk.
-// Users only download the JS for the view they navigate to.
-const TradingTerminal = React.lazy(() => import('@/views/TradingTerminal'))
-const PortfolioView = React.lazy(() => import('@/views/PortfolioView'))
-const ActivityView = React.lazy(() => import('@/views/ActivityView'))
+const DashboardView = React.lazy(() => import('@/views/DashboardView'))
+const DashboardLayout = React.lazy(() => import('@/components/layout/DashboardLayout'))
+const SettingsLayout = React.lazy(() => import('@/components/layout/SettingsLayout'))
 const SettingsView = React.lazy(() => import('@/views/SettingsView'))
 const NotFoundView = React.lazy(() => import('@/views/NotFoundView'))
 
@@ -89,17 +89,36 @@ const App: React.FC = () => {
         })
       }).catch(() => {})
 
+      // Connect Binance WS for reliable real-time crypto prices (all 3 assets)
+      // RTDS only reliably streams BTC; Binance covers ETH + SOL at ~1s resolution
+      import('@/services/realtime/BinanceWSService').then(({ binanceWSService }) => {
+        binanceWSService.connect().then(connected => {
+          if (connected) {
+            console.log('[App] Binance WS connected — streaming BTC/ETH/SOL')
+          } else {
+            console.warn('[App] Binance WS connection failed — will retry or use HTTP fallback')
+          }
+        })
+      }).catch(() => {})
+
+      // Start periodic auto-pruning (every 6 hours)
+      // Cleans IndexedDB stores, in-memory collections, and expired localStorage
+      const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000
+      setInterval(() => {
+        indexedDBService.pruneAll().catch(() => {})
+        riskManager.pruneInMemory()
+        secureStorage.clearExpired()
+      }, PRUNE_INTERVAL_MS)
+      console.log('[App] Auto-pruning scheduled (every 6h)')
+
       // Auto-reconnect wallet if seed phrase is available in env
       // walletStore persists address but NOT the live ethers.Wallet instance,
       // so on page refresh we need to re-call connect() to restore balances.
       const seedPhrase = import.meta.env.VITE_WALLET_SEED_PHRASE
       if (seedPhrase && seedPhrase !== 'word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12') {
-        const { address, proxyAddress } = useWalletStore.getState()
-        // Restore proxy address into walletService before connect() so it queries the right fund source
-        if (proxyAddress) {
-          const { walletService } = await import('@/services/wallet')
-          walletService.setProxyAddress(proxyAddress)
-        }
+        const { address } = useWalletStore.getState()
+        // NOTE: connect() now auto-computes the correct proxy via CREATE2.
+        // Do NOT restore a persisted proxyAddress here — it may be stale/wrong.
         if (!useWalletStore.getState().isConnected || address) {
           console.log('[App] Auto-reconnecting wallet from env seed phrase...')
           try {
@@ -164,13 +183,15 @@ const App: React.FC = () => {
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Suspense fallback={<MatrixLoading />}>
           <Routes>
-            <Route path="/" element={<AppLayout />}>
-              <Route index element={<TradingTerminal />} />
-              <Route path="portfolio" element={<PortfolioView />} />
-              <Route path="activity" element={<ActivityView />} />
-              <Route path="settings" element={<SettingsView />} />
-              <Route path="*" element={<NotFoundView />} />
+            {/* Dashboard: full-width, no sidebar */}
+            <Route path="/" element={<DashboardLayout />}>
+              <Route index element={<DashboardView />} />
             </Route>
+            {/* Settings: agent-themed layout, no sidebar */}
+            <Route path="/settings" element={<SettingsLayout />}>
+              <Route index element={<SettingsView />} />
+            </Route>
+            <Route path="*" element={<NotFoundView />} />
           </Routes>
         </Suspense>
       </BrowserRouter>

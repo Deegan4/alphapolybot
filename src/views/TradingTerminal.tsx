@@ -145,7 +145,7 @@ export const TradingTerminal: React.FC = () => {
       <MatrixStatsGrid stats={stats} />
 
       {/* Main 3-column layout */}
-      <div className="flex-1 grid grid-cols-3 gap-4 min-h-0">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 min-h-0">
         {/* Column 1: Strategy Controls — gradient variant */}
         <MatrixCard title="STRATEGIES" variant="gradient" className="flex flex-col min-h-0">
           <motion.div

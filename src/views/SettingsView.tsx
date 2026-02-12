@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixInput, MatrixButton, MatrixToggle, MatrixSelect, MatrixBadge, MatrixNumberInput, AnimatedCounter, MatrixSlider } from '@/components/ui'
 import { useWalletStore, useSettingsStore } from '@/stores'
@@ -34,25 +34,47 @@ export const SettingsView: React.FC = () => {
     { id: 'api', label: 'API Keys' },
   ]
 
+  const handleTabKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const tabIds = tabs.map(t => t.id)
+    const currentIndex = tabIds.indexOf(activeTab)
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      e.preventDefault()
+      const next = tabIds[(currentIndex + 1) % tabIds.length]
+      setActiveTab(next as typeof activeTab)
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      e.preventDefault()
+      const prev = tabIds[(currentIndex - 1 + tabIds.length) % tabIds.length]
+      setActiveTab(prev as typeof activeTab)
+    }
+  }, [activeTab, tabs])
+
   return (
-    <div className="h-full flex gap-4">
-      {/* Sidebar — sliding indicator */}
-      <div className="w-48 space-y-1">
+    <div className="h-full flex flex-col md:flex-row gap-4">
+      {/* Tab list — horizontal scroll on mobile, vertical sidebar on md+ */}
+      <div
+        className="flex md:flex-col md:w-48 gap-1 overflow-x-auto hide-scrollbar pb-2 md:pb-0"
+        role="tablist"
+        aria-label="Settings sections"
+        onKeyDown={handleTabKeyDown}
+      >
         {tabs.map(tab => (
           <button
             key={tab.id}
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            tabIndex={activeTab === tab.id ? 0 : -1}
             onClick={() => setActiveTab(tab.id as typeof activeTab)}
             className={cn(
-              'relative w-full text-left px-4 py-2.5 rounded-md font-mono text-sm transition-colors',
+              'relative whitespace-nowrap md:w-full text-left px-4 py-2.5 rounded-md font-mono text-sm transition-colors',
               activeTab === tab.id
-                ? 'text-matrix-primary'
-                : 'text-matrix-text-secondary hover:text-matrix-primary'
+                ? 'text-agent-green'
+                : 'text-agent-text-muted hover:text-agent-green'
             )}
           >
             {activeTab === tab.id && (
               <motion.div
                 layoutId="settings-tab"
-                className="absolute inset-0 rounded-md bg-matrix-primary/10 border border-matrix-primary/20"
+                className="absolute inset-0 rounded-md bg-agent-green/10 border border-agent-green/20"
                 transition={{ type: 'spring', stiffness: 350, damping: 30 }}
               />
             )}
@@ -62,7 +84,7 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {/* Content — animated tab transitions */}
-      <div className="flex-1">
+      <div className="flex-1 min-h-0 overflow-auto" role="tabpanel" aria-label={tabs.find(t => t.id === activeTab)?.label}>
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -130,7 +152,7 @@ const TradingModeSettings: React.FC = () => {
             confirmLive ? 'cursor-default' : 'cursor-pointer',
             isLive
               ? 'bg-red-900/20 border-red-500/50'
-              : 'bg-matrix-secondary/10 border-matrix-secondary/50'
+              : 'bg-agent-orange/10 border-agent-orange/50'
           )}
           onClick={() => !confirmLive && handleToggleDryRun(!dryRun)}
           animate={isLive ? {
@@ -142,11 +164,11 @@ const TradingModeSettings: React.FC = () => {
             <div>
               <h3 className={cn(
                 'text-xl font-bold font-mono',
-                isLive ? 'text-red-500' : 'text-matrix-secondary'
+                isLive ? 'text-red-500' : 'text-agent-orange'
               )}>
                 {isLive ? 'LIVE TRADING' : 'DRY RUN MODE'}
               </h3>
-              <p className="text-matrix-text-secondary text-sm mt-1 font-sans">
+              <p className="text-agent-text-muted text-sm mt-1 font-sans">
                 {isLive
                   ? 'CAUTION: Real orders will be executed with real funds!'
                   : 'Orders are simulated. No real money is at risk.'}
@@ -175,7 +197,7 @@ const TradingModeSettings: React.FC = () => {
             >
               <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-4">
                 <h4 className="text-red-500 font-bold mb-2">Enable Live Trading?</h4>
-                <p className="text-matrix-text-secondary text-sm mb-4 font-sans">
+                <p className="text-agent-text-muted text-sm mb-4 font-sans">
                   This will execute real orders on Polymarket using your connected wallet.
                   Real funds will be at risk. Are you sure?
                 </p>
@@ -199,13 +221,13 @@ const TradingModeSettings: React.FC = () => {
         </AnimatePresence>
 
         {/* Info Box */}
-        <div className="bg-matrix-bg/60 rounded-lg p-4 space-y-3">
-          <h4 className="text-matrix-primary text-sm font-mono">What happens in each mode:</h4>
+        <div className="bg-agent-bg/60 rounded-lg p-4 space-y-3">
+          <h4 className="text-agent-green text-sm font-mono">What happens in each mode:</h4>
 
           <div className="space-y-2">
             <div className="flex items-start gap-3">
               <MatrixBadge variant="info" size="sm">DRY RUN</MatrixBadge>
-              <ul className="text-matrix-text-secondary text-xs font-sans space-y-1">
+              <ul className="text-agent-text-muted text-xs font-sans space-y-1">
                 <li>Orders are logged but not sent to Polymarket</li>
                 <li>Token approvals are simulated</li>
                 <li>Strategy logic runs normally for testing</li>
@@ -215,7 +237,7 @@ const TradingModeSettings: React.FC = () => {
 
             <div className="flex items-start gap-3">
               <MatrixBadge variant="danger" size="sm">LIVE</MatrixBadge>
-              <ul className="text-matrix-text-secondary text-xs font-sans space-y-1">
+              <ul className="text-agent-text-muted text-xs font-sans space-y-1">
                 <li>Real orders executed on Polygon mainnet</li>
                 <li>Real USDC spent on trades</li>
                 <li>Token approvals submitted as transactions</li>
@@ -231,7 +253,7 @@ const TradingModeSettings: React.FC = () => {
             'p-6 rounded-lg border-2 transition-all cursor-pointer',
             pennyTraderMode
               ? 'bg-yellow-500/10 border-yellow-500/50'
-              : 'bg-matrix-bg/30 border-matrix-border'
+              : 'bg-agent-bg/30 border-agent-border'
           )}
           onClick={() => setPennyTraderMode(!pennyTraderMode)}
         >
@@ -239,11 +261,11 @@ const TradingModeSettings: React.FC = () => {
             <div>
               <h3 className={cn(
                 'text-xl font-bold font-mono',
-                pennyTraderMode ? 'text-yellow-400' : 'text-matrix-text-secondary'
+                pennyTraderMode ? 'text-yellow-400' : 'text-agent-text-muted'
               )}>
                 {pennyTraderMode ? 'PENNY TRADER MODE' : 'STANDARD MODE'}
               </h3>
-              <p className="text-matrix-text-secondary text-sm mt-1 font-sans">
+              <p className="text-agent-text-muted text-sm mt-1 font-sans">
                 {pennyTraderMode
                   ? 'All trades set to $1.00 minimum. Optimized for $5-$20 accounts.'
                   : 'Strategies use their configured trade sizes.'}
@@ -270,7 +292,7 @@ const TradingModeSettings: React.FC = () => {
             >
               <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
                 <h4 className="text-yellow-400 text-sm font-mono mb-2">Penny Mode Overrides:</h4>
-                <ul className="text-matrix-text-secondary text-xs font-sans space-y-1">
+                <ul className="text-agent-text-muted text-xs font-sans space-y-1">
                   <li>All strategies: $1.00 per trade (Polymarket minimum)</li>
                   <li>Daily loss limit: scaled to 20% of configured ($2 at default $10)</li>
                   <li>Weekly loss limit: scaled to 20% of configured ($10 at default $50)</li>
@@ -282,10 +304,10 @@ const TradingModeSettings: React.FC = () => {
         </AnimatePresence>
 
         {/* Kelly Criterion Position Sizing */}
-        <div className={`bg-matrix-surface/50 border border-matrix-border rounded-lg p-4 ${pennyTraderMode ? 'opacity-50' : ''}`}>
+        <div className={`bg-agent-card/50 border border-agent-border rounded-lg p-4 ${pennyTraderMode ? 'opacity-50' : ''}`}>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-matrix-text text-sm font-mono">Kelly Fraction</span>
-            <span className="text-matrix-primary text-sm font-mono font-bold">
+            <span className="text-agent-text text-sm font-mono">Kelly Fraction</span>
+            <span className="text-agent-green text-sm font-mono font-bold">
               {kellyFraction === 0 ? 'Off' : kellyFraction <= 0.25 ? `${(kellyFraction * 4).toFixed(0)}/4 Kelly` : `${(kellyFraction * 100).toFixed(0)}%`}
             </span>
           </div>
@@ -297,16 +319,16 @@ const TradingModeSettings: React.FC = () => {
             value={kellyFraction}
             onChange={(e) => setKellyFraction(parseFloat(e.target.value))}
             disabled={pennyTraderMode}
-            className="w-full h-2 bg-matrix-border rounded-lg appearance-none cursor-pointer accent-matrix-primary disabled:cursor-not-allowed"
+            className="w-full h-2 bg-agent-border rounded-lg appearance-none cursor-pointer accent-agent-green disabled:cursor-not-allowed"
           />
-          <div className="flex justify-between text-[10px] text-matrix-text-secondary mt-1 font-mono">
+          <div className="flex justify-between text-[10px] text-agent-text-muted mt-1 font-mono">
             <span>Off</span>
             <span>1/4</span>
             <span>1/2</span>
             <span>3/4</span>
             <span>Full</span>
           </div>
-          <p className="text-matrix-text-secondary text-xs mt-2 font-sans">
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
             {pennyTraderMode
               ? 'Disabled — Penny Mode overrides all sizing to $1'
               : kellyFraction === 0
@@ -320,8 +342,8 @@ const TradingModeSettings: React.FC = () => {
         </div>
 
         {/* Current Status */}
-        <div className="text-center text-matrix-text-secondary text-sm font-sans">
-          Trading service configured: <span className={isLive ? 'text-red-500 font-mono' : 'text-matrix-secondary font-mono'}>
+        <div className="text-center text-agent-text-muted text-sm font-sans">
+          Trading service configured: <span className={isLive ? 'text-red-500 font-mono' : 'text-agent-orange font-mono'}>
             {isLive ? (confirmLive ? 'PENDING...' : 'LIVE') : 'DRY RUN'}
           </span>
         </div>
@@ -397,34 +419,34 @@ const WalletSettings: React.FC = () => {
             {/* Connected State */}
             <div className="flex items-center gap-3">
               <motion.span
-                className="w-3 h-3 bg-matrix-primary rounded-full"
-                animate={{ boxShadow: ['0 0 4px #00ff00', '0 0 10px #00ff00', '0 0 4px #00ff00'] }}
+                className="w-3 h-3 bg-agent-green rounded-full"
+                animate={{ opacity: [0.6, 1, 0.6] }}
                 transition={{ duration: 2, repeat: Infinity }}
               />
-              <span className="text-matrix-primary font-mono">Connected</span>
+              <span className="text-agent-green font-mono">Connected</span>
             </div>
 
-            <div className="bg-matrix-bg/60 rounded-lg p-4 space-y-3">
+            <div className="bg-agent-bg/60 rounded-lg p-4 space-y-3">
               <div>
-                <span className="text-matrix-text-secondary text-sm font-sans">Signer (EOA):</span>
-                <p className="text-matrix-primary font-mono text-sm mt-1">{address}</p>
+                <span className="text-agent-text-muted text-sm font-sans">Signer (EOA):</span>
+                <p className="text-agent-green font-mono text-sm mt-1">{address}</p>
               </div>
               {proxyAddress && (
                 <div>
-                  <span className="text-matrix-text-secondary text-sm font-sans">Polymarket Proxy (Funder):</span>
-                  <p className="text-matrix-secondary font-mono text-sm mt-1">{proxyAddress}</p>
+                  <span className="text-agent-text-muted text-sm font-sans">Polymarket Proxy (Funder):</span>
+                  <p className="text-agent-orange font-mono text-sm mt-1">{proxyAddress}</p>
                 </div>
               )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <span className="text-matrix-text-secondary text-sm font-sans">USDC Balance:</span>
-                  <p className="text-matrix-primary font-mono text-lg">
+                  <span className="text-agent-text-muted text-sm font-sans">USDC Balance:</span>
+                  <p className="text-agent-green font-mono text-lg">
                     <AnimatedCounter value={usdcBalance} prefix="$" precision={2} />
                   </p>
                 </div>
                 <div>
-                  <span className="text-matrix-text-secondary text-sm font-sans">MATIC Balance:</span>
-                  <p className="text-matrix-primary font-mono text-lg">
+                  <span className="text-agent-text-muted text-sm font-sans">MATIC Balance:</span>
+                  <p className="text-agent-green font-mono text-lg">
                     <AnimatedCounter value={balance} precision={4} />
                   </p>
                 </div>
@@ -449,7 +471,7 @@ const WalletSettings: React.FC = () => {
 
             {/* Approvals */}
             <div className="space-y-3">
-              <h4 className="text-matrix-text-secondary text-sm font-sans">Token Approvals</h4>
+              <h4 className="text-agent-text-muted text-sm font-sans">Token Approvals</h4>
               <div className="flex items-center gap-4">
                 <MatrixBadge variant={approvals.usdc ? 'success' : 'warning'}>
                   USDC: {approvals.usdc ? 'Approved' : 'Not Approved'}
@@ -479,8 +501,8 @@ const WalletSettings: React.FC = () => {
         ) : (
           <>
             {/* Disconnected State */}
-            <div className="bg-matrix-bg/60 rounded-lg p-4 space-y-4">
-              <p className="text-matrix-text-secondary text-sm font-sans">
+            <div className="bg-agent-bg/60 rounded-lg p-4 space-y-4">
+              <p className="text-agent-text-muted text-sm font-sans">
                 Enter your seed phrase or private key to connect. Credentials stay local and are never sent to any server.
               </p>
               <MatrixInput
@@ -492,22 +514,22 @@ const WalletSettings: React.FC = () => {
                 error={error}
               />
               <MatrixInput
-                label="Polymarket Proxy Address (optional)"
+                label="Polymarket Proxy Address (auto-computed)"
                 value={proxyInput}
                 onChange={(e) => {
                   setProxyInput(e.target.value)
-                  // Save immediately so it persists before connect
+                  // Manual override — only use if auto-compute is wrong
                   const val = e.target.value.trim()
                   setProxyAddress(/^0x[0-9a-fA-F]{40}$/.test(val) ? val : null)
                 }}
-                placeholder="0x... (from polymarket.com profile)"
-                hint="Your Polymarket deposit address. Needed if you use email/social login."
+                placeholder="Auto-computed on connect (leave blank)"
+                hint="Auto-computed from your signer via CREATE2. Leave blank unless you need a manual override."
               />
             </div>
 
-            <div className="bg-matrix-secondary/10 border border-matrix-secondary/30 rounded-lg p-4">
-              <h4 className="text-matrix-secondary text-sm font-bold mb-2">Security Warning</h4>
-              <ul className="text-matrix-text-secondary text-xs font-sans space-y-1">
+            <div className="bg-agent-orange/10 border border-agent-orange/30 rounded-lg p-4">
+              <h4 className="text-agent-orange text-sm font-bold mb-2">Security Warning</h4>
+              <ul className="text-agent-text-muted text-xs font-sans space-y-1">
                 <li>Never share your seed phrase with anyone</li>
                 <li>Only use a dedicated trading wallet</li>
                 <li>This bot has full access to your wallet funds</li>
@@ -532,7 +554,7 @@ const GtdFallbackSettings: React.FC = () => {
 
   return (
     <div>
-      <h4 className="text-matrix-primary text-sm font-mono mb-3">Order Execution</h4>
+      <h4 className="text-agent-green text-sm font-mono mb-3">Order Execution</h4>
       <div className="space-y-3">
         <MatrixToggle
           label="GTD Fallback"
@@ -552,7 +574,7 @@ const GtdFallbackSettings: React.FC = () => {
           />
         )}
       </div>
-      <p className="text-matrix-text-secondary text-xs mt-2 font-sans">
+      <p className="text-agent-text-muted text-xs mt-2 font-sans">
         GTD orders sit on the book until filled or expired. Saves wasted LLM analysis on illiquid markets.
       </p>
     </div>
@@ -566,7 +588,7 @@ const LLMSettings: React.FC = () => {
   const strategy = strategyManager.getLLMStrategy()
   const [config, setConfig] = useState<LLMPredictionConfig>(strategy.getLLMConfig())
   const [saved, setSaved] = useState(false)
-  const { pennyTraderMode } = useSettingsStore()
+  const { pennyTraderMode, llmWebSearchEnabled, setLlmWebSearchEnabled } = useSettingsStore()
 
   // Safe number parsers — reject NaN from empty/invalid inputs
   const safeFloat = (val: string, fallback: number) => {
@@ -591,7 +613,7 @@ const LLMSettings: React.FC = () => {
       <div className="space-y-6">
         {/* Position Sizing */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Position Sizing</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixInput
               label="Base Size (%)"
@@ -635,9 +657,22 @@ const LLMSettings: React.FC = () => {
           </div>
         </div>
 
+        {/* Web Search */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Web Search</h4>
+          <MatrixToggle
+            label="Enable Web Search"
+            enabled={llmWebSearchEnabled}
+            onChange={setLlmWebSearchEnabled}
+          />
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
+            When enabled, the LLM researches current news and data before predicting (~$0.013/call vs $0.001 without).
+          </p>
+        </div>
+
         {/* Market Filters */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Market Filters</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Market Filters</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixInput
               label="Min Odds"
@@ -670,7 +705,7 @@ const LLMSettings: React.FC = () => {
 
         {/* Order Settings */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Order Execution</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Order Execution</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixSelect
               label="Order Type"
@@ -693,7 +728,7 @@ const LLMSettings: React.FC = () => {
 
         {/* Stop-Loss / Take-Profit */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Stop-Loss / Take-Profit</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Stop-Loss / Take-Profit</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixSlider
               label="Stop-Loss"
@@ -714,7 +749,7 @@ const LLMSettings: React.FC = () => {
               valueFormat={(v) => `${v}%`}
             />
           </div>
-          <p className="text-matrix-text-secondary text-xs mt-2 font-sans">
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
             Positions auto-close when thresholds are breached. Changes apply to new positions only.
           </p>
         </div>
@@ -769,9 +804,9 @@ const ProjectFWSettings: React.FC = () => {
   return (
     <MatrixCard title="PROJECTFW ARBITRAGE" subtitle="Frank-Wolfe optimized spread arbitrage" variant="glass">
       <div className="space-y-6">
-        <div className="bg-matrix-primary/10 border border-matrix-primary/30 rounded-lg p-4">
-          <h4 className="text-matrix-primary text-sm font-bold mb-2 font-mono">Bregman Projection Arbitrage</h4>
-          <p className="text-matrix-text-secondary text-xs font-sans">
+        <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
+          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Bregman Projection Arbitrage</h4>
+          <p className="text-agent-text-muted text-xs font-sans">
             Detects price incoherence via KL divergence and computes optimal trade bundles
             with guaranteed profit bounds using the Frank-Wolfe algorithm.
           </p>
@@ -779,7 +814,7 @@ const ProjectFWSettings: React.FC = () => {
 
         {/* Algorithm Parameters */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Algorithm Parameters</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Algorithm Parameters</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixSlider
               label="Alpha (Approximation Ratio)"
@@ -818,7 +853,7 @@ const ProjectFWSettings: React.FC = () => {
 
         {/* Trade Settings */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Trade Settings</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Trade Settings</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixInput
               label="Trade Size ($)"
@@ -863,7 +898,7 @@ const ProjectFWSettings: React.FC = () => {
 
         {/* Fee Model */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Fee Model</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Fee Model</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixInput
               label="Taker Fee (bps)"
@@ -885,7 +920,7 @@ const ProjectFWSettings: React.FC = () => {
 
         {/* Market Filters */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Market Filters</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Market Filters</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixInput
               label="Min Liquidity ($)"
@@ -906,7 +941,7 @@ const ProjectFWSettings: React.FC = () => {
 
         {/* Stop-Loss / Take-Profit */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Stop-Loss / Take-Profit</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Stop-Loss / Take-Profit</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixSlider
               label="Stop-Loss"
@@ -927,16 +962,16 @@ const ProjectFWSettings: React.FC = () => {
               valueFormat={(v) => `${v}%`}
             />
           </div>
-          <p className="text-matrix-text-secondary text-xs mt-2 font-sans">
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
             Applied to fallback positions when merge fails.
           </p>
         </div>
 
         {/* Multi-Outcome Toggle */}
-        <div className="flex items-center justify-between p-3 bg-matrix-bg/50 rounded-lg border border-matrix-border">
+        <div className="flex items-center justify-between p-3 bg-agent-bg/50 rounded-lg border border-agent-border">
           <div>
-            <span className="text-matrix-text-primary text-sm font-mono">Multi-Outcome Events</span>
-            <p className="text-matrix-text-secondary text-xs font-sans">
+            <span className="text-agent-text text-sm font-mono">Multi-Outcome Events</span>
+            <p className="text-agent-text-muted text-xs font-sans">
               Scan events with multiple related markets (experimental)
             </p>
           </div>
@@ -947,11 +982,11 @@ const ProjectFWSettings: React.FC = () => {
         </div>
 
         {/* Cross-Market Analysis */}
-        <div className="mt-6 pt-6 border-t border-matrix-primary/20">
-          <div className="flex items-center justify-between p-3 bg-matrix-bg/50 rounded-lg border border-matrix-border">
+        <div className="mt-6 pt-6 border-t border-agent-green/20">
+          <div className="flex items-center justify-between p-3 bg-agent-bg/50 rounded-lg border border-agent-border">
             <div>
-              <span className="text-matrix-text-primary text-sm font-mono">Cross-Market Analysis (BETA)</span>
-              <p className="text-matrix-text-secondary text-xs font-sans">
+              <span className="text-agent-text text-sm font-mono">Cross-Market Analysis (BETA)</span>
+              <p className="text-agent-text-muted text-xs font-sans">
                 AI-powered mutex detection between related markets
               </p>
             </div>
@@ -998,8 +1033,8 @@ const CrossMarketDetails: React.FC<{
     : 0
 
   return (
-    <div className="mt-3 pl-4 space-y-3 border-l-2 border-matrix-primary/30">
-      <p className="text-matrix-text-secondary text-xs font-sans">
+    <div className="mt-3 pl-4 space-y-3 border-l-2 border-agent-green/30">
+      <p className="text-agent-text-muted text-xs font-sans">
         Uses AI to detect mutually exclusive markets within events and validates arbitrage
         opportunities against cross-market constraints. Separate daily budget from LLM prediction.
         Currently validation-only mode.
@@ -1008,16 +1043,16 @@ const CrossMarketDetails: React.FC<{
       {/* Budget Bar */}
       <div className="space-y-1">
         <div className="flex items-center justify-between text-xs font-mono">
-          <span className="text-matrix-secondary">
+          <span className="text-agent-orange">
             Cross-Market Budget: ${budget.dailySpendUSD.toFixed(2)} / ${budget.dailyBudgetUSD.toFixed(2)}
           </span>
-          <span className="text-matrix-text-secondary">
+          <span className="text-agent-text-muted">
             {budget.callCountToday} calls
           </span>
         </div>
         <div className="h-1.5 bg-black/50 rounded-full overflow-hidden">
           <div
-            className="h-full bg-matrix-secondary transition-all duration-300 rounded-full"
+            className="h-full bg-agent-orange transition-all duration-300 rounded-full"
             style={{ width: `${spentPct}%` }}
           />
         </div>
@@ -1026,7 +1061,7 @@ const CrossMarketDetails: React.FC<{
       {/* Advanced Settings Toggle */}
       <button
         onClick={() => setShowAdvanced(!showAdvanced)}
-        className="text-sm text-matrix-primary hover:text-matrix-secondary transition-colors font-mono cursor-pointer"
+        className="text-sm text-agent-green hover:text-agent-orange transition-colors font-mono cursor-pointer"
       >
         {showAdvanced ? '- Hide' : '+ Show'} Advanced Settings
       </button>
@@ -1106,16 +1141,16 @@ const DipSettings: React.FC = () => {
   return (
     <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Configure dip buying parameters" variant="glass">
       <div className="space-y-6">
-        <div className="bg-matrix-primary/10 border border-matrix-primary/30 rounded-lg p-4">
-          <h4 className="text-matrix-primary text-sm font-bold mb-2 font-mono">Proven Configuration</h4>
-          <p className="text-matrix-text-secondary text-xs font-sans">
+        <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
+          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Proven Configuration</h4>
+          <p className="text-agent-text-muted text-xs font-sans">
             These settings achieved 86% ROI in backtesting. Adjust with caution.
           </p>
         </div>
 
         {/* Core Settings */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Trade Settings</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Trade Settings</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixInput
               label="Position Size ($)"
@@ -1137,7 +1172,7 @@ const DipSettings: React.FC = () => {
 
         {/* Dip Detection */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Dip Detection</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Dip Detection</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixInput
               label="Dip Threshold (%)"
@@ -1176,7 +1211,7 @@ const DipSettings: React.FC = () => {
 
         {/* Stop-Loss / Take-Profit (Fallback Positions) */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Stop-Loss / Take-Profit</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Stop-Loss / Take-Profit</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixSlider
               label="Stop-Loss"
@@ -1197,7 +1232,7 @@ const DipSettings: React.FC = () => {
               valueFormat={(v) => `${v}%`}
             />
           </div>
-          <p className="text-matrix-text-secondary text-xs mt-2 font-sans">
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
             Applied to fallback positions when Leg 2 or merge fails.
           </p>
         </div>
@@ -1228,9 +1263,9 @@ const MicroMomentumSettings: React.FC = () => {
     <MatrixCard title="MICRO MOMENTUM STRATEGY" subtitle="Order flow-based directional trading using bid/ask imbalance" variant="glass">
       <div className="space-y-6">
         {/* Info */}
-        <div className="bg-matrix-primary/10 border border-matrix-primary/30 rounded-lg p-4">
-          <h4 className="text-matrix-primary text-sm font-bold mb-2 font-mono">Mechanical Order Flow</h4>
-          <p className="text-matrix-text-secondary text-xs font-sans">
+        <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
+          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Mechanical Order Flow</h4>
+          <p className="text-agent-text-muted text-xs font-sans">
             Trades based on MicrostructureAnalyzer signals: bid/ask imbalance, spread dynamics,
             and composite order flow direction. No LLM required. Short holds (30min max).
           </p>
@@ -1238,7 +1273,7 @@ const MicroMomentumSettings: React.FC = () => {
 
         {/* Signal Thresholds */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Signal Thresholds</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Signal Thresholds</h4>
           <div className="space-y-4">
             <MatrixSlider
               label="Min Composite Signal"
@@ -1249,7 +1284,7 @@ const MicroMomentumSettings: React.FC = () => {
               step={0.05}
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
             />
-            <p className="text-matrix-text-secondary text-xs font-sans -mt-2">
+            <p className="text-agent-text-muted text-xs font-sans -mt-2">
               Minimum |compositeSignal| to trigger a trade. Lower = more trades, higher = more selective.
             </p>
 
@@ -1262,7 +1297,7 @@ const MicroMomentumSettings: React.FC = () => {
               step={0.05}
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
             />
-            <p className="text-matrix-text-secondary text-xs font-sans -mt-2">
+            <p className="text-agent-text-muted text-xs font-sans -mt-2">
               Data quality threshold. Higher requires more order book snapshots for confirmation.
             </p>
 
@@ -1275,7 +1310,7 @@ const MicroMomentumSettings: React.FC = () => {
               step={0.01}
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
             />
-            <p className="text-matrix-text-secondary text-xs font-sans -mt-2">
+            <p className="text-agent-text-muted text-xs font-sans -mt-2">
               Reject illiquid markets with spreads wider than this.
             </p>
           </div>
@@ -1283,7 +1318,7 @@ const MicroMomentumSettings: React.FC = () => {
 
         {/* Position Sizing */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Position Sizing</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
           <MatrixInput
             label="Trade Size ($)"
             type="number"
@@ -1299,7 +1334,7 @@ const MicroMomentumSettings: React.FC = () => {
 
         {/* Risk Management */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Risk Management</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Risk Management</h4>
           <div className="space-y-4">
             <MatrixSlider
               label="Stop Loss"
@@ -1320,15 +1355,15 @@ const MicroMomentumSettings: React.FC = () => {
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
             />
           </div>
-          <p className="text-matrix-text-secondary text-xs mt-2 font-sans">
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
             Tighter SL/TP than other strategies — these are momentum scalps with 30-min max hold.
           </p>
         </div>
 
         {/* How It Works */}
-        <div className="bg-matrix-bg/60 rounded-lg p-4 space-y-2">
-          <h4 className="text-matrix-primary text-sm font-mono">How It Works</h4>
-          <ul className="text-matrix-text-secondary text-xs space-y-1 font-sans">
+        <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
+          <h4 className="text-agent-green text-sm font-mono">How It Works</h4>
+          <ul className="text-agent-text-muted text-xs space-y-1 font-sans">
             <li>Subscribes to WebSocket feeds for top markets by volume</li>
             <li>MicrostructureAnalyzer computes composite signal from bid/ask imbalance</li>
             <li>Positive signal (more bids) → BUY YES; Negative (more asks) → BUY NO</li>
@@ -1360,23 +1395,26 @@ const BtcUpDownSettings: React.FC = () => {
     btcTakeProfitPercent, setBtcTakeProfitPercent,
   } = useSettingsStore()
 
+  const [diagnosing, setDiagnosing] = useState(false)
+  const [diagResult, setDiagResult] = useState<string | null>(null)
+
   return (
     <MatrixCard title="BTC UP/DOWN STRATEGY" subtitle="15-minute binary markets on crypto price direction" variant="glass">
       <div className="space-y-6">
         {/* Asset Toggles */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Enabled Assets</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Enabled Assets</h4>
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text font-sans text-sm">Bitcoin (BTC)</span>
+              <span className="text-agent-text font-sans text-sm">Bitcoin (BTC)</span>
               <MatrixToggle enabled={btcEnableBtc} onChange={setBtcEnableBtc} />
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text font-sans text-sm">Ethereum (ETH)</span>
+              <span className="text-agent-text font-sans text-sm">Ethereum (ETH)</span>
               <MatrixToggle enabled={btcEnableEth} onChange={setBtcEnableEth} />
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text font-sans text-sm">Solana (SOL)</span>
+              <span className="text-agent-text font-sans text-sm">Solana (SOL)</span>
               <MatrixToggle enabled={btcEnableSol} onChange={setBtcEnableSol} />
             </div>
           </div>
@@ -1384,10 +1422,10 @@ const BtcUpDownSettings: React.FC = () => {
 
         {/* Position Sizing */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Position Sizing</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text font-sans text-sm">Use Kelly Criterion</span>
+              <span className="text-agent-text font-sans text-sm">Use Kelly Criterion</span>
               <MatrixToggle enabled={btcUseKellySizing} onChange={setBtcUseKellySizing} />
             </div>
             {!btcUseKellySizing && (
@@ -1408,7 +1446,7 @@ const BtcUpDownSettings: React.FC = () => {
 
         {/* Entry Filters */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Entry Filters</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Entry Filters</h4>
           <div className="space-y-4">
             <MatrixSlider
               label="Min Confidence"
@@ -1443,7 +1481,7 @@ const BtcUpDownSettings: React.FC = () => {
 
         {/* Risk Management */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Risk Management</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Risk Management</h4>
           <div className="space-y-4">
             <MatrixSlider
               label="Stop Loss"
@@ -1466,15 +1504,49 @@ const BtcUpDownSettings: React.FC = () => {
           </div>
         </div>
 
+        {/* Diagnose Markets */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Market Diagnostics</h4>
+          <MatrixButton
+            variant="secondary"
+            size="sm"
+            loading={diagnosing}
+            onClick={async () => {
+              setDiagnosing(true)
+              setDiagResult(null)
+              try {
+                const { gammaClient } = await import('@/services/api/GammaClient')
+                const all = await gammaClient.getActiveMarkets()
+                const check = (name: string) => all.filter(m => {
+                  const q = m.question.toUpperCase()
+                  return q.includes(name) && (q.includes('UP') || q.includes('DOWN'))
+                }).length
+                setDiagResult(`BTC: ${check('BITCOIN')}, ETH: ${check('ETHEREUM')}, SOL: ${check('SOLANA')} Up/Down markets (${all.length} total active)`)
+              } catch (e) {
+                setDiagResult(`Error: ${e instanceof Error ? e.message : 'unknown'}`)
+              } finally {
+                setDiagnosing(false)
+              }
+            }}
+          >
+            Diagnose Markets
+          </MatrixButton>
+          {diagResult && (
+            <p className={`text-xs font-mono mt-2 ${diagResult.startsWith('Error') ? 'text-red-400' : 'text-agent-text-muted'}`}>
+              {diagResult}
+            </p>
+          )}
+        </div>
+
         {/* Info */}
-        <div className="bg-matrix-bg/60 rounded-lg p-4 space-y-2">
-          <h4 className="text-matrix-primary text-sm font-mono">How It Works</h4>
-          <ul className="text-matrix-text-secondary text-xs space-y-1 font-sans">
+        <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
+          <h4 className="text-agent-green text-sm font-mono">How It Works</h4>
+          <ul className="text-agent-text-muted text-xs space-y-1 font-sans">
             <li>Scans for active 15-min "Up or Down" markets via Gamma search API</li>
             <li>Fetches live crypto price from Binance (CoinGecko fallback)</li>
             <li>computeSignal() determines direction and confidence</li>
             <li>Positions auto-exit after 14 min (1-min buffer before resolution)</li>
-            <li>Edit <code className="text-matrix-accent">BtcUpDownStrategy.ts</code> to customize signal logic</li>
+            <li>Edit <code className="text-agent-cyan">BtcUpDownStrategy.ts</code> to customize signal logic</li>
           </ul>
         </div>
       </div>
@@ -1549,30 +1621,30 @@ const APISettings: React.FC = () => {
   return (
     <MatrixCard title="API KEYS" subtitle="Configure external service API keys" variant="glass">
       <div className="space-y-6">
-        <div className="bg-matrix-bg/60 rounded-lg p-4">
-          <p className="text-matrix-text-secondary text-sm font-sans">
+        <div className="bg-agent-bg/60 rounded-lg p-4">
+          <p className="text-agent-text-muted text-sm font-sans">
             API keys are stored locally in your browser. They are never sent to any external server except the respective API providers.
           </p>
         </div>
 
         {/* API Status */}
-        <div className="bg-matrix-bg/40 rounded-lg p-4 border border-matrix-border/50">
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">API Status</h4>
+        <div className="bg-agent-bg/40 rounded-lg p-4 border border-agent-border/50">
+          <h4 className="text-agent-green text-sm font-mono mb-3">API Status</h4>
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">OpenRouter</span>
+              <span className="text-agent-text-muted text-sm font-sans">OpenRouter</span>
               <MatrixBadge variant={isOpenRouterConfigured ? 'success' : 'warning'} size="sm">
                 {isOpenRouterConfigured ? 'Configured' : 'Not Set'}
               </MatrixBadge>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">Tavily (Optional)</span>
+              <span className="text-agent-text-muted text-sm font-sans">Tavily (Optional)</span>
               <MatrixBadge variant={isTavilyConfigured ? 'success' : 'default'} size="sm">
                 {isTavilyConfigured ? 'Configured' : 'Not Set'}
               </MatrixBadge>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">Polymarket CLOB</span>
+              <span className="text-agent-text-muted text-sm font-sans">Polymarket CLOB</span>
               <MatrixBadge variant={isClobConfigured ? 'success' : 'warning'} size="sm">
                 {isClobConfigured ? 'Configured' : 'Not Set'}
               </MatrixBadge>
@@ -1581,9 +1653,9 @@ const APISettings: React.FC = () => {
         </div>
 
         {/* Polymarket CLOB API Credentials */}
-        <div className="bg-matrix-bg/40 rounded-lg p-4 border border-matrix-border/50">
-          <h4 className="text-matrix-primary text-sm font-mono mb-2">Polymarket CLOB API (Builder Codes)</h4>
-          <p className="text-matrix-text-secondary text-xs font-sans mb-4">
+        <div className="bg-agent-bg/40 rounded-lg p-4 border border-agent-border/50">
+          <h4 className="text-agent-green text-sm font-mono mb-2">Polymarket CLOB API (Builder Codes)</h4>
+          <p className="text-agent-text-muted text-xs font-sans mb-4">
             Get these from polymarket.com/settings → Builder Codes → Create New.
             Required for live trading. Reconnect wallet after saving.
           </p>
@@ -1678,12 +1750,12 @@ const APISettings: React.FC = () => {
             </MatrixButton>
           </div>
           {credTestStatus !== 'idle' && credTestStatus !== 'testing' && (
-            <p className={`text-xs font-sans mt-2 ${credTestStatus === 'success' ? 'text-matrix-success' : 'text-matrix-danger'}`}>
+            <p className={`text-xs font-sans mt-2 ${credTestStatus === 'success' ? 'text-agent-green' : 'text-agent-red'}`}>
               {credTestMsg}
             </p>
           )}
           {!isConnected && (
-            <p className="text-matrix-text-secondary text-xs font-sans mt-2">
+            <p className="text-agent-text-muted text-xs font-sans mt-2">
               Connect wallet first to derive or test credentials.
             </p>
           )}
@@ -1730,7 +1802,7 @@ const APISettings: React.FC = () => {
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0 }}
-                className="text-matrix-primary text-sm font-mono"
+                className="text-agent-green text-sm font-mono"
               >
                 Saved successfully
               </motion.span>
@@ -1807,7 +1879,7 @@ const RiskManagementSettings: React.FC = () => {
             'p-4 rounded-lg border-2 transition-all',
             aggressiveMode
               ? 'bg-amber-900/20 border-amber-500/50'
-              : 'bg-matrix-bg/60 border-matrix-border'
+              : 'bg-agent-bg/60 border-agent-border'
           )}
         >
           <div
@@ -1825,7 +1897,7 @@ const RiskManagementSettings: React.FC = () => {
               <div className="flex items-center gap-2">
                 <h4 className={cn(
                   'font-mono text-sm font-bold',
-                  aggressiveMode ? 'text-amber-400' : 'text-matrix-text-secondary'
+                  aggressiveMode ? 'text-amber-400' : 'text-agent-text-muted'
                 )}>
                   AGGRESSIVE MODE
                 </h4>
@@ -1833,7 +1905,7 @@ const RiskManagementSettings: React.FC = () => {
                   <MatrixBadge variant="warning" size="sm">ACTIVE</MatrixBadge>
                 )}
               </div>
-              <p className="text-matrix-text-secondary text-xs mt-1 font-sans">
+              <p className="text-agent-text-muted text-xs mt-1 font-sans">
                 {aggressiveMode
                   ? 'Relaxed limits for maximum throughput. Higher risk, higher reward.'
                   : 'Batch-relax risk limits for faster trading. Requires separate dry run toggle.'}
@@ -1864,7 +1936,7 @@ const RiskManagementSettings: React.FC = () => {
               >
                 <div className="mt-3 pt-3 border-t border-amber-500/30 space-y-3">
                   <p className="text-amber-300 text-xs font-mono">This will change:</p>
-                  <ul className="text-matrix-text-secondary text-xs font-sans space-y-1">
+                  <ul className="text-agent-text-muted text-xs font-sans space-y-1">
                     <li>Penny Trader Mode: <span className="text-red-400">OFF</span></li>
                     <li>Kelly Fraction: 0.25 → <span className="text-amber-400">0.40</span></li>
                     <li>Daily Loss Limit: $4 → <span className="text-amber-400">$25</span></li>
@@ -1904,12 +1976,12 @@ const RiskManagementSettings: React.FC = () => {
 
         {/* Master Toggle */}
         <div
-          className="flex items-center justify-between p-4 rounded-lg bg-matrix-bg/60 cursor-pointer"
+          className="flex items-center justify-between p-4 rounded-lg bg-agent-bg/60 cursor-pointer"
           onClick={() => setRiskManagementEnabled(!riskManagementEnabled)}
         >
           <div>
-            <h4 className="text-matrix-primary font-mono text-sm">Enable Risk Management</h4>
-            <p className="text-matrix-text-secondary text-xs mt-1 font-sans">
+            <h4 className="text-agent-green font-mono text-sm">Enable Risk Management</h4>
+            <p className="text-agent-text-muted text-xs mt-1 font-sans">
               When disabled, all safety checks are bypassed
             </p>
           </div>
@@ -1923,7 +1995,7 @@ const RiskManagementSettings: React.FC = () => {
 
         {/* Limit Controls */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Safety Limits</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Safety Limits</h4>
           <div className="grid grid-cols-2 gap-4">
             <MatrixNumberInput
               label="Daily Loss Limit"
@@ -1993,43 +2065,43 @@ const RiskManagementSettings: React.FC = () => {
 
         {/* Live Status */}
         <div>
-          <h4 className="text-matrix-primary text-sm font-mono mb-3">Live Status</h4>
-          <div className="bg-matrix-bg/60 rounded-lg p-4 space-y-3">
+          <h4 className="text-agent-green text-sm font-mono mb-3">Live Status</h4>
+          <div className="bg-agent-bg/60 rounded-lg p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">Trades Last Hour</span>
-              <span className="text-matrix-primary font-mono text-sm">
+              <span className="text-agent-text-muted text-sm font-sans">Trades Last Hour</span>
+              <span className="text-agent-green font-mono text-sm">
                 <AnimatedCounter value={status.tradesLastHour} precision={0} /> / {status.config.maxTradesPerHour}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">P&L (24h)</span>
+              <span className="text-agent-text-muted text-sm font-sans">P&L (24h)</span>
               <span className={cn(
                 'font-mono text-sm',
-                status.pnlLast24h >= 0 ? 'text-matrix-primary' : 'text-red-400'
+                status.pnlLast24h >= 0 ? 'text-agent-green' : 'text-red-400'
               )}>
                 <AnimatedCounter value={status.pnlLast24h} prefix={status.pnlLast24h >= 0 ? '+$' : '$'} precision={2} />
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">P&L (7d)</span>
+              <span className="text-agent-text-muted text-sm font-sans">P&L (7d)</span>
               <span className={cn(
                 'font-mono text-sm',
-                status.pnlLast7d >= 0 ? 'text-matrix-primary' : 'text-red-400'
+                status.pnlLast7d >= 0 ? 'text-agent-green' : 'text-red-400'
               )}>
                 <AnimatedCounter value={status.pnlLast7d} prefix={status.pnlLast7d >= 0 ? '+$' : '$'} precision={2} />
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">Consecutive Failures</span>
+              <span className="text-agent-text-muted text-sm font-sans">Consecutive Failures</span>
               <span className={cn(
                 'font-mono text-sm',
-                status.consecutiveFailures > 0 ? 'text-matrix-secondary' : 'text-matrix-primary'
+                status.consecutiveFailures > 0 ? 'text-agent-orange' : 'text-agent-green'
               )}>
                 <AnimatedCounter value={status.consecutiveFailures} precision={0} /> / {status.config.consecutiveFailureLimit}
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-matrix-text-secondary text-sm font-sans">Status</span>
+              <span className="text-agent-text-muted text-sm font-sans">Status</span>
               <MatrixBadge
                 variant={status.emergencyStopped ? 'danger' : riskManagementEnabled ? 'success' : 'warning'}
                 size="sm"

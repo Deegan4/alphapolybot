@@ -143,9 +143,9 @@ export class IndexedDBService {
 
       console.log('[IndexedDB] Database opened successfully')
 
-      // Auto-cleanup old activities in background
-      this.cleanupOldActivities().catch(err =>
-        console.warn('[IndexedDB] Cleanup failed:', err)
+      // Auto-prune all stores on startup (background, non-blocking)
+      this.pruneAll().catch(err =>
+        console.warn('[IndexedDB] Auto-prune failed:', err)
       )
     } catch (error) {
       console.error('[IndexedDB] Failed to open database:', error)
@@ -420,28 +420,164 @@ export class IndexedDBService {
   // MAINTENANCE
   // ==========================================
 
+  // ==========================================
+  // AUTO-PRUNING — TTL and cap-based cleanup
+  // ==========================================
+
+  // Retention limits
+  private static readonly ACTIVITY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000  // 30 days
+  private static readonly ARB_ROUNDS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+  private static readonly TRADE_RECORDS_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000 // 90 days
+  private static readonly CALIBRATION_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000  // 60 days
+  private static readonly GTC_ORDERS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000    // 7 days (filled/expired)
+  private static readonly POSITIONS_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000    // 14 days (stale orphans)
+
+  /**
+   * Run all auto-pruning tasks. Safe to call frequently — each method is
+   * cursor-based and stops early once it passes the age threshold.
+   * Returns total records deleted across all stores.
+   */
+  async pruneAll(): Promise<number> {
+    let total = 0
+    total += await this.cleanupOldActivities()
+    total += await this.cleanupOldArbRounds()
+    total += await this.cleanupOldTradeRecords()
+    total += await this.cleanupOldCalibrationData()
+    total += await this.cleanupOldGtcOrders()
+    total += await this.cleanupStalePositions()
+    if (total > 0) {
+      console.log(`[IndexedDB] Auto-prune complete: ${total} total records removed`)
+    }
+    return total
+  }
+
   /**
    * Delete activities older than 30 days
    */
   async cleanupOldActivities(): Promise<number> {
-    if (!this.db) return 0
+    return this.pruneByTimestampIndex(
+      'activities', 'by-timestamp', 'timestamp',
+      IndexedDBService.ACTIVITY_MAX_AGE_MS, 'activities'
+    )
+  }
 
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
+  /**
+   * Delete arb rounds older than 7 days
+   */
+  async cleanupOldArbRounds(): Promise<number> {
+    return this.pruneByTimestampIndex(
+      'arbRounds', 'by-timestamp', '_storedAt',
+      IndexedDBService.ARB_ROUNDS_MAX_AGE_MS, 'arb rounds'
+    )
+  }
+
+  /**
+   * Delete trade records older than 90 days
+   */
+  async cleanupOldTradeRecords(): Promise<number> {
+    if (!this.db?.objectStoreNames.contains('tradeRecords')) return 0
+    return this.pruneByTimestampIndex(
+      'tradeRecords', 'by-timestamp', 'timestamp',
+      IndexedDBService.TRADE_RECORDS_MAX_AGE_MS, 'trade records'
+    )
+  }
+
+  /**
+   * Delete calibration predictions older than 60 days
+   */
+  async cleanupOldCalibrationData(): Promise<number> {
+    if (!this.db?.objectStoreNames.contains('calibrationData')) return 0
+    return this.pruneByTimestampIndex(
+      'calibrationData', 'by-timestamp', 'timestamp',
+      IndexedDBService.CALIBRATION_MAX_AGE_MS, 'calibration entries'
+    )
+  }
+
+  /**
+   * Delete filled/expired GTC orders older than 7 days.
+   * Only removes orders stored >7 days ago (safe for active orders).
+   */
+  async cleanupOldGtcOrders(): Promise<number> {
+    if (!this.db?.objectStoreNames.contains('gtcOrders')) return 0
+    const cutoff = Date.now() - IndexedDBService.GTC_ORDERS_MAX_AGE_MS
     let deleted = 0
 
     try {
-      const tx = this.db.transaction('activities', 'readwrite')
-      const index = tx.store.index('by-timestamp')
+      const tx = this.db!.transaction('gtcOrders', 'readwrite')
+      let cursor = await tx.store.openCursor()
+      while (cursor) {
+        const storedAt = (cursor.value as StoredGtcOrder)._storedAt
+        if (storedAt && storedAt < cutoff) {
+          await cursor.delete()
+          deleted++
+        }
+        cursor = await cursor.continue()
+      }
+      await tx.done
+      if (deleted > 0) console.log(`[IndexedDB] Pruned ${deleted} old GTC orders`)
+    } catch (error) {
+      console.warn('[IndexedDB] GTC order cleanup error:', error)
+    }
+    return deleted
+  }
 
-      // Walk through activities ordered by timestamp
+  /**
+   * Delete orphaned positions older than 14 days.
+   * Positions should be removed when closed, but crashes can leave orphans.
+   */
+  async cleanupStalePositions(): Promise<number> {
+    if (!this.db) return 0
+    const cutoff = Date.now() - IndexedDBService.POSITIONS_MAX_AGE_MS
+    let deleted = 0
+
+    try {
+      const tx = this.db.transaction('positions', 'readwrite')
+      let cursor = await tx.store.openCursor()
+      while (cursor) {
+        const storedAt = (cursor.value as StoredPosition)._storedAt
+        if (storedAt && storedAt < cutoff) {
+          await cursor.delete()
+          deleted++
+        }
+        cursor = await cursor.continue()
+      }
+      await tx.done
+      if (deleted > 0) console.log(`[IndexedDB] Pruned ${deleted} stale positions (>14 days old)`)
+    } catch (error) {
+      console.warn('[IndexedDB] Position cleanup error:', error)
+    }
+    return deleted
+  }
+
+  /**
+   * Generic cursor-based pruning: walks an index in order and deletes
+   * records whose timestamp field is older than maxAgeMs.
+   */
+  private async pruneByTimestampIndex(
+    storeName: 'activities' | 'arbRounds' | 'tradeRecords' | 'calibrationData',
+    indexName: string,
+    _timestampField: string,
+    maxAgeMs: number,
+    label: string,
+  ): Promise<number> {
+    if (!this.db) return 0
+
+    const cutoff = Date.now() - maxAgeMs
+    let deleted = 0
+
+    try {
+      const tx = this.db.transaction(storeName, 'readwrite')
+      const index = tx.store.index(indexName)
+
       let cursor = await index.openCursor()
       while (cursor) {
-        if (cursor.value.timestamp < thirtyDaysAgo) {
+        // The index is ordered by timestamp — values are the raw epoch numbers
+        const ts = cursor.key as number
+        if (ts < cutoff) {
           await cursor.delete()
           deleted++
         } else {
-          // Since index is ordered, once we pass the threshold we're done
-          break
+          break // past cutoff, all remaining are newer
         }
         cursor = await cursor.continue()
       }
@@ -449,37 +585,41 @@ export class IndexedDBService {
       await tx.done
 
       if (deleted > 0) {
-        console.log(`[IndexedDB] Cleaned up ${deleted} activities older than 30 days`)
+        console.log(`[IndexedDB] Pruned ${deleted} ${label} older than ${Math.round(maxAgeMs / 86_400_000)}d`)
       }
     } catch (error) {
-      console.warn('[IndexedDB] Cleanup error:', error)
+      console.warn(`[IndexedDB] ${label} cleanup error:`, error)
     }
 
     return deleted
   }
 
   /**
-   * Get storage statistics
+   * Get storage statistics for all 6 stores
    */
   async getStats(): Promise<{
     activities: number
     positions: number
     arbRounds: number
     gtcOrders: number
+    tradeRecords: number
+    calibrationData: number
   }> {
-    if (!this.db) return { activities: 0, positions: 0, arbRounds: 0, gtcOrders: 0 }
+    if (!this.db) return { activities: 0, positions: 0, arbRounds: 0, gtcOrders: 0, tradeRecords: 0, calibrationData: 0 }
 
     try {
-      const hasGtc = this.db.objectStoreNames.contains('gtcOrders')
-      const [activities, positions, arbRounds, gtcOrders] = await Promise.all([
+      const has = (name: string) => this.db!.objectStoreNames.contains(name as never)
+      const [activities, positions, arbRounds, gtcOrders, tradeRecords, calibrationData] = await Promise.all([
         this.db.count('activities'),
         this.db.count('positions'),
         this.db.count('arbRounds'),
-        hasGtc ? this.db.count('gtcOrders') : Promise.resolve(0),
+        has('gtcOrders') ? this.db.count('gtcOrders') : Promise.resolve(0),
+        has('tradeRecords') ? this.db.count('tradeRecords') : Promise.resolve(0),
+        has('calibrationData') ? this.db.count('calibrationData') : Promise.resolve(0),
       ])
-      return { activities, positions, arbRounds, gtcOrders }
+      return { activities, positions, arbRounds, gtcOrders, tradeRecords, calibrationData }
     } catch {
-      return { activities: 0, positions: 0, arbRounds: 0, gtcOrders: 0 }
+      return { activities: 0, positions: 0, arbRounds: 0, gtcOrders: 0, tradeRecords: 0, calibrationData: 0 }
     }
   }
 

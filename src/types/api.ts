@@ -81,6 +81,10 @@ export interface OrderRequest {
   expiration?: number  // Unix timestamp for GTD orders (0 = no expiry)
   conditionId?: string
   negRisk?: boolean
+  /** Defer execution — order is placed but not matched immediately (default: false) */
+  deferExec?: boolean
+  /** Post-only flag — only valid for GTC and GTD orders */
+  postOnly?: boolean
 }
 
 export interface OrderResult {
@@ -403,6 +407,7 @@ export interface GammaEvent {
   slug?: string
   active: boolean
   closed: boolean
+  enableNegRisk?: boolean
   markets: Market[]
 }
 
