@@ -814,6 +814,66 @@ export class WalletService {
       }
     }
   }
+  /**
+   * Redeem resolved CTF positions for USDC.e.
+   *
+   * After a market resolves on-chain, winning outcome tokens convert
+   * back to USDC.e. Losing tokens are burned (worth $0).
+   * Safe to call even if only holding one side — the CTF contract
+   * iterates the partition and redeems each position's full balance.
+   *
+   * Unlike mergePositions (which needs equal amounts of all outcomes
+   * and an explicit amount), redeemPositions has no amount parameter —
+   * it redeems the caller's entire balance automatically.
+   */
+  async redeemPositions(conditionId: string): Promise<TransactionResult> {
+    if (!this.wallet) {
+      return { success: false, error: 'Wallet not connected' }
+    }
+
+    try {
+      const ctfContract = new ethers.Contract(
+        CONTRACT_ADDRESSES.CTF,
+        CTF_ABI,
+        this.wallet
+      )
+
+      // Binary market partition: outcome slots 1 (YES) and 2 (NO)
+      const partition = [1, 2]
+
+      // parentCollectionId = bytes32(0) for top-level condition
+      const parentCollectionId = ethers.ZeroHash
+
+      console.log(`[WalletService] Redeeming resolved positions for condition ${conditionId}`)
+
+      const tx = await ctfContract.redeemPositions(
+        CONTRACT_ADDRESSES.USDC,
+        parentCollectionId,
+        conditionId,
+        partition
+      )
+
+      const receipt = await tx.wait()
+
+      console.log(`[WalletService] Redemption successful — tx: ${receipt.hash}`)
+
+      // Refresh balances to reflect redeemed USDC.e
+      await this.syncBalances()
+
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed,
+      }
+    } catch (error) {
+      console.error('[WalletService] Redeem positions failed:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Redemption failed',
+      }
+    }
+  }
 }
 
 // Export singleton instance

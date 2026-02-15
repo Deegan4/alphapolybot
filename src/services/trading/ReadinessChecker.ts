@@ -4,9 +4,15 @@
  * Checks wallet, balance, credentials, strategies, and connectivity.
  * Used by ReadinessPanel to show an actionable setup checklist.
  *
- * Zero dependencies on stores at import time — uses dynamic getState()
- * calls at check time only.
+ * Uses top-level imports for stores/services. This is safe because
+ * ReadinessChecker is a leaf node — only UI components import it.
  */
+
+import { useWalletStore } from '@/stores/walletStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { clobClient } from '@/services/api'
+import { strategyManager } from '@/services/strategies'
+import { realtimeService } from '@/services/realtime'
 
 export type CheckSeverity = 'critical' | 'warn' | 'info'
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'info'
@@ -45,7 +51,6 @@ class ReadinessCheckerService {
 
     // 1. Wallet connected
     try {
-      const { useWalletStore } = require('@/stores/walletStore')
       const walletState = useWalletStore.getState()
       checks.push({
         id: 'wallet',
@@ -90,30 +95,25 @@ class ReadinessCheckerService {
     }
 
     // 4. CLOB credentials
-    try {
-      const { clobClient } = require('@/services/api')
+    {
       const creds = clobClient.getCredentials()
+      const walletConnected = useWalletStore.getState().isConnected
       checks.push({
         id: 'clob_creds',
         label: 'CLOB credentials',
         severity: 'critical',
         status: creds ? 'pass' : 'fail',
-        detail: creds ? 'API key derived' : 'Credentials not derived — connect wallet first',
+        detail: creds
+          ? 'API key derived'
+          : walletConnected
+            ? 'Wallet connected — API keys pending'
+            : 'Connect wallet to derive CLOB credentials',
         action: creds ? undefined : { label: 'Connect wallet', route: '/settings' },
-      })
-    } catch {
-      checks.push({
-        id: 'clob_creds',
-        label: 'CLOB credentials',
-        severity: 'critical',
-        status: 'fail',
-        detail: 'CLOB client unavailable',
       })
     }
 
     // 5. OpenRouter API key (warn only)
     try {
-      const { useSettingsStore } = require('@/stores/settingsStore')
       const settings = useSettingsStore.getState()
       const hasKey = !!settings.openRouterApiKey
       checks.push({
@@ -129,29 +129,25 @@ class ReadinessCheckerService {
     }
 
     // 6. At least 1 strategy enabled
-    try {
-      const { strategyManager } = require('@/services/strategies')
+    {
       const states = strategyManager.getStates()
-      const anyEnabled = states.some((s: { enabled: boolean }) => s.enabled)
-      const anyRunning = states.some((s: { status: string }) => s.status === 'running')
+      const anyEnabled = states.some(s => s.enabled)
+      const anyRunning = states.some(s => s.status === 'running')
       checks.push({
         id: 'strategies',
         label: 'Strategies enabled',
         severity: 'warn',
         status: anyRunning ? 'pass' : anyEnabled ? 'warn' : 'warn',
         detail: anyRunning
-          ? `${states.filter((s: { status: string }) => s.status === 'running').length} running`
+          ? `${states.filter(s => s.status === 'running').length} running`
           : anyEnabled
             ? 'Enabled but not running — start from dropdown'
             : 'No strategies enabled',
       })
-    } catch {
-      // Skip if unavailable
     }
 
     // 7. WebSocket connected
-    try {
-      const { realtimeService } = require('@/services/realtime')
+    {
       const wsConnected = realtimeService.isConnected()
       checks.push({
         id: 'websocket',
@@ -160,13 +156,10 @@ class ReadinessCheckerService {
         status: wsConnected ? 'pass' : 'warn',
         detail: wsConnected ? 'Receiving market data' : 'Not connected — connects when strategies start',
       })
-    } catch {
-      // Skip if unavailable
     }
 
     // 8. Dry run status (info)
     try {
-      const { useSettingsStore } = require('@/stores/settingsStore')
       const { dryRun } = useSettingsStore.getState()
       checks.push({
         id: 'dry_run',
@@ -181,7 +174,6 @@ class ReadinessCheckerService {
 
     // 9. Penny trader mode (info)
     try {
-      const { useSettingsStore } = require('@/stores/settingsStore')
       const { pennyTraderMode } = useSettingsStore.getState()
       checks.push({
         id: 'penny_mode',

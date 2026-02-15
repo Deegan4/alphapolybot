@@ -30,11 +30,17 @@ export const HistoryView: React.FC = () => {
   const [sortKey, setSortKey] = useState<SortKey>('time')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
 
+  // Poll for new closed trades (matches 5s interval used by other dashboard components)
   useEffect(() => {
-    const all = tradeLogger.getRecords(5000)
-    const closed = all.filter((r) => r.exitTimestamp != null)
-    setRecords(closed)
-    setSummary(tradeLogger.getSummary())
+    const tick = () => {
+      const all = tradeLogger.getRecords(5000)
+      const closed = all.filter((r) => r.exitTimestamp != null)
+      setRecords(closed)
+      setSummary(tradeLogger.getSummary())
+    }
+    tick()
+    const id = setInterval(tick, 5000)
+    return () => clearInterval(id)
   }, [])
 
   const sorted = useMemo(() => {
@@ -80,9 +86,9 @@ export const HistoryView: React.FC = () => {
     : null
 
   return (
-    <div className="flex-1 flex flex-col gap-3 p-4 min-h-0 overflow-hidden">
+    <div className="flex-1 flex flex-col gap-4 p-5 min-h-0 overflow-hidden">
       {/* Summary stats row */}
-      <div className="grid grid-cols-6 gap-3">
+      <div className="grid grid-cols-6 gap-4">
         {[
           { label: 'Total P&L', value: `${summary.totalPnlUSD >= 0 ? '+' : ''}$${summary.totalPnlUSD.toFixed(2)}`, color: summary.totalPnlUSD >= 0 ? 'text-agent-green' : 'text-agent-red' },
           { label: 'Win Rate', value: `${summary.totalTrades > 0 ? Math.round(summary.winRate * 100) : 0}%`, color: summary.winRate >= 0.5 ? 'text-agent-green' : 'text-agent-red' },
@@ -91,17 +97,17 @@ export const HistoryView: React.FC = () => {
           { label: 'Best Trade', value: bestTrade ? `+$${(bestTrade.pnlUSD ?? 0).toFixed(2)}` : '--', color: 'text-agent-green' },
           { label: 'Worst Trade', value: worstTrade ? `$${(worstTrade.pnlUSD ?? 0).toFixed(2)}` : '--', color: 'text-agent-red' },
         ].map((stat) => (
-          <div key={stat.label} className="bg-agent-card border border-agent-border rounded-sm p-3 text-center">
-            <div className="text-[9px] uppercase tracking-wider text-agent-text-muted">{stat.label}</div>
-            <div className={`text-sm font-mono font-bold ${stat.color}`}>{stat.value}</div>
+          <div key={stat.label} className="bg-agent-card border border-agent-border rounded-lg p-3.5 text-center">
+            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans font-medium">{stat.label}</div>
+            <div className={`text-lg font-mono font-bold tabular-nums ${stat.color}`}>{stat.value}</div>
           </div>
         ))}
       </div>
 
       {/* Trade table */}
-      <div className="bg-agent-card border border-agent-border rounded-sm flex-1 flex flex-col min-h-0">
+      <div className="bg-agent-card border border-agent-border rounded-lg flex-1 flex flex-col min-h-0 overflow-hidden">
         {/* Table header */}
-        <div className="grid grid-cols-[120px_60px_80px_80px_80px_80px_80px_1fr] gap-2 px-3 py-2 border-b border-agent-border text-[9px] uppercase tracking-wider text-agent-text-muted font-mono">
+        <div className="grid grid-cols-[130px_65px_90px_80px_80px_80px_80px_1fr] gap-2 px-4 py-2.5 border-b border-agent-border bg-agent-elevated/30 text-[11px] uppercase tracking-wider text-agent-text-muted font-sans font-medium">
           <button onClick={() => toggleSort('time')} className="text-left hover:text-agent-text">
             Time{sortIcon('time')}
           </button>
@@ -121,17 +127,18 @@ export const HistoryView: React.FC = () => {
         {/* Table rows */}
         <div className="flex-1 overflow-y-auto min-h-0">
           {sorted.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-agent-text-label text-xs font-mono">
-              No closed trades yet
+            <div className="h-full flex flex-col items-center justify-center text-center gap-2">
+              <span className="text-2xl opacity-30">&#128200;</span>
+              <span className="text-sm font-sans text-agent-text-label">No closed trades yet</span>
             </div>
           ) : (
-            sorted.map((r) => {
+            sorted.map((r, index) => {
               const pnl = r.pnlUSD ?? 0
               const isWin = pnl >= 0
               return (
                 <div
                   key={r.id}
-                  className="grid grid-cols-[120px_60px_80px_80px_80px_80px_80px_1fr] gap-2 px-3 py-1.5 border-b border-agent-border/50 text-[11px] font-mono hover:bg-agent-elevated/30 transition-colors"
+                  className={`grid grid-cols-[130px_65px_90px_80px_80px_80px_80px_1fr] gap-2 px-4 py-2 border-b border-agent-border/50 text-xs font-mono hover:bg-agent-elevated/40 transition-colors ${index % 2 === 1 ? 'bg-agent-elevated/15' : ''}`}
                 >
                   <span className="text-agent-text-muted tabular-nums">
                     {formatDate(r.exitTimestamp!)}

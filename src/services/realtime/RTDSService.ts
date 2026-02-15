@@ -5,7 +5,7 @@ import type { RTDSMessage, RTDSCryptoPricePayload } from '@/types'
  * Mirrors the interface exactly.
  */
 export interface RTDSAssetPrice {
-  symbol: 'BTC' | 'ETH' | 'SOL'
+  symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'
   priceUSD: number
   timestamp: number
   source: 'rtds'
@@ -40,7 +40,7 @@ export class RTDSService {
   private priceCallbacks = new Set<CryptoPriceCallback>()
   private connectionCallbacks = new Set<ConnectionCallback>()
 
-  private wsUrl = 'wss://ws-live-data.polymarket.com'
+  private wsUrl = import.meta.env.VITE_RTDS_WS_URL || 'wss://ws-live-data.polymarket.com'
 
   /**
    * Connect to RTDS WebSocket.
@@ -126,15 +126,15 @@ export class RTDSService {
    */
   /** Map our short symbols to Polymarket RTDS trading pair notation */
   private static SYMBOL_MAP: Record<string, string> = {
-    BTC: 'BTCUSDT', ETH: 'ETHUSDT', SOL: 'SOLUSDT',
+    BTC: 'BTCUSDT', ETH: 'ETHUSDT', SOL: 'SOLUSDT', XRP: 'XRPUSDT',
   }
 
   /** Reverse map: BTCUSDT -> BTC */
-  private static PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL'> = {
-    BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL',
+  private static PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL' | 'XRP'> = {
+    BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL', XRPUSDT: 'XRP',
   }
 
-  subscribeCryptoPrices(symbols: ('BTC' | 'ETH' | 'SOL')[]): void {
+  subscribeCryptoPrices(symbols: ('BTC' | 'ETH' | 'SOL' | 'XRP')[]): void {
     if (this.ws?.readyState !== WebSocket.OPEN) {
       console.warn('[RTDS] Cannot subscribe — not connected')
       return
@@ -157,7 +157,7 @@ export class RTDSService {
   /**
    * Unsubscribe from crypto price updates.
    */
-  unsubscribeCryptoPrices(symbols: ('BTC' | 'ETH' | 'SOL')[]): void {
+  unsubscribeCryptoPrices(symbols: ('BTC' | 'ETH' | 'SOL' | 'XRP')[]): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
 
     const subscriptions = symbols.map(symbol => ({
@@ -176,7 +176,7 @@ export class RTDSService {
    * Get cached latest price for a symbol.
    * Synchronous — returns null if no RTDS data available.
    */
-  getCachedPrice(symbol: 'BTC' | 'ETH' | 'SOL'): RTDSAssetPrice | null {
+  getCachedPrice(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): RTDSAssetPrice | null {
     return this.prices.get(symbol) || null
   }
 
@@ -272,8 +272,8 @@ export class RTDSService {
 
     // Normalize symbol: "solusdt" -> "SOLUSDT" -> "SOL", or "BTC" -> "BTC"
     const rawSymbol = (payload.symbol as string).toUpperCase().replace(/USDT$|\/USD$/i, '')
-    const symbol = rawSymbol as 'BTC' | 'ETH' | 'SOL'
-    if (!['BTC', 'ETH', 'SOL'].includes(symbol)) return
+    const symbol = rawSymbol as 'BTC' | 'ETH' | 'SOL' | 'XRP'
+    if (!['BTC', 'ETH', 'SOL', 'XRP'].includes(symbol)) return
 
     const price: RTDSAssetPrice = {
       symbol,

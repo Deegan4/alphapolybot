@@ -20,7 +20,7 @@ const tabContentVariants = {
  * SettingsView - Application settings and configuration
  */
 export const SettingsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'api'>('trading')
+  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'api'>('trading')
 
   const tabs = [
     { id: 'trading', label: 'Trading Mode' },
@@ -31,6 +31,8 @@ export const SettingsView: React.FC = () => {
     { id: 'projectfw', label: 'ProjectFW Arb' },
     { id: 'btcupdown', label: 'BTC Up/Down' },
     { id: 'micro', label: 'Micro Momentum' },
+    { id: 'meanrev', label: 'Mean Reversion' },
+    { id: 'copytrading', label: 'Copy Trading' },
     { id: 'api', label: 'API Keys' },
   ]
 
@@ -101,6 +103,8 @@ export const SettingsView: React.FC = () => {
             {activeTab === 'projectfw' && <ProjectFWSettings />}
             {activeTab === 'btcupdown' && <BtcUpDownSettings />}
             {activeTab === 'micro' && <MicroMomentumSettings />}
+            {activeTab === 'meanrev' && <MeanReversionSettings />}
+            {activeTab === 'copytrading' && <CopyTradingSettings />}
             {activeTab === 'api' && <APISettings />}
           </motion.div>
         </AnimatePresence>
@@ -356,7 +360,7 @@ const TradingModeSettings: React.FC = () => {
  * Wallet Settings Panel
  */
 const WalletSettings: React.FC = () => {
-  const { isConnected, address, proxyAddress, usdcBalance, balance, approvals, connect, disconnect, setProxyAddress } = useWalletStore()
+  const { isConnected, address, proxyAddress, usdcBalance, usdcBridgedBalance, usdcNativeBalance, balance, approvals, connect, disconnect, setProxyAddress } = useWalletStore()
   const [seedPhrase, setSeedPhrase] = useState('')
   const [proxyInput, setProxyInput] = useState(proxyAddress || '')
   const [loading, setLoading] = useState(false)
@@ -453,6 +457,14 @@ const WalletSettings: React.FC = () => {
                   </p>
                 </div>
               </div>
+              {(usdcNativeBalance ?? 0) > 0 && (usdcBridgedBalance ?? 0) < 1 && (
+                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-3">
+                  <p className="text-yellow-400 text-sm font-sans">
+                    ⚠ <strong>${(usdcNativeBalance ?? 0).toFixed(2)} in native USDC</strong> — Polymarket can't use this.
+                    Swap native USDC → USDC.e on Uniswap or 1inch (Polygon network) to trade.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Low-MATIC gas warning */}
@@ -631,7 +643,17 @@ const LLMSettings: React.FC = () => {
   const strategy = strategyManager.getLLMStrategy()
   const [config, setConfig] = useState<LLMPredictionConfig>(strategy.getLLMConfig())
   const [saved, setSaved] = useState(false)
-  const { pennyTraderMode, llmWebSearchEnabled, setLlmWebSearchEnabled } = useSettingsStore()
+  const {
+    pennyTraderMode,
+    llmWebSearchEnabled, setLlmWebSearchEnabled,
+    llmPremiumModel, setLlmPremiumModel,
+    llmPremiumThreshold, setLlmPremiumThreshold,
+    llmPremiumBudgetUSD, setLlmPremiumBudgetUSD,
+    cryptoLLMEnabled, setCryptoLLMEnabled,
+    cryptoModel, setCryptoModel,
+    cryptoScanIntervalMs, setCryptoScanIntervalMs,
+    cryptoMinConfidence, setCryptoMinConfidence,
+  } = useSettingsStore()
 
   // Safe number parsers — reject NaN from empty/invalid inputs
   const safeFloat = (val: string, fallback: number) => {
@@ -795,6 +817,92 @@ const LLMSettings: React.FC = () => {
           <p className="text-agent-text-muted text-xs mt-2 font-sans">
             Positions auto-close when thresholds are breached. Changes apply to new positions only.
           </p>
+        </div>
+
+        {/* Premium Model Tiering */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Premium Model</h4>
+          <p className="text-agent-text-muted text-xs mb-3 font-sans">
+            Use a premium model for high-quality markets (quality score above threshold). Leave empty to disable.
+          </p>
+          <div className="grid grid-cols-2 gap-4">
+            <MatrixInput
+              label="Premium Model"
+              value={llmPremiumModel}
+              onChange={(e) => setLlmPremiumModel(e.target.value)}
+              hint="e.g. openai/gpt-4o"
+              placeholder="openai/gpt-4o"
+            />
+            <MatrixInput
+              label="Daily Budget ($)"
+              type="number"
+              step="0.10"
+              value={llmPremiumBudgetUSD.toString()}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value)
+                if (!isNaN(v)) setLlmPremiumBudgetUSD(Math.max(0.10, Math.min(5.0, v)))
+              }}
+              hint="$0.10 – $5.00"
+            />
+          </div>
+          <div className="mt-3">
+            <MatrixSlider
+              label="Quality Threshold"
+              min={15}
+              max={40}
+              step={1}
+              value={llmPremiumThreshold}
+              onChange={setLlmPremiumThreshold}
+              valueFormat={(v) => `${v} pts`}
+            />
+            <p className="text-agent-text-muted text-xs mt-1 font-sans">
+              Markets scoring above this threshold use the premium model. ~$0.007/call for GPT-4o.
+            </p>
+          </div>
+        </div>
+
+        {/* Crypto LLM Mode */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Crypto LLM Mode</h4>
+          <MatrixToggle
+            label="Enable Crypto LLM"
+            enabled={cryptoLLMEnabled}
+            onChange={setCryptoLLMEnabled}
+          />
+          <p className="text-agent-text-muted text-xs mt-2 mb-3 font-sans">
+            Dedicated scan loop for crypto prediction markets. Uses BinanceWS live data for enriched analysis.
+          </p>
+          {cryptoLLMEnabled && (
+            <div className="grid grid-cols-2 gap-4 mt-3">
+              <MatrixInput
+                label="Crypto Model"
+                value={cryptoModel}
+                onChange={(e) => setCryptoModel(e.target.value)}
+                hint="Leave empty to use default"
+                placeholder="Same as default"
+              />
+              <MatrixInput
+                label="Scan Interval (sec)"
+                type="number"
+                step="5"
+                value={(cryptoScanIntervalMs / 1000).toString()}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value)
+                  if (!isNaN(v)) setCryptoScanIntervalMs(Math.max(10, v) * 1000)
+                }}
+                hint="Min 10 seconds"
+              />
+              <MatrixSlider
+                label="Min Confidence"
+                min={40}
+                max={80}
+                step={1}
+                value={Math.round(cryptoMinConfidence * 100)}
+                onChange={(v) => setCryptoMinConfidence(v / 100)}
+                valueFormat={(v) => `${v}%`}
+              />
+            </div>
+          )}
         </div>
 
         <MatrixButton onClick={handleSave} className="w-full">
@@ -1429,6 +1537,11 @@ const BtcUpDownSettings: React.FC = () => {
     btcEnableBtc, setBtcEnableBtc,
     btcEnableEth, setBtcEnableEth,
     btcEnableSol, setBtcEnableSol,
+    btcEnableXrp, setBtcEnableXrp,
+    btcEnable5m, setBtcEnable5m,
+    btcEnable15m, setBtcEnable15m,
+    btcEnableHourly, setBtcEnableHourly,
+    btcEnableDaily, setBtcEnableDaily,
     btcTradeSize, setBtcTradeSize,
     btcUseKellySizing, setBtcUseKellySizing,
     btcMinConfidence, setBtcMinConfidence,
@@ -1436,13 +1549,18 @@ const BtcUpDownSettings: React.FC = () => {
     btcMinWindowRemaining, setBtcMinWindowRemaining,
     btcStopLossPercent, setBtcStopLossPercent,
     btcTakeProfitPercent, setBtcTakeProfitPercent,
+    btcMinTimeIntoWindowMs, setBtcMinTimeIntoWindowMs,
+    btcRegimeFilterEnabled, setBtcRegimeFilterEnabled,
+    btcRsiFilterEnabled, setBtcRsiFilterEnabled,
+    btcUseLLMConfirmation, setBtcUseLLMConfirmation,
+    openRouterApiKey,
   } = useSettingsStore()
 
   const [diagnosing, setDiagnosing] = useState(false)
   const [diagResult, setDiagResult] = useState<string | null>(null)
 
   return (
-    <MatrixCard title="BTC UP/DOWN STRATEGY" subtitle="15-minute binary markets on crypto price direction" variant="glass">
+    <MatrixCard title="BTC UP/DOWN STRATEGY" subtitle="15m & 9PM binary markets on crypto price direction" variant="glass">
       <div className="space-y-6">
         {/* Asset Toggles */}
         <div>
@@ -1459,6 +1577,33 @@ const BtcUpDownSettings: React.FC = () => {
             <div className="flex items-center justify-between">
               <span className="text-agent-text font-sans text-sm">Solana (SOL)</span>
               <MatrixToggle enabled={btcEnableSol} onChange={setBtcEnableSol} />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-agent-text font-sans text-sm">XRP</span>
+              <MatrixToggle enabled={btcEnableXrp} onChange={setBtcEnableXrp} />
+            </div>
+          </div>
+        </div>
+
+        {/* Duration Toggles */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Window Durations</h4>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-agent-text font-sans text-sm">5 Minute</span>
+              <MatrixToggle enabled={btcEnable5m} onChange={setBtcEnable5m} />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-agent-text font-sans text-sm">15 Minute</span>
+              <MatrixToggle enabled={btcEnable15m} onChange={setBtcEnable15m} />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-agent-text font-sans text-sm">Hourly</span>
+              <MatrixToggle enabled={btcEnableHourly} onChange={setBtcEnableHourly} />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-agent-text font-sans text-sm">Daily</span>
+              <MatrixToggle enabled={btcEnableDaily} onChange={setBtcEnableDaily} />
             </div>
           </div>
         </div>
@@ -1495,17 +1640,17 @@ const BtcUpDownSettings: React.FC = () => {
               label="Min Confidence"
               value={btcMinConfidence}
               onChange={setBtcMinConfidence}
-              min={0.50}
-              max={0.90}
-              step={0.05}
+              min={0.20}
+              max={0.80}
+              step={0.02}
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
             />
             <MatrixSlider
               label="Max Entry Price"
               value={btcMaxEntryPrice}
               onChange={setBtcMaxEntryPrice}
-              min={0.30}
-              max={0.90}
+              min={0.20}
+              max={0.70}
               step={0.05}
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}\u00a2`}
             />
@@ -1517,21 +1662,68 @@ const BtcUpDownSettings: React.FC = () => {
                 const n = parseInt(e.target.value)
                 if (!isNaN(n)) setBtcMinWindowRemaining(n)
               }}
-              hint="Minimum seconds left in 15-min window to enter"
+              hint="Minimum seconds left in window to enter"
             />
+            <MatrixInput
+              label="Min Time Into Window (seconds)"
+              type="number"
+              value={Math.round(btcMinTimeIntoWindowMs / 1000).toString()}
+              onChange={(e) => {
+                const n = parseInt(e.target.value)
+                if (!isNaN(n)) setBtcMinTimeIntoWindowMs(n * 1000)
+              }}
+              hint="Wait this long into window before trading"
+            />
+          </div>
+        </div>
+
+        {/* Signal Filters */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Signal Filters</h4>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-agent-text font-sans text-sm">Regime Filter</span>
+                <p className="text-agent-text-muted text-xs font-sans">Skip choppy/mean-reverting markets</p>
+              </div>
+              <MatrixToggle enabled={btcRegimeFilterEnabled} onChange={setBtcRegimeFilterEnabled} />
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-agent-text font-sans text-sm">RSI Filter</span>
+                <p className="text-agent-text-muted text-xs font-sans">Reduce confidence on overbought/oversold</p>
+              </div>
+              <MatrixToggle enabled={btcRsiFilterEnabled} onChange={setBtcRsiFilterEnabled} />
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-agent-text font-sans text-sm">LLM Confirmation</span>
+                <p className="text-agent-text-muted text-xs font-sans">
+                  {openRouterApiKey
+                    ? 'AI verifies every signal before trading (~$0.002/call)'
+                    : 'Requires OpenRouter API key (set above)'}
+                </p>
+              </div>
+              <MatrixToggle
+                enabled={btcUseLLMConfirmation}
+                onChange={setBtcUseLLMConfirmation}
+                disabled={!openRouterApiKey}
+              />
+            </div>
           </div>
         </div>
 
         {/* Risk Management */}
         <div>
           <h4 className="text-agent-green text-sm font-mono mb-3">Risk Management</h4>
+          <p className="text-agent-text-muted text-xs font-sans mb-3">Resolution-hold strategy: wide stops, hold to binary payout</p>
           <div className="space-y-4">
             <MatrixSlider
               label="Stop Loss"
               value={btcStopLossPercent}
               onChange={setBtcStopLossPercent}
-              min={0.10}
-              max={0.50}
+              min={0.15}
+              max={0.60}
               step={0.05}
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
             />
@@ -1539,8 +1731,8 @@ const BtcUpDownSettings: React.FC = () => {
               label="Take Profit"
               value={btcTakeProfitPercent}
               onChange={setBtcTakeProfitPercent}
-              min={0.10}
-              max={0.50}
+              min={0.20}
+              max={1.00}
               step={0.05}
               valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
             />
@@ -1559,12 +1751,29 @@ const BtcUpDownSettings: React.FC = () => {
               setDiagResult(null)
               try {
                 const { gammaClient } = await import('@/services/api/GammaClient')
-                const all = await gammaClient.getActiveMarkets()
-                const check = (name: string) => all.filter(m => {
-                  const q = m.question.toUpperCase()
-                  return q.includes(name) && (q.includes('UP') || q.includes('DOWN'))
-                }).length
-                setDiagResult(`BTC: ${check('BITCOIN')}, ETH: ${check('ETHEREUM')}, SOL: ${check('SOLANA')} Up/Down markets (${all.length} total active)`)
+                // Use the same slug-based discovery the actual strategy uses
+                const nowSec = Math.floor(Date.now() / 1000)
+                const window15m = Math.floor(nowSec / 900) * 900
+                const slugs = [
+                  { asset: 'BTC', slug: `btc-updown-15m-${window15m}`, dur: '15m' },
+                  { asset: 'ETH', slug: `eth-updown-15m-${window15m}`, dur: '15m' },
+                  { asset: 'SOL', slug: `sol-updown-15m-${window15m}`, dur: '15m' },
+                  { asset: 'XRP', slug: `xrp-updown-15m-${window15m}`, dur: '15m' },
+                ]
+                const results: string[] = []
+                for (const { asset, slug, dur } of slugs) {
+                  try {
+                    const event = await gammaClient.getEventBySlug(slug)
+                    const active = event?.markets?.filter((m: { active: boolean; closed: boolean }) => m.active && !m.closed) || []
+                    if (active.length > 0) {
+                      const prices = active[0].outcomePrices || []
+                      results.push(`${asset} ${dur}: ${active.length} mkt (${prices.map((p: string) => `${(parseFloat(p) * 100).toFixed(0)}c`).join('/')})`)
+                    }
+                  } catch { /* skip failed lookups */ }
+                }
+                setDiagResult(results.length > 0
+                  ? results.join(' | ')
+                  : 'No Up/Down markets active right now (between windows?)')
               } catch (e) {
                 setDiagResult(`Error: ${e instanceof Error ? e.message : 'unknown'}`)
               } finally {
@@ -1585,11 +1794,341 @@ const BtcUpDownSettings: React.FC = () => {
         <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
           <h4 className="text-agent-green text-sm font-mono">How It Works</h4>
           <ul className="text-agent-text-muted text-xs space-y-1 font-sans">
-            <li>Scans for active 15-min "Up or Down" markets via Gamma search API</li>
-            <li>Fetches live crypto price from Binance (CoinGecko fallback)</li>
-            <li>computeSignal() determines direction and confidence</li>
-            <li>Positions auto-exit after 14 min (1-min buffer before resolution)</li>
-            <li>Edit <code className="text-agent-cyan">BtcUpDownStrategy.ts</code> to customize signal logic</li>
+            <li>Resolution-hold: buys directional outcomes, holds to binary payout ($0 or $0.90 after 10% fee)</li>
+            <li>5-factor signal: momentum, velocity, time decay, value bet, order flow (BinanceWS 1s feed)</li>
+            <li>Regime filter skips choppy markets; RSI filter avoids chasing extended moves</li>
+            <li>Reference price parsed from market question text for accurate signals</li>
+            <li>Need &gt;56% accuracy at 50c entry to overcome 10% crypto fee</li>
+          </ul>
+        </div>
+      </div>
+    </MatrixCard>
+  )
+}
+
+/**
+ * Mean Reversion Settings Panel — Coinbase Spot Crypto
+ */
+const MeanReversionSettings: React.FC = () => {
+  const {
+    coinbaseApiKey, setCoinbaseApiKey,
+    coinbaseSecret, setCoinbaseSecret,
+    mrEnableBtc, setMrEnableBtc,
+    mrEnableEth, setMrEnableEth,
+    mrEnableSol, setMrEnableSol,
+    mrLookbackPeriod, setMrLookbackPeriod,
+    mrEntryZScore, setMrEntryZScore,
+    mrExitZScore, setMrExitZScore,
+    mrTradeSize, setMrTradeSize,
+    mrStopLossPercent, setMrStopLossPercent,
+    mrTakeProfitPercent, setMrTakeProfitPercent,
+  } = useSettingsStore()
+
+  const [localKey, setLocalKey] = useState(coinbaseApiKey)
+  const [localSecret, setLocalSecret] = useState(coinbaseSecret)
+  const [saved, setSaved] = useState(false)
+
+  const handleSaveCreds = () => {
+    setCoinbaseApiKey(localKey.trim())
+    setCoinbaseSecret(localSecret.trim())
+    setSaved(true)
+    setTimeout(() => setSaved(false), 3000)
+  }
+
+  const hasCredentials = !!(coinbaseApiKey && coinbaseSecret)
+
+  return (
+    <MatrixCard title="MEAN REVERSION STRATEGY" subtitle="Spot crypto trading via Coinbase (Bollinger Bands / Z-score)" variant="glass">
+      <div className="space-y-6">
+        {/* Info */}
+        <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
+          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Coinbase Spot Trading</h4>
+          <p className="text-agent-text-muted text-xs font-sans">
+            Buys oversold dips (Z-score below threshold) and sells when price reverts to the mean.
+            Uses BinanceWS for real-time price signals and Coinbase Advanced Trade for execution.
+            Trades BTC-USD, ETH-USD, SOL-USD spot pairs.
+          </p>
+        </div>
+
+        {/* Coinbase Credentials */}
+        <div className="bg-agent-bg/40 rounded-lg p-4 border border-agent-border/50">
+          <h4 className="text-agent-green text-sm font-mono mb-3">Coinbase Credentials</h4>
+          <div className="space-y-3">
+            <MatrixInput
+              label="API Key"
+              type="password"
+              value={localKey}
+              onChange={(e) => setLocalKey(e.target.value)}
+              hint="From coinbase.com/settings/api — enable 'Trade' permission only"
+            />
+            <MatrixInput
+              label="API Secret"
+              type="password"
+              value={localSecret}
+              onChange={(e) => setLocalSecret(e.target.value)}
+              hint="Base64-encoded secret from Coinbase"
+            />
+            <div className="flex items-center gap-3">
+              <MatrixButton onClick={handleSaveCreds} variant="primary" size="sm">
+                {saved ? 'Saved!' : 'Save Credentials'}
+              </MatrixButton>
+              <MatrixBadge variant={hasCredentials ? 'success' : 'warning'} size="sm">
+                {hasCredentials ? 'Configured' : 'Not Set'}
+              </MatrixBadge>
+            </div>
+          </div>
+        </div>
+
+        {/* Asset Toggles */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Enabled Assets</h4>
+          <div className="space-y-3">
+            <MatrixToggle label="BTC-USD" enabled={mrEnableBtc} onChange={setMrEnableBtc} />
+            <MatrixToggle label="ETH-USD" enabled={mrEnableEth} onChange={setMrEnableEth} />
+            <MatrixToggle label="SOL-USD" enabled={mrEnableSol} onChange={setMrEnableSol} />
+          </div>
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
+            Toggle which assets the strategy trades. All disabled by default — enable after configuring credentials.
+          </p>
+        </div>
+
+        {/* Signal Parameters */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Signal Parameters</h4>
+          <div className="space-y-4">
+            <MatrixSlider
+              label="Lookback Period"
+              value={mrLookbackPeriod}
+              onChange={setMrLookbackPeriod}
+              min={10}
+              max={50}
+              step={5}
+              valueFormat={(v: number) => `${v} ticks`}
+            />
+            <p className="text-agent-text-muted text-xs font-sans -mt-2">
+              Rolling window size for mean/stddev calculation. Larger = smoother, slower to react.
+            </p>
+
+            <MatrixSlider
+              label="Entry Z-Score"
+              value={mrEntryZScore}
+              onChange={setMrEntryZScore}
+              min={1.0}
+              max={3.0}
+              step={0.25}
+              valueFormat={(v: number) => `${v.toFixed(2)}σ`}
+            />
+            <p className="text-agent-text-muted text-xs font-sans -mt-2">
+              Buy when Z-score drops below -this value (oversold). Higher = more selective, fewer trades.
+            </p>
+
+            <MatrixSlider
+              label="Exit Z-Score"
+              value={mrExitZScore}
+              onChange={setMrExitZScore}
+              min={0.0}
+              max={1.5}
+              step={0.25}
+              valueFormat={(v: number) => `${v.toFixed(2)}σ`}
+            />
+            <p className="text-agent-text-muted text-xs font-sans -mt-2">
+              Sell when Z-score rises above this (mean reversion complete). Lower = exit earlier.
+            </p>
+          </div>
+        </div>
+
+        {/* Position Sizing */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
+          <MatrixInput
+            label="Trade Size ($)"
+            type="number"
+            value={mrTradeSize.toString()}
+            onChange={(e) => {
+              const n = parseFloat(e.target.value)
+              if (!isNaN(n) && n >= 1) setMrTradeSize(n)
+            }}
+            hint="USD amount per trade (Coinbase min ~$1)"
+          />
+        </div>
+
+        {/* Risk Management */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Risk Management</h4>
+          <div className="space-y-4">
+            <MatrixSlider
+              label="Stop Loss"
+              value={mrStopLossPercent}
+              onChange={setMrStopLossPercent}
+              min={0.01}
+              max={0.10}
+              step={0.005}
+              valueFormat={(v: number) => `${(v * 100).toFixed(1)}%`}
+            />
+            <MatrixSlider
+              label="Take Profit"
+              value={mrTakeProfitPercent}
+              onChange={setMrTakeProfitPercent}
+              min={0.005}
+              max={0.05}
+              step={0.005}
+              valueFormat={(v: number) => `${(v * 100).toFixed(1)}%`}
+            />
+          </div>
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
+            Tight SL/TP for mean reversion — positions exit when price reverts or hits limits. Max hold: 1 hour.
+          </p>
+        </div>
+
+        {/* How It Works */}
+        <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
+          <h4 className="text-agent-green text-sm font-mono">How It Works</h4>
+          <ul className="text-agent-text-muted text-xs space-y-1 font-sans">
+            <li>Streams BTC/ETH/SOL prices from Binance WebSocket (~1s updates)</li>
+            <li>Computes rolling mean, stddev, and Z-score (Bollinger Bands)</li>
+            <li>Z-score below -{mrEntryZScore.toFixed(1)}σ = BUY (oversold dip)</li>
+            <li>Z-score above +{mrExitZScore.toFixed(1)}σ or SL/TP hit = SELL</li>
+            <li>Executes market orders on Coinbase Advanced Trade (USD spot pairs)</li>
+            <li>RiskManager circuit breaker enforces daily loss limits</li>
+          </ul>
+        </div>
+      </div>
+    </MatrixCard>
+  )
+}
+
+/**
+ * Copy Trading Settings Panel
+ */
+const CopyTradingSettings: React.FC = () => {
+  const {
+    followedAddress,
+    copyTradeSize, setCopyTradeSize,
+    copyMaxConcurrent, setCopyMaxConcurrent,
+    copyPollIntervalMs, setCopyPollIntervalMs,
+    copyStopLossPercent, setCopyStopLossPercent,
+    copyTakeProfitPercent, setCopyTakeProfitPercent,
+    copyBuysOnly, setCopyBuysOnly,
+  } = useSettingsStore()
+
+  return (
+    <MatrixCard title="COPY TRADING" subtitle="Mirror trades from a followed Polymarket trader" variant="glass">
+      <div className="space-y-6">
+        {!followedAddress && (
+          <div className="bg-agent-bg/60 rounded-lg p-4">
+            <p className="text-agent-orange text-xs font-mono">
+              No trader followed — paste an address in the Follow Trader panel (left sidebar) first.
+            </p>
+          </div>
+        )}
+
+        {followedAddress && (
+          <div className="bg-agent-bg/60 rounded-lg p-3">
+            <p className="text-agent-text-muted text-xs font-mono">
+              Following: <span className="text-agent-cyan">{followedAddress.slice(0, 8)}...{followedAddress.slice(-4)}</span>
+            </p>
+          </div>
+        )}
+
+        {/* Position Sizing */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
+          <div className="space-y-4">
+            <MatrixSlider
+              label="Trade Size"
+              value={copyTradeSize}
+              onChange={setCopyTradeSize}
+              min={1}
+              max={25}
+              step={1}
+              valueFormat={(v: number) => `$${v}`}
+            />
+            <p className="text-agent-text-muted text-xs font-sans -mt-2">
+              USD amount per copied trade. RiskManager daily loss limit still applies.
+            </p>
+            <MatrixSlider
+              label="Max Concurrent Positions"
+              value={copyMaxConcurrent}
+              onChange={setCopyMaxConcurrent}
+              min={1}
+              max={20}
+              step={1}
+              valueFormat={(v: number) => `${v}`}
+            />
+          </div>
+        </div>
+
+        {/* Polling */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Polling</h4>
+          <MatrixSlider
+            label="Poll Interval"
+            value={copyPollIntervalMs / 1000}
+            onChange={(v: number) => setCopyPollIntervalMs(v * 1000)}
+            min={5}
+            max={60}
+            step={5}
+            valueFormat={(v: number) => `${v}s`}
+          />
+          <p className="text-agent-text-muted text-xs font-sans mt-1">
+            How often to check for new trades from the followed wallet. Lower = faster copies, more API calls.
+          </p>
+        </div>
+
+        {/* Risk Management */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Risk Management</h4>
+          <div className="space-y-4">
+            <MatrixSlider
+              label="Stop Loss"
+              value={copyStopLossPercent}
+              onChange={setCopyStopLossPercent}
+              min={0.10}
+              max={0.95}
+              step={0.05}
+              valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
+            />
+            <MatrixSlider
+              label="Take Profit"
+              value={copyTakeProfitPercent}
+              onChange={setCopyTakeProfitPercent}
+              min={0.10}
+              max={0.95}
+              step={0.05}
+              valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
+            />
+          </div>
+          <p className="text-agent-text-muted text-xs mt-2 font-sans">
+            PLM monitors copied positions and auto-exits on SL/TP. These are separate from the whale's exit logic.
+          </p>
+        </div>
+
+        {/* Behavior */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Behavior</h4>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={copyBuysOnly}
+              onChange={(e) => setCopyBuysOnly(e.target.checked)}
+              className="accent-agent-green"
+            />
+            <span className="text-agent-text text-xs font-mono">BUYs only (exits managed by PLM)</span>
+          </label>
+          <p className="text-agent-text-muted text-xs mt-1 font-sans">
+            When enabled, only BUY trades are copied. Sell/exit decisions are handled by stop-loss and take-profit.
+          </p>
+        </div>
+
+        {/* How It Works */}
+        <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
+          <h4 className="text-agent-green text-sm font-mono">How It Works</h4>
+          <ul className="text-agent-text-muted text-xs space-y-1 font-sans">
+            <li>Polls the followed trader's trade history every {copyPollIntervalMs / 1000}s via Data API</li>
+            <li>Detects new BUY trades and mirrors them at ${copyTradeSize} per trade</li>
+            <li>PLM tracks each position with {(copyStopLossPercent * 100).toFixed(0)}% SL / {(copyTakeProfitPercent * 100).toFixed(0)}% TP</li>
+            <li>RiskManager circuit breaker enforces daily loss limits</li>
+            <li>Max {copyMaxConcurrent} concurrent copied positions</li>
           </ul>
         </div>
       </div>

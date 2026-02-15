@@ -4,11 +4,14 @@ import { useSettingsStore } from '@/stores'
 import { tradingService } from './TradingService'
 import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
+import { tradeLogger } from './TradeLogger'
 
-// Polymarket taker fee (2%) — used to adjust take-profit threshold
+// Default Polymarket taker fee (2%) — used to adjust take-profit threshold
 // so the NET profit matches the user's configured percentage.
 // SL doesn't need adjustment (a loss is a loss regardless of fee).
-const TAKER_FEE_PERCENT = 0.02
+// NOTE: Fee-enabled markets (e.g. 15-min crypto) can have 10% (1000 bps).
+// Per-position takerFeeBps overrides this default when available.
+const DEFAULT_TAKER_FEE_PERCENT = 0.02
 
 // ==========================================
 // TYPES
@@ -26,8 +29,9 @@ export interface TrackedPosition {
   entryTime: number           // Date.now() at entry
   stopLossPercent: number     // e.g. 0.15 = 15%
   takeProfitPercent: number   // e.g. 0.30 = 30%
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro'
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
   negRisk?: boolean           // true if market uses NegRisk exchange
+  takerFeeBps?: number        // per-market taker fee in bps (e.g. 100 = 1%, 1000 = 10%). Falls back to DEFAULT_TAKER_FEE_PERCENT if absent.
   // Trailing stop-loss fields
   trailingStopPercent?: number  // e.g. 0.10 = 10% trail from peak
   peakPrice?: number            // highest price seen while in profit
@@ -36,6 +40,13 @@ export interface TrackedPosition {
   // Partial position closing (scale out winners)
   partialCloseAt?: number       // PnL% threshold to close half (e.g. 0.20 = 20%)
   partialClosed?: boolean       // whether partial close has already fired
+  // Time-exit deferral — losers get one 2h extension before forced exit
+  _timeExtended?: boolean
+  // Sell failure tracking — set after exhausting all retries to prevent infinite re-trigger loops
+  sellFailed?: boolean
+  // Resolution detection — set when price hits extreme values (≥0.95 or ≤0.05)
+  // to prevent repeated logging while deferring to redemption sweep
+  _resolutionDetected?: boolean
 }
 
 export interface PositionStatus extends TrackedPosition {
@@ -64,11 +75,22 @@ type PositionChangeCallback = (positions: TrackedPosition[]) => void
 export class PositionLifecycleManager {
   private positions = new Map<string, TrackedPosition>()
   private unsubscribePrice: (() => void) | null = null
+  private unsubscribeUserChannel: (() => void) | null = null
   private callbacks = new Set<PositionChangeCallback>()
   private sellInProgress = new Set<string>()  // prevent double-sell
   private sellRetries = new Map<string, number>()
   private maxSellRetries = 3
   private initialized = false
+  private redemptionIntervalId: ReturnType<typeof setInterval> | null = null
+
+  // Generation counter per tokenId — incremented on trackPosition to abort
+  // stale resting-exit retry loops when a position is overwritten.
+  private positionGeneration = new Map<string, number>()
+
+  // Resting exit order retry config — tokens may not be settled on Polygon
+  // immediately after a FOK BUY (MATCHED but not yet CONFIRMED on-chain).
+  private static readonly RESTING_ORDER_MAX_RETRIES = 5
+  private static readonly RESTING_ORDER_BACKOFF_MS = [5_000, 10_000, 15_000, 20_000, 30_000]
 
   /**
    * Initialize — subscribe to real-time price feeds and hydrate from storage
@@ -82,8 +104,14 @@ export class PositionLifecycleManager {
       (tokenId, priceData) => this.handlePriceUpdate(tokenId, priceData)
     )
 
+    // Subscribe to UserChannel trade events to update position size from actual fills
+    this.subscribeToUserChannel()
+
     // Hydrate tracked positions from IndexedDB (crash recovery)
     this.hydrateFromStorage()
+
+    // Periodic redemption sweep — check for resolved positions every 60s
+    this.startRedemptionSweep()
 
     console.log('[PositionLifecycleManager] Initialized — monitoring positions for stop-loss/take-profit')
   }
@@ -124,6 +152,33 @@ export class PositionLifecycleManager {
           continue
         }
 
+        // Check on-chain token balance — if 0, position was already sold/redeemed.
+        // This catches cases where Gamma still reports "active" but tokens are gone.
+        try {
+          const { walletService } = await import('@/services/wallet')
+          if (walletService.isConnected()) {
+            const balance = await walletService.getPositionBalance(position.tokenId)
+            if (balance <= 0) {
+              console.log(`[PLM] Hydration: zero on-chain balance for ${position.question.substring(0, 40)}... — skipping`)
+              indexedDBService.removePosition(position.tokenId).catch(() => {})
+              // Close TradeLogger record if still open
+              const openRecord = tradeLogger.findOpenRecord(position.marketId, position.strategy, position.outcome)
+              if (openRecord) {
+                tradeLogger.logExit(openRecord.id, {
+                  exitPrice: position.entryPrice, // Best-effort — no live price
+                  exitReason: 'redemption',
+                  pnlUSD: 0, // Unknown — tokens already gone
+                  pnlPercent: 0,
+                })
+              }
+              skipped++
+              continue
+            }
+          }
+        } catch {
+          // Balance check failed — continue with hydration (safe fallback)
+        }
+
         this.positions.set(position.tokenId, position)
         realtimeService.subscribeMarket(position.tokenId)
         hydrated++
@@ -153,9 +208,11 @@ export class PositionLifecycleManager {
         return true
       }
 
-      // Skip if market is closed or inactive
+      // Skip if market is closed or inactive — attempt redemption first
       if (market.closed || !market.active) {
-        console.log(`[PLM] Market ${position.marketId} is ${market.closed ? 'closed' : 'inactive'} — removing position`)
+        console.log(`[PLM] Market ${position.marketId} is ${market.closed ? 'closed' : 'inactive'} — attempting redemption`)
+        // Fire-and-forget — don't block other hydrations
+        this.redeemResolvedPosition(position, market.outcomePrices).catch(() => {})
         return false
       }
 
@@ -168,12 +225,58 @@ export class PositionLifecycleManager {
   }
 
   /**
+   * Subscribe to UserChannel BUY trade events to correct position size.
+   * The CLOB POST /order response lacks filledSize, so strategies estimate
+   * size as costBasis/price. The UserChannel CONFIRMED event has the actual
+   * fill size, which we use to patch the tracked position and re-persist.
+   */
+  private subscribeToUserChannel(): void {
+    import('@/services/realtime/UserChannelService').then(({ userChannelService }) => {
+      this.unsubscribeUserChannel = userChannelService.onTrade((msg) => {
+        // Only care about confirmed BUY fills
+        if (msg.side !== 'BUY' || msg.status !== 'CONFIRMED') return
+
+        const tokenId = msg.asset_id
+        const position = this.positions.get(tokenId)
+        if (!position) return
+
+        const actualSize = parseFloat(msg.size)
+        if (!actualSize || isNaN(actualSize) || actualSize <= 0) return
+
+        // Only update if the size actually differs (avoids unnecessary writes)
+        if (Math.abs(position.size - actualSize) < 0.001) return
+
+        console.log(
+          `[PLM] Fill correction: ${tokenId.slice(0, 8)}… size ${position.size.toFixed(4)} → ${actualSize.toFixed(4)} (from UserChannel)`
+        )
+        position.size = actualSize
+        this.positions.set(tokenId, position)
+
+        // Re-persist corrected position
+        import('@/services/storage').then(({ indexedDBService }) => {
+          indexedDBService.storePosition(position)
+        }).catch(() => {})
+      })
+    }).catch(() => {
+      // UserChannel not available yet — non-critical
+    })
+  }
+
+  /**
    * Shut down — unsubscribe from price feeds
    */
   destroy(): void {
     if (this.unsubscribePrice) {
       this.unsubscribePrice()
       this.unsubscribePrice = null
+    }
+    if (this.unsubscribeUserChannel) {
+      this.unsubscribeUserChannel()
+      this.unsubscribeUserChannel = null
+    }
+    if (this.redemptionIntervalId) {
+      clearInterval(this.redemptionIntervalId)
+      this.redemptionIntervalId = null
     }
     this.initialized = false
   }
@@ -183,6 +286,11 @@ export class PositionLifecycleManager {
    * Called by strategies via dynamic import after placeBet() succeeds
    */
   trackPosition(position: TrackedPosition): void {
+    // Increment generation to abort any in-flight resting-exit retry loops
+    // for a previous position with the same tokenId
+    const gen = (this.positionGeneration.get(position.tokenId) ?? 0) + 1
+    this.positionGeneration.set(position.tokenId, gen)
+
     this.positions.set(position.tokenId, position)
 
     // Subscribe to real-time price updates for this token
@@ -223,6 +331,8 @@ export class PositionLifecycleManager {
     this.positions.delete(tokenId)
     this.sellInProgress.delete(tokenId)
     this.sellRetries.delete(tokenId)
+    // Bump generation to abort any in-flight resting-exit retry loops
+    this.positionGeneration.set(tokenId, (this.positionGeneration.get(tokenId) ?? 0) + 1)
 
     // Unsubscribe from price updates if no other positions use this token
     realtimeService.unsubscribeMarket(tokenId)
@@ -244,6 +354,9 @@ export class PositionLifecycleManager {
     const position = this.positions.get(tokenId)
     if (!position) return false
 
+    // Reset sellFailed so manual retry is allowed
+    position.sellFailed = false
+    this.sellRetries.delete(tokenId)
     activityLogger.logWarning(`Manual close: ${position.question.substring(0, 40)}...`)
     return this.executeSell(position, 'manual')
   }
@@ -259,6 +372,9 @@ export class PositionLifecycleManager {
     activityLogger.logWarning(`Emergency close: closing all ${positions.length} positions`)
 
     for (const position of positions) {
+      // Reset sellFailed so emergency close can retry
+      position.sellFailed = false
+      this.sellRetries.delete(position.tokenId)
       const success = await this.executeSell(position, 'emergency')
       if (success) closed++
       else failed++
@@ -281,6 +397,18 @@ export class PositionLifecycleManager {
       { tokenId, strategy: pos.strategy, costBasis: pos.costBasis }
     )
     riskManager.recordTradeResult(false, pnlUsd)
+
+    // Log abandonment to TradeLogger so it shows in dashboard stats
+    const openRecord = tradeLogger.findOpenRecord(pos.marketId, pos.strategy, pos.outcome)
+    if (openRecord) {
+      tradeLogger.logExit(openRecord.id, {
+        exitPrice: 0,
+        exitReason: 'manual',
+        pnlUSD: pnlUsd,
+        pnlPercent: -1,
+      })
+    }
+
     this.removePosition(tokenId)
     return true
   }
@@ -306,8 +434,11 @@ export class PositionLifecycleManager {
     return Array.from(this.positions.values()).map(pos => {
       const priceData = realtimeService.getPrice(pos.tokenId)
       const currentPrice = priceData?.mid ?? pos.entryPrice
+      // Show GROSS unrealized P&L (matches Polymarket display).
+      // Fees are only deducted at sell time — pre-subtracting them makes
+      // dashboard numbers look wrong compared to Polymarket's portfolio page.
       const pnlPercent = (currentPrice - pos.entryPrice) / pos.entryPrice
-      const pnlUsd = (currentPrice - pos.entryPrice) * pos.size
+      const pnlUsd = pos.size * (currentPrice - pos.entryPrice)
 
       return {
         ...pos,
@@ -317,6 +448,20 @@ export class PositionLifecycleManager {
         isStale: priceData ? priceData.timestamp.getTime() < fiveMinAgo : true,
       }
     })
+  }
+
+  /**
+   * Get aggregate unrealized PnL across all open positions.
+   * Uses last known prices — stale positions fall back to entry price (0 PnL).
+   */
+  getUnrealizedPnl(): { totalUsd: number; positionCount: number } {
+    let totalUsd = 0
+    for (const pos of this.positions.values()) {
+      const priceData = realtimeService.getPrice(pos.tokenId)
+      const currentPrice = priceData?.mid ?? pos.entryPrice
+      totalUsd += pos.size * (currentPrice - pos.entryPrice)
+    }
+    return { totalUsd, positionCount: this.positions.size }
   }
 
   /**
@@ -348,6 +493,9 @@ export class PositionLifecycleManager {
     // Skip if a sell is already in progress for this position
     if (this.sellInProgress.has(tokenId)) return
 
+    // Skip if sell permanently failed — prevent endless TP/SL re-triggers
+    if (position.sellFailed) return
+
     // Skip stale prices — don't trigger SL/TP on outdated data
     if (realtimeService.isStale(tokenId)) {
       return
@@ -359,18 +507,81 @@ export class PositionLifecycleManager {
     // but is just missing data, not a real price signal.
     if (currentPrice <= 0.001) return
 
+    // Guard: detect market resolution prices (≥0.90 or ≤0.10).
+    // When a binary market resolves, the winning outcome jumps toward ~1.00 and
+    // the loser drops toward ~0.00. These extreme prices are NOT real trading
+    // signals — they indicate the market has (or is about to) resolve.
+    // Triggering TP/SL here would:
+    //   1. Fire spurious sell attempts on a closed market (always fails)
+    //   2. Pollute the activity log with fake TP/SL entries
+    //   3. Waste gas/API calls on impossible trades
+    // Since BTC Up/Down max entry is 0.45, prices ≥0.90 are already >100% gain
+    // (deep TP territory). Any real exit would have fired well before 0.90.
+    // Instead, skip TP/SL processing and let the 60s redemption sweep handle it.
+    if (currentPrice >= 0.90 || currentPrice <= 0.10) {
+      // Only log once to avoid spam — use a transient flag
+      if (!position._resolutionDetected) {
+        console.log(
+          `[PLM] Resolution-range price detected for ${position.outcome.toUpperCase()} ` +
+          `(${(currentPrice * 100).toFixed(1)}¢) — deferring to redemption sweep`
+        )
+        position._resolutionDetected = true
+        // Trigger an immediate redemption check instead of waiting 60s
+        this.sweepResolvedPositions().catch(() => {})
+      }
+      return
+    }
+
+    // Clear resolution flag if price returns to normal range (unlikely but defensive)
+    if (position._resolutionDetected) {
+      position._resolutionDetected = false
+    }
+
     const pnlPercent = (currentPrice - position.entryPrice) / position.entryPrice
 
     // Check TIME-BASED EXIT: max hold duration exceeded
     const maxHold = position.maxHoldMs ?? 4 * 60 * 60 * 1000 // default 4 hours
     if (maxHold > 0 && Date.now() - position.entryTime > maxHold) {
       const holdHours = ((Date.now() - position.entryTime) / 3_600_000).toFixed(1)
-      console.log(`[PLM] TIME EXIT triggered for ${position.outcome.toUpperCase()} (held ${holdHours}h)`)
-      activityLogger.logInfo(
-        `TIME EXIT: ${position.question.substring(0, 40)}... (held ${holdHours}h, PnL ${(pnlPercent * 100).toFixed(1)}%)`,
-        { tokenId, entryPrice: position.entryPrice, currentPrice, pnlPercent, holdHours }
-      )
-      this.executeSell(position, 'time-exit')
+      const takerFeePercent = position.takerFeeBps != null ? position.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+      const netPnlPercent = pnlPercent - takerFeePercent
+
+      if (netPnlPercent > 0) {
+        // Profitable after fees — take the win
+        console.log(`[PLM] TIME EXIT triggered for ${position.outcome.toUpperCase()} (held ${holdHours}h, net +${(netPnlPercent * 100).toFixed(1)}%)`)
+        activityLogger.logInfo(
+          `TIME EXIT: ${position.question.substring(0, 40)}... (held ${holdHours}h, net PnL +${(netPnlPercent * 100).toFixed(1)}%)`,
+          { tokenId, entryPrice: position.entryPrice, currentPrice, pnlPercent: netPnlPercent, holdHours }
+        )
+        this.executeSell(position, 'time-exit')
+      } else if (!position._timeExtended) {
+        // Losing after fees — extend hold once to give it a chance to recover.
+        // Extension is proportional to the original hold (25%, capped at 2h).
+        // This prevents absurd 2h extensions on 5m/15m crypto markets.
+        const extensionMs = Math.min(
+          Math.round((position.maxHoldMs ?? maxHold) * 0.25),
+          2 * 60 * 60 * 1000
+        )
+        position._timeExtended = true
+        position.maxHoldMs = (position.maxHoldMs ?? maxHold) + extensionMs
+        const extMins = (extensionMs / 60_000).toFixed(0)
+        console.log(`[PLM] TIME EXIT DEFERRED for ${position.outcome.toUpperCase()} (net ${(netPnlPercent * 100).toFixed(1)}%, extending ${extMins}m)`)
+        activityLogger.logInfo(
+          `TIME EXIT DEFERRED: ${position.question.substring(0, 40)}... (net PnL ${(netPnlPercent * 100).toFixed(1)}%, extending ${extMins}m)`,
+          { tokenId, entryPrice: position.entryPrice, currentPrice, pnlPercent: netPnlPercent, holdHours, extensionMinutes: extMins }
+        )
+        import('@/services/storage').then(({ indexedDBService }) => {
+          indexedDBService.storePosition(position)
+        }).catch(() => {})
+      } else {
+        // Already extended once — exit regardless (SL should have caught deeper losses)
+        console.log(`[PLM] TIME EXIT (extended) triggered for ${position.outcome.toUpperCase()} (held ${holdHours}h, net ${(netPnlPercent * 100).toFixed(1)}%)`)
+        activityLogger.logInfo(
+          `TIME EXIT (extended): ${position.question.substring(0, 40)}... (held ${holdHours}h, net PnL ${(netPnlPercent * 100).toFixed(1)}%)`,
+          { tokenId, entryPrice: position.entryPrice, currentPrice, pnlPercent: netPnlPercent, holdHours }
+        )
+        this.executeSell(position, 'time-exit')
+      }
       return
     }
 
@@ -399,6 +610,8 @@ export class PositionLifecycleManager {
             if (result.success) {
               const partialPnl = (currentPrice - position.entryPrice) * halfShares
               riskManager.recordTradeResult(true, partialPnl)
+              // Note: partial closes don't close the TradeLogger record —
+              // the final full exit will log the cumulative PnL
             }
           })
           .catch(() => {})
@@ -453,9 +666,10 @@ export class PositionLifecycleManager {
     // Taker fee means the user nets less than the gross PnL, so we
     // trigger TP at (target + fee) so the NET profit matches their intent.
     // Example: user sets TP 30% → trigger at 32% → net ~30% after 2% fee.
-    const adjustedTP = position.takeProfitPercent + TAKER_FEE_PERCENT
+    const takerFeePercent = position.takerFeeBps != null ? position.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+    const adjustedTP = position.takeProfitPercent + takerFeePercent
     if (pnlPercent >= adjustedTP) {
-      const netPnl = pnlPercent - TAKER_FEE_PERCENT
+      const netPnl = pnlPercent - takerFeePercent
       console.log(
         `[PLM] TAKE-PROFIT triggered for ${position.outcome.toUpperCase()} ` +
         `(${(pnlPercent * 100).toFixed(1)}% >= +${(adjustedTP * 100).toFixed(0)}%, net ~${(netPnl * 100).toFixed(1)}%)`
@@ -481,66 +695,107 @@ export class PositionLifecycleManager {
       return
     }
 
-    const { tokenId, entryPrice, size, stopLossPercent, takeProfitPercent, negRisk } = position
+    // Capture current generation so retries abort if position is overwritten/removed
+    const generation = this.positionGeneration.get(position.tokenId) ?? 0
 
-    // Stop-loss price: entry minus SL%
-    const slPrice = Math.max(0.01, Math.round((entryPrice * (1 - stopLossPercent)) * 100) / 100)
+    // Fire-and-forget: attempt placement with retry on balance errors
+    this.attemptRestingExitOrders(position, 0, generation).catch(() => {})
+  }
+
+  /**
+   * Attempt to place a resting TP limit sell order with retry-on-balance-error.
+   *
+   * IMPORTANT: Only take-profit orders are placed as resting GTC SELLs.
+   * Stop-loss orders are NOT placed as resting limits because a GTC SELL at
+   * the SL price (e.g. 64c) means "sell at 64c or better" — if the current
+   * market bid is above 64c (e.g. 75c), the order fills immediately at a loss.
+   * Stop-losses are enforced exclusively by real-time price monitoring.
+   *
+   * After a FOK BUY succeeds, tokens are not immediately available — the trade
+   * must be CONFIRMED on Polygon (typically 5-15s). The first attempt may fail
+   * with "not enough balance" because the tokens haven't settled yet.
+   *
+   * Only retries on balance errors — other failures (invalid signature, auth,
+   * tick size) are not retryable. Even if all retries fail, real-time price
+   * monitoring remains as the safety-net fallback.
+   */
+  private async attemptRestingExitOrders(
+    position: TrackedPosition,
+    attempt: number,
+    generation: number,
+  ): Promise<void> {
+    // Guard: position removed, or a newer trackPosition call superseded this one
+    if (!this.positions.has(position.tokenId)) return
+    if ((this.positionGeneration.get(position.tokenId) ?? 0) !== generation) {
+      console.log(`[PLM] Resting exit retry aborted for ${position.tokenId.slice(0, 8)}… (position overwritten)`)
+      return
+    }
+
+    // Re-read position from map — size may have been corrected by UserChannel fill data
+    const current = this.positions.get(position.tokenId)!
+    const { tokenId, entryPrice, size, takeProfitPercent, negRisk } = current
+    const takerFeePercent = current.takerFeeBps != null ? current.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+
     // Take-profit price: entry plus TP% plus taker fee (clamped to Polymarket's 0-1 range)
-    const tpPrice = Math.min(0.99, Math.round((entryPrice * (1 + takeProfitPercent + TAKER_FEE_PERCENT)) * 100) / 100)
+    const tpPrice = Math.min(0.99, Math.round((entryPrice * (1 + takeProfitPercent + takerFeePercent)) * 100) / 100)
 
-    // Validate prices are in valid Polymarket range (0, 1) exclusive
-    const slValid = slPrice > 0 && slPrice < 1
     const tpValid = tpPrice > 0 && tpPrice < 1
-    if (!slValid) {
-      console.warn(`[PLM] Computed SL price ${slPrice} out of range for entry ${entryPrice} — skipping resting SL order`)
-    }
-    if (!tpValid) {
-      console.warn(`[PLM] Computed TP price ${tpPrice} out of range for entry ${entryPrice} — skipping resting TP order`)
-    }
-    if (!slValid && !tpValid) return
+    if (!tpValid) return
 
-    // Place both as fire-and-forget GTC limit sells
-    import('@/services/api').then(async ({ clobClient }) => {
-      if (slValid) {
-        try {
-          const slResult = await clobClient.placeOrder({
-            tokenId,
-            side: 'SELL',
-            price: slPrice,
-            size,
-            type: 'GTC',
-            negRisk,
-          })
-          if (slResult.success) {
-            console.log(`[PLM] Resting SL sell at ${(slPrice * 100).toFixed(0)}¢ for ${tokenId.slice(0, 8)}…`)
-          } else {
-            console.warn(`[PLM] SL order rejected: ${slResult.error}`)
-          }
-        } catch {
-          // Limit order failed — real-time monitoring is the fallback
-        }
-      }
+    const { clobClient } = await import('@/services/api')
 
-      if (tpValid) {
-        try {
-          const tpResult = await clobClient.placeOrder({
-            tokenId,
-            side: 'SELL',
-            price: tpPrice,
-            size,
-            type: 'GTC',
-            negRisk,
-          })
-          if (tpResult.success) {
-            console.log(`[PLM] Resting TP sell at ${(tpPrice * 100).toFixed(0)}¢ for ${tokenId.slice(0, 8)}…`)
-          } else {
-            console.warn(`[PLM] TP order rejected: ${tpResult.error}`)
-          }
-        } catch {
-          // Limit order failed — real-time monitoring is the fallback
-        }
+    let tpPlaced = false
+    let hitBalanceError = false
+
+    try {
+      const tpResult = await clobClient.placeOrder({
+        tokenId, side: 'SELL', price: tpPrice, size, type: 'GTC', negRisk,
+      })
+      if (tpResult.success) {
+        console.log(`[PLM] Resting TP sell at ${(tpPrice * 100).toFixed(0)}¢ for ${tokenId.slice(0, 8)}…`)
+        tpPlaced = true
+      } else if (this.isBalanceError(tpResult.error)) {
+        hitBalanceError = true
+      } else {
+        console.warn(`[PLM] TP order rejected (non-retryable): ${tpResult.error}`)
+        tpPlaced = true  // Don't retry non-balance errors
       }
-    }).catch(() => {})
+    } catch {
+      tpPlaced = true  // Network/signing error — don't retry
+    }
+
+    if (tpPlaced) return
+
+    // Balance error: tokens not yet confirmed on-chain. Schedule retry.
+    if (hitBalanceError && attempt < PositionLifecycleManager.RESTING_ORDER_MAX_RETRIES) {
+      const delay = PositionLifecycleManager.RESTING_ORDER_BACKOFF_MS[attempt] ?? 25_000
+      const nextAttempt = attempt + 1
+      console.log(
+        `[PLM] Resting TP order: tokens not yet settled (attempt ${nextAttempt}/${PositionLifecycleManager.RESTING_ORDER_MAX_RETRIES + 1}), ` +
+        `retrying in ${(delay / 1000).toFixed(0)}s…`
+      )
+      await new Promise(resolve => setTimeout(resolve, delay))
+      return this.attemptRestingExitOrders(current, nextAttempt, generation)
+    }
+
+    // Exhausted retries — real-time monitoring is the fallback
+    if (hitBalanceError) {
+      console.warn(
+        `[PLM] Resting TP order failed after ${attempt + 1} attempts (tokens may not have settled). ` +
+        `Real-time price monitoring remains active as fallback.`
+      )
+    }
+  }
+
+  /**
+   * Check if a CLOB API error indicates insufficient token balance.
+   * This specific error is retryable after a FOK BUY because the tokens
+   * are in-flight (MATCHED but not yet CONFIRMED on Polygon).
+   */
+  private isBalanceError(error?: string): boolean {
+    if (!error) return false
+    const lower = error.toLowerCase()
+    return lower.includes('not enough balance') || lower.includes('insufficient balance')
   }
 
   /**
@@ -552,6 +807,11 @@ export class PositionLifecycleManager {
   ): Promise<boolean> {
     const { tokenId, size } = position
 
+    // Prevent re-triggering after permanent failure
+    if (position.sellFailed) {
+      return false
+    }
+
     // Prevent double-sell
     if (this.sellInProgress.has(tokenId)) {
       console.log(`[PLM] Sell already in progress for ${tokenId}`)
@@ -561,7 +821,10 @@ export class PositionLifecycleManager {
     this.sellInProgress.add(tokenId)
 
     try {
-      const result = await tradingService.placeSell(tokenId, size, undefined, position.negRisk)
+      // Use GTC for exit sells — FOK fails on thin-liquidity markets because it
+      // requires 100% fill at stated price. GTC rests on the book and fills
+      // at-or-better, matching how resting TP orders already work.
+      const result = await tradingService.placeSell(tokenId, size, undefined, position.negRisk, 'GTC')
 
       if (result.success) {
         const priceData = realtimeService.getPrice(tokenId)
@@ -587,6 +850,18 @@ export class PositionLifecycleManager {
         // Reduce per-market concentration tracking
         riskManager.reduceMarketExposure(position.conditionId, position.costBasis)
 
+        // Log exit to TradeLogger so profit/loss shows in dashboard stats
+        const pnlPercent = (exitPrice - position.entryPrice) / position.entryPrice
+        const openRecord = tradeLogger.findOpenRecord(position.marketId, position.strategy, position.outcome)
+        if (openRecord) {
+          tradeLogger.logExit(openRecord.id, {
+            exitPrice,
+            exitReason: reason,
+            pnlUSD: pnlUsd,
+            pnlPercent,
+          })
+        }
+
         this.removePosition(tokenId)
         return true
       }
@@ -596,18 +871,27 @@ export class PositionLifecycleManager {
       this.sellRetries.set(tokenId, retryCount)
 
       if (retryCount < this.maxSellRetries) {
-        console.warn(`[PLM] Sell failed (attempt ${retryCount}/${this.maxSellRetries}), retrying in ${retryCount * 2}s...`)
+        const delayMs = retryCount * 2000
+        console.warn(`[PLM] Sell failed (attempt ${retryCount}/${this.maxSellRetries}), retrying in ${delayMs / 1000}s...`)
         activityLogger.logWarning(`Sell retry ${retryCount}/${this.maxSellRetries}: ${result.error}`)
 
-        // Schedule retry with backoff
+        // Schedule retry with backoff.
+        // IMPORTANT: Keep sellInProgress lock held to prevent handlePriceUpdate
+        // from triggering duplicate TP/SL sells during the retry window.
+        // The lock is only released inside executeSell on success/final failure.
         setTimeout(() => {
-          this.sellInProgress.delete(tokenId)
-          this.executeSell(position, reason)
-        }, retryCount * 2000)
+          // Guard: position may have been removed while waiting
+          if (!this.positions.has(tokenId)) {
+            this.sellInProgress.delete(tokenId)
+            return
+          }
+          // Re-enter sell logic directly (sellInProgress still held — bypass guard)
+          this.executeSellRetry(position, reason)
+        }, delayMs)
         return false
       }
 
-      // Exhausted retries
+      // Exhausted retries — check if "not enough balance" means tokens are gone
       console.error(`[PLM] Sell FAILED after ${this.maxSellRetries} attempts: ${result.error}`)
       activityLogger.logError(`Sell failed permanently for ${position.outcome.toUpperCase()}: ${result.error}`, {
         tokenId,
@@ -615,15 +899,313 @@ export class PositionLifecycleManager {
         attempts: this.maxSellRetries,
       })
 
+      const errorMsg = (result.error ?? '').toLowerCase()
+      if (errorMsg.includes('not enough balance') || errorMsg.includes('allowance')) {
+        // Tokens are gone — market likely resolved and tokens were redeemed,
+        // or position was sold externally. Remove position IMMEDIATELY to prevent
+        // infinite re-trigger on every price update, then attempt redemption sweep.
+        console.log(`[PLM] No tokens held — removing stale position and triggering redemption sweep`)
+        this.removePosition(tokenId)
+        // Sweep in background to close TradeLogger records and compute final PnL
+        this.sweepResolvedPositions().catch(() => {})
+      } else {
+        position.sellFailed = true
+        this.sellInProgress.delete(tokenId)
+      }
       // Sell failures are structural (market resolved/illiquid) — don't trigger circuit breaker
       riskManager.recordTradeResult(false, 0, 'structural')
-      this.sellInProgress.delete(tokenId)
+      this.notifyCallbacks()
       return false
     } catch (error) {
       console.error('[PLM] Sell execution error:', error)
       riskManager.recordTradeResult(false, 0, 'structural')
       this.sellInProgress.delete(tokenId)
       return false
+    }
+  }
+
+  /**
+   * Retry sell for a position where sellInProgress is already held.
+   * Called from the retry timer — skips the lock acquisition in executeSell.
+   */
+  private async executeSellRetry(
+    position: TrackedPosition,
+    reason: 'stop-loss' | 'take-profit' | 'trailing-stop' | 'time-exit' | 'manual' | 'emergency'
+  ): Promise<void> {
+    const { tokenId, size } = position
+
+    try {
+      const result = await tradingService.placeSell(tokenId, size, undefined, position.negRisk, 'GTC')
+
+      if (result.success) {
+        const priceData = realtimeService.getPrice(tokenId)
+        const exitPrice = priceData?.mid ?? position.entryPrice
+        const pnlUsd = (exitPrice - position.entryPrice) * size
+
+        activityLogger.logSell(
+          `SELL ${position.outcome.toUpperCase()} [${reason}] ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}`,
+          { tokenId, marketId: position.marketId, reason, entryPrice: position.entryPrice, exitPrice, pnlUsd, costBasis: position.costBasis, orderId: result.orderId }
+        )
+        riskManager.recordTradeResult(true, pnlUsd)
+        riskManager.reduceMarketExposure(position.conditionId, position.costBasis)
+
+        const pnlPercent = (exitPrice - position.entryPrice) / position.entryPrice
+        const openRecord = tradeLogger.findOpenRecord(position.marketId, position.strategy, position.outcome)
+        if (openRecord) {
+          tradeLogger.logExit(openRecord.id, { exitPrice, exitReason: reason, pnlUSD: pnlUsd, pnlPercent })
+        }
+        this.removePosition(tokenId)
+        return
+      }
+
+      // Still failing — escalate to the exhausted-retries path in executeSell
+      const retryCount = (this.sellRetries.get(tokenId) ?? 0) + 1
+      this.sellRetries.set(tokenId, retryCount)
+
+      if (retryCount < this.maxSellRetries) {
+        const delayMs = retryCount * 2000
+        console.warn(`[PLM] Sell failed (attempt ${retryCount}/${this.maxSellRetries}), retrying in ${delayMs / 1000}s...`)
+        activityLogger.logWarning(`Sell retry ${retryCount}/${this.maxSellRetries}: ${result.error}`)
+        setTimeout(() => {
+          if (!this.positions.has(tokenId)) {
+            this.sellInProgress.delete(tokenId)
+            return
+          }
+          this.executeSellRetry(position, reason)
+        }, delayMs)
+        return
+      }
+
+      // Exhausted all retries
+      console.error(`[PLM] Sell FAILED after ${this.maxSellRetries} attempts: ${result.error}`)
+      activityLogger.logError(`Sell failed permanently for ${position.outcome.toUpperCase()}: ${result.error}`, {
+        tokenId, reason, attempts: this.maxSellRetries,
+      })
+
+      const errorMsg = (result.error ?? '').toLowerCase()
+      if (errorMsg.includes('not enough balance') || errorMsg.includes('allowance')) {
+        console.log(`[PLM] No tokens held — removing stale position and triggering redemption sweep`)
+        this.removePosition(tokenId)
+        this.sweepResolvedPositions().catch(() => {})
+      } else {
+        position.sellFailed = true
+        this.sellInProgress.delete(tokenId)
+      }
+      riskManager.recordTradeResult(false, 0, 'structural')
+      this.notifyCallbacks()
+    } catch (error) {
+      console.error('[PLM] Sell retry execution error:', error)
+      riskManager.recordTradeResult(false, 0, 'structural')
+      this.sellInProgress.delete(tokenId)
+    }
+  }
+
+  // ==========================================
+  // AUTO-REDEMPTION
+  // ==========================================
+
+  /**
+   * Start periodic sweep for resolved positions.
+   * Checks every 60s if any tracked position's market has resolved,
+   * and attempts on-chain redemption if so.
+   */
+  private startRedemptionSweep(): void {
+    if (this.redemptionIntervalId) return
+
+    this.redemptionIntervalId = setInterval(() => {
+      this.sweepResolvedPositions()
+      this.sweepStalePositions()
+    }, 60_000)
+  }
+
+  /**
+   * Scan all tracked positions, check if their market has resolved,
+   * and attempt redemption for any that have.
+   */
+  private async sweepResolvedPositions(): Promise<void> {
+    if (this.positions.size === 0) return
+
+    const positions = Array.from(this.positions.values())
+
+    for (const position of positions) {
+      // Skip if sell/redeem already in progress
+      if (this.sellInProgress.has(position.tokenId)) continue
+
+      try {
+        const { gammaClient } = await import('@/services/api')
+        const market = await gammaClient.getMarket(position.marketId)
+
+        if (market && (market.closed || !market.active)) {
+          console.log(`[PLM] Sweep: market ${position.marketId} resolved — redeeming`)
+          await this.redeemResolvedPosition(position, market.outcomePrices)
+        }
+      } catch {
+        // API error — skip this position, try again next sweep
+      }
+
+      // Small delay between API calls to avoid rate limiting
+      await new Promise(r => setTimeout(r, 500))
+    }
+  }
+
+  /**
+   * Auto-abandon positions that have been stale for >30 minutes AND whose
+   * market has resolved/closed. Both conditions must be met — a stale price
+   * feed alone isn't enough (could be a WebSocket reconnection gap).
+   */
+  private async sweepStalePositions(): Promise<void> {
+    if (this.positions.size === 0) return
+
+    const STALE_ABANDON_MS = 30 * 60 * 1000 // 30 minutes
+
+    for (const position of Array.from(this.positions.values())) {
+      if (this.sellInProgress.has(position.tokenId)) continue
+
+      const priceData = realtimeService.getPrice(position.tokenId)
+      const lastUpdate = priceData?.timestamp?.getTime() ?? 0
+      const staleDuration = Date.now() - lastUpdate
+
+      if (staleDuration < STALE_ABANDON_MS) continue
+
+      try {
+        const { gammaClient } = await import('@/services/api')
+        const market = await gammaClient.getMarket(position.marketId)
+
+        if (market && (market.closed || !market.active)) {
+          console.log(`[PLM] Auto-abandoning stale resolved position: ${position.question?.substring(0, 40)}...`)
+          const redeemed = await this.redeemResolvedPosition(position, market.outcomePrices)
+          if (!redeemed) {
+            this.abandonPosition(position.tokenId)
+          }
+        }
+        // If market still active but stale, leave it — WS may reconnect
+      } catch {
+        // API error — skip, try next sweep
+      }
+
+      await new Promise(r => setTimeout(r, 500))
+    }
+  }
+
+  /**
+   * Redeem a resolved position's CTF tokens for USDC.e on-chain.
+   *
+   * Flow:
+   * 1. Check on-chain token balance (skip if zero — already redeemed)
+   * 2. Call walletService.redeemPositions(conditionId)
+   * 3. Compute PnL from resolved outcome prices
+   * 4. Record result with riskManager and tradeLogger
+   * 5. Remove from tracking
+   *
+   * @param resolvedPrices - [yesPrice, noPrice] from Gamma (e.g. [1.0, 0.0] if Yes won)
+   */
+  private async redeemResolvedPosition(
+    position: TrackedPosition,
+    resolvedPrices?: number[]
+  ): Promise<boolean> {
+    const { tokenId, conditionId, outcome, question, entryPrice, size, costBasis, strategy } = position
+
+    // Prevent concurrent redemption attempts (reuses existing sellInProgress guard)
+    if (this.sellInProgress.has(tokenId)) return false
+    this.sellInProgress.add(tokenId)
+
+    try {
+      const { walletService } = await import('@/services/wallet')
+
+      // Check on-chain token balance before attempting redemption
+      const balance = await walletService.getPositionBalance(tokenId)
+      if (balance <= 0) {
+        // No tokens to redeem — already redeemed or sold elsewhere.
+        // Still need to close the TradeLogger record so W/L tracking works.
+        let exitPrice = 0
+        if (resolvedPrices && resolvedPrices.length === 2) {
+          const outcomeIndex = outcome === 'yes' ? 0 : 1
+          exitPrice = resolvedPrices[outcomeIndex]
+        }
+        const pnlUsd = (exitPrice * size) - costBasis
+        const won = pnlUsd >= 0
+        const pnlPercent = exitPrice > 0 ? (exitPrice - entryPrice) / entryPrice : -1
+
+        activityLogger.logInfo(
+          `Position already redeemed: ${question.substring(0, 40)}... (${won ? '+' : ''}$${pnlUsd.toFixed(2)})`,
+          { tokenId, conditionId, exitPrice, pnlUsd }
+        )
+
+        // Close trade record so it counts in W/L stats
+        const openRecord = tradeLogger.findOpenRecord(position.marketId, strategy, outcome)
+        if (openRecord) {
+          tradeLogger.logExit(openRecord.id, {
+            exitPrice,
+            exitReason: 'redemption',
+            pnlUSD: pnlUsd,
+            pnlPercent,
+          })
+        }
+        // Feed PnL to RiskManager even for externally-redeemed positions
+        riskManager.recordTradeResult(won, pnlUsd)
+        riskManager.reduceMarketExposure(conditionId, costBasis)
+
+        this.removePosition(tokenId)
+        return true
+      }
+
+      // Attempt on-chain redemption
+      const result = await walletService.redeemPositions(conditionId)
+
+      if (result.success) {
+        // Determine PnL from resolved outcome prices
+        // resolvedPrices[0] = Yes outcome, resolvedPrices[1] = No outcome
+        // A value of 1.0 means that outcome won, 0.0 means it lost
+        let exitPrice = 0
+        if (resolvedPrices && resolvedPrices.length === 2) {
+          const outcomeIndex = outcome === 'yes' ? 0 : 1
+          exitPrice = resolvedPrices[outcomeIndex]
+        }
+
+        const pnlUsd = (exitPrice * size) - costBasis
+        const won = pnlUsd >= 0
+        const pnlPercent = exitPrice > 0 ? (exitPrice - entryPrice) / entryPrice : -1
+
+        activityLogger.logInfo(
+          `REDEEMED: ${question.substring(0, 40)}... (${won ? '+' : ''}$${pnlUsd.toFixed(2)})`,
+          {
+            tokenId, conditionId, strategy, outcome,
+            entryPrice, exitPrice, costBasis, size,
+            pnlUsd, txHash: result.txHash,
+          }
+        )
+
+        // Feed PnL to RiskManager
+        riskManager.recordTradeResult(won, pnlUsd)
+        riskManager.reduceMarketExposure(conditionId, costBasis)
+
+        // Log exit to TradeLogger
+        const openRecord = tradeLogger.findOpenRecord(position.marketId, strategy, outcome)
+        if (openRecord) {
+          tradeLogger.logExit(openRecord.id, {
+            exitPrice,
+            exitReason: 'redemption',
+            pnlUSD: pnlUsd,
+            pnlPercent,
+          })
+        }
+
+        this.removePosition(tokenId)
+        return true
+      }
+
+      // Redemption failed — leave position for next sweep
+      console.warn(`[PLM] Redemption failed for ${tokenId}: ${result.error}`)
+      activityLogger.logWarning(
+        `Redemption failed: ${question.substring(0, 40)}...`,
+        { tokenId, conditionId, error: result.error }
+      )
+      return false
+    } catch (error) {
+      console.error('[PLM] Redemption error:', error)
+      return false
+    } finally {
+      this.sellInProgress.delete(tokenId)
     }
   }
 

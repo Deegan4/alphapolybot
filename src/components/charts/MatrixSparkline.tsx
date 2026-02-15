@@ -91,7 +91,7 @@ export const MatrixSparkline: React.FC<MatrixSparklineProps> = ({
   return (
     <div ref={containerRef} className={cn('block overflow-hidden', className)} style={{ width, height, minWidth: 2, minHeight: 2 }}>
       {hasSize && (
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
           <LineChart data={normalizedData}>
             <YAxis domain={[minValue, maxValue]} hide />
             <Line

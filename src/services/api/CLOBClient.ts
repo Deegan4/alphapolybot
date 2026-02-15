@@ -93,7 +93,10 @@ function roundNormal(n: number, decimals: number): number {
 /** Round down to `decimals` places (official SDK: roundDown) */
 function roundDown(n: number, decimals: number): number {
   if (decimalPlaces(n) <= decimals) return n
-  return Math.floor(n * 10 ** decimals) / 10 ** decimals
+  // Add EPSILON before flooring to prevent IEEE-754 drift from truncating
+  // e.g. 8.45 * 0.01 = 0.08449999... → without EPSILON, floor gives 0.0844 (wrong)
+  // With EPSILON: 0.0845000...01 → floor gives 0.0845 (correct)
+  return Math.floor((n + Number.EPSILON) * 10 ** decimals) / 10 ** decimals
 }
 
 /** Round up to `decimals` places (official SDK: roundUp) */
@@ -125,11 +128,13 @@ export class CLOBClient extends BaseApiClient {
   /** One-time diagnostic flag */
   private _authDiagLogged = false
 
-  // ─── Tick Size / NegRisk Caches ──────────────────────────────
+  // ─── Tick Size / NegRisk / Fee Rate Caches ───────────────────
   /** Cache: tokenId → tick size string (e.g. "0.01", "0.001") */
   private tickSizeCache = new Map<string, string>()
   /** Cache: tokenId → negRisk boolean */
   private negRiskCache = new Map<string, boolean>()
+  /** Cache: tokenId → fee rate in basis points (e.g. 0 or 1000) */
+  private feeRateCache = new Map<string, number>()
 
   /**
    * Rounding config per tick size — matches the official Polymarket clob-client exactly.
@@ -462,6 +467,37 @@ export class CLOBClient extends BaseApiClient {
     }
   }
 
+  /**
+   * Query the fee rate in basis points for a given token from the CLOB API.
+   * Cached per-tokenId for the lifetime of the client.
+   * Fee-enabled markets (e.g. 15-min crypto) return 1000; others return 0.
+   * Official SDK: GET /fee-rate?token_id={tokenId} → { base_fee: number }
+   */
+  async getFeeRateBps(tokenId: string): Promise<number> {
+    const cached = this.feeRateCache.get(tokenId)
+    if (cached !== undefined) return cached
+
+    try {
+      const response = await this.get<number | { base_fee?: number; fee_rate_bps?: number }>(`/fee-rate?token_id=${tokenId}`)
+      let feeRate: number
+      if (typeof response === 'number') {
+        feeRate = response
+      } else if (response && typeof response === 'object') {
+        // Official TS SDK reads `base_fee`; docs sometimes say `fee_rate_bps`
+        feeRate = (response as { base_fee?: number }).base_fee
+          ?? (response as { fee_rate_bps?: number }).fee_rate_bps
+          ?? 0
+      } else {
+        feeRate = 0
+      }
+      this.feeRateCache.set(tokenId, feeRate)
+      return feeRate
+    } catch (error) {
+      console.warn(`[CLOBClient] Failed to fetch fee rate for ${tokenId.slice(0, 12)}…:`, error instanceof Error ? error.message : error)
+      return 0 // Default to 0 (no fee) if API fails
+    }
+  }
+
   // ─── Order Book (Public, No Auth) ────────────────────────────
 
   /** Get order book for a market */
@@ -553,15 +589,20 @@ export class CLOBClient extends BaseApiClient {
       const makerAddress = this.funderAddress || signerAddress
       const signatureType = this.getSignatureType()
 
-      // ─── Fetch tick size and negRisk from CLOB API ─────────
-      // The official SDK queries these per-token to determine rounding precision
-      // and the correct EIP-712 domain (standard vs NegRisk).
+      // ─── Fetch tick size, negRisk, and fee rate from CLOB API ─────────
+      // The official SDK queries these per-token to determine rounding precision,
+      // the correct EIP-712 domain, and the fee rate for fee-enabled markets.
       const tickSize = await this.getTickSize(request.tokenId)
       const roundConfig = CLOBClient.ROUNDING_CONFIG[tickSize] || CLOBClient.ROUNDING_CONFIG['0.01']
 
       // Verify negRisk via CLOB API — overrides caller-provided value if API responds
       const clobNegRisk = await this.getNegRisk(request.tokenId)
       const negRisk = clobNegRisk ?? request.negRisk ?? false
+
+      // Fee rate: fee-enabled markets (e.g. 15-min crypto) require the correct feeRateBps
+      // in both the EIP-712 signed data AND the request body. Sending 0 on a fee-enabled
+      // market returns "invalid fee rate (0), current market's taker fee: 1000".
+      const feeRateBps = await this.getFeeRateBps(request.tokenId)
 
       // Snap price to tick grid (using official SDK's roundNormal with EPSILON correction)
       // and clamp to CLOB valid range [tickSize, 1-tickSize]
@@ -578,28 +619,49 @@ export class CLOBClient extends BaseApiClient {
       }
 
       // ─── Calculate raw amounts ───
-      // CLOB API enforces asymmetric precision:
-      //   BUY:  makerAmount (collateral) max 2dp, takerAmount (shares) max roundConfig.size dp
-      //   SELL: makerAmount (shares) max roundConfig.size dp, takerAmount (collateral) max 2dp
-      // The collateral side (USDC) is always capped at 2 decimal places (0.01 USDC granularity).
-      const COLLATERAL_MAX_DP = 2
+      // FOK orders enforce STRICT precision: maker=size dp (2), taker=amount dp (4).
+      // GTC/GTD orders are more permissive: derived field uses amount dp (4+).
+      // See: https://github.com/Polymarket/py-clob-client/issues/121
+      //
+      // For FOK BUY: anchor maker (collateral) to size dp (2), derive taker (shares).
+      // For GTC/GTD BUY: anchor taker (shares) to size dp (2), derive maker to amount dp.
+      // SELL: always anchor maker (shares) to size dp, derive taker (collateral).
+      const orderType = request.type || 'FOK'
+      const isFok = orderType === 'FOK'
       let rawMakerAmt: number
       let rawTakerAmt: number
       if (request.side === 'BUY') {
-        // BUY: taker delivers shares (size), maker spends collateral (size * price)
-        rawTakerAmt = roundDown(rawSize, roundConfig.size)
-        rawMakerAmt = rawTakerAmt * tickPrice
-        // Collateral (maker side) must be max 2 decimal places
-        if (decimalPlaces(rawMakerAmt) > COLLATERAL_MAX_DP) {
-          rawMakerAmt = roundUp(rawMakerAmt, COLLATERAL_MAX_DP)
+        if (isFok) {
+          // FOK BUY: maker must be ≤ size dp (2). Anchor maker, derive taker.
+          rawMakerAmt = roundDown(rawSize * tickPrice, roundConfig.size)
+          rawTakerAmt = rawMakerAmt / tickPrice
+          if (decimalPlaces(rawTakerAmt) > roundConfig.amount) {
+            rawTakerAmt = roundDown(rawTakerAmt, roundConfig.amount)
+          }
+          // Enforce CLOB minimum of 5 shares for BUY orders.
+          // rawSize itself can be <5 (e.g., $4.15 / $0.83 = 4.988) or rounding can push below.
+          if (rawTakerAmt > 0 && rawTakerAmt < 5) {
+            rawTakerAmt = 5
+            rawMakerAmt = roundDown(5 * tickPrice, roundConfig.size)
+          }
+        } else {
+          // GTC/GTD BUY: official SDK approach — anchor taker (shares), derive maker.
+          rawTakerAmt = roundDown(rawSize, roundConfig.size)
+          // Enforce CLOB minimum of 5 shares for BUY orders
+          if (rawTakerAmt > 0 && rawTakerAmt < 5) {
+            rawTakerAmt = 5
+          }
+          rawMakerAmt = rawTakerAmt * tickPrice
+          if (decimalPlaces(rawMakerAmt) > roundConfig.amount) {
+            rawMakerAmt = roundDown(rawMakerAmt, roundConfig.amount)
+          }
         }
       } else {
-        // SELL: maker delivers shares (size), taker pays collateral (size * price)
+        // SELL: anchor maker (shares) to size dp, derive taker (collateral) to amount dp
         rawMakerAmt = roundDown(rawSize, roundConfig.size)
         rawTakerAmt = rawMakerAmt * tickPrice
-        // Collateral (taker side) must be max 2 decimal places
-        if (decimalPlaces(rawTakerAmt) > COLLATERAL_MAX_DP) {
-          rawTakerAmt = roundUp(rawTakerAmt, COLLATERAL_MAX_DP)
+        if (decimalPlaces(rawTakerAmt) > roundConfig.amount) {
+          rawTakerAmt = roundDown(rawTakerAmt, roundConfig.amount)
         }
       }
 
@@ -622,16 +684,14 @@ export class CLOBClient extends BaseApiClient {
         takerAmount,
         expiration: request.expiration ?? 0,   // 0 = no expiry; non-zero = GTD Unix timestamp
         nonce: 0,
-        feeRateBps: 0,
+        feeRateBps,
         side: request.side === 'BUY' ? 0 : 1,
         signatureType, // 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE
       }
 
       // Sign the order (EIP-712) — NegRisk markets use a different verifyingContract
-      console.log(`[CLOBClient] Signing order: negRisk=${negRisk}, tickSize=${tickSize}, signatureType=${signatureType}, maker=${makerAddress}, signer=${signerAddress}`)
-      const makerDp = request.side === 'BUY' ? COLLATERAL_MAX_DP : roundConfig.size
-      const takerDp = request.side === 'BUY' ? roundConfig.size : COLLATERAL_MAX_DP
-      console.log(`[CLOBClient]   price=${tickPrice} (${roundConfig.price}dp), rawMaker=${rawMakerAmt} (max ${makerDp}dp), rawTaker=${rawTakerAmt} (max ${takerDp}dp)`)
+      console.log(`[CLOBClient] Signing order: negRisk=${negRisk}, tickSize=${tickSize}, feeRateBps=${feeRateBps}, signatureType=${signatureType}, maker=${makerAddress}, signer=${signerAddress}`)
+      console.log(`[CLOBClient]   price=${tickPrice} (${roundConfig.price}dp), rawMaker=${rawMakerAmt}, rawTaker=${rawTakerAmt}, type=${orderType}`)
       const signature = await this.signOrder(orderData, negRisk)
 
       // Build the API request body (must match official SDK's orderToJson exactly).
@@ -649,7 +709,6 @@ export class CLOBClient extends BaseApiClient {
       //  - signatureType: number
       //  - deferExec: boolean (top-level, default false)
       //  - postOnly: boolean (top-level, only for GTC/GTD)
-      const orderType = request.type || 'FOK'
       const requestBody: Record<string, unknown> = {
         deferExec: request.deferExec ?? false,
         order: {
@@ -662,7 +721,7 @@ export class CLOBClient extends BaseApiClient {
           takerAmount: takerAmount.toString(),
           expiration: String(request.expiration ?? 0),
           nonce: '0',
-          feeRateBps: '0',
+          feeRateBps: String(feeRateBps),
           side: request.side === 'BUY' ? 'BUY' : 'SELL',
           signatureType: orderData.signatureType,
           signature,
@@ -781,9 +840,12 @@ export class CLOBClient extends BaseApiClient {
         return { success: false, error: 'Could not get order book prices' }
       }
 
-      // Get tick size for proper rounding
+      // Use a safe low test price — this GTC limit buy won't fill; we just need a valid
+      // price to verify the signing pipeline. Avoids collateral rounding edge cases where
+      // high prices + small sizes inflate effective price to >= 1.0 (API rejects).
       const tickSize = await this.getTickSize(tokenId)
-      const testPrice = Math.max(tickSize, prices.ask - tickSize * 5) // 5 ticks below ask
+      const tickFloat = typeof tickSize === 'string' ? parseFloat(tickSize) : tickSize
+      const testPrice = Math.max(tickFloat, 0.01)
 
       // Place a $1 GTC limit buy (will sit on book, not fill)
       const result = await this.placeOrder({
@@ -791,7 +853,7 @@ export class CLOBClient extends BaseApiClient {
         side: 'BUY',
         price: testPrice,
         size: 1.0,
-        orderType: 'GTC',
+        type: 'GTC',
         negRisk: binary.negRisk ?? false,
       })
 

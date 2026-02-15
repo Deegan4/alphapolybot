@@ -12,10 +12,12 @@
  */
 
 export interface BinancePriceUpdate {
-  symbol: 'BTC' | 'ETH' | 'SOL'
+  symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'
   priceUSD: number
   priceChange24hPct: number
   volume24hUSD: number
+  high24h: number
+  low24h: number
   timestamp: number
   source: 'binance-ws'
 }
@@ -36,13 +38,15 @@ interface MiniTickerEvent {
   E: number   // Event time
 }
 
-const STREAMS = ['btcusdt@miniTicker', 'ethusdt@miniTicker', 'solusdt@miniTicker']
-const WS_URL = `wss://stream.binance.com:9443/stream?streams=${STREAMS.join('/')}`
+const STREAMS = ['btcusdt@miniTicker', 'ethusdt@miniTicker', 'solusdt@miniTicker', 'xrpusdt@miniTicker']
+const BINANCE_WS_BASE = import.meta.env.VITE_BINANCE_WS_URL || 'wss://stream.binance.com:9443'
+const WS_URL = `${BINANCE_WS_BASE}/stream?streams=${STREAMS.join('/')}`
 
-const PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL'> = {
+const PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL' | 'XRP'> = {
   BTCUSDT: 'BTC',
   ETHUSDT: 'ETH',
   SOLUSDT: 'SOL',
+  XRPUSDT: 'XRP',
 }
 
 export class BinanceWSService {
@@ -125,7 +129,7 @@ export class BinanceWSService {
   }
 
   /** Get cached latest price. Synchronous. */
-  getCachedPrice(symbol: 'BTC' | 'ETH' | 'SOL'): BinancePriceUpdate | null {
+  getCachedPrice(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): BinancePriceUpdate | null {
     return this.prices.get(symbol) || null
   }
 
@@ -166,6 +170,8 @@ export class BinanceWSService {
         priceUSD: close,
         priceChange24hPct: open > 0 ? ((close - open) / open) * 100 : 0,
         volume24hUSD: parseFloat(data.q) || 0,
+        high24h: parseFloat(data.h) || close,
+        low24h: parseFloat(data.l) || close,
         timestamp: data.E || Date.now(),
         source: 'binance-ws',
       }

@@ -2,7 +2,7 @@ import React, { Suspense, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 // AppLayout is no longer used — Settings now uses SettingsLayout
 import { useSettingsStore, useWalletStore } from '@/stores'
-import { tradingService, riskManager, positionLifecycleManager, gtcOrderManager, activityLogger } from '@/services/trading'
+import { tradingService, riskManager, positionLifecycleManager, gtcOrderManager, activityLogger, tradeLogger } from '@/services/trading'
 import { indexedDBService } from '@/services/storage'
 import { secureStorage } from '@/utils/secureStorage'
 import { strategyManager } from '@/services/strategies'
@@ -51,6 +51,9 @@ const App: React.FC = () => {
 
       // Hydrate activity log from storage (restores history across refreshes)
       await activityLogger.loadFromStorage()
+
+      // Hydrate trade records from IndexedDB (restores trade history across refreshes)
+      await tradeLogger.hydrate()
 
       // Initialize risk manager (subscribes to activity logger for error monitoring)
       riskManager.initialize()
@@ -177,16 +180,8 @@ const App: React.FC = () => {
     }
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState !== 'hidden') return
-      const currentDryRun = useSettingsStore.getState().dryRun
-      if (currentDryRun) return
-
-      const states = strategyManager.getStates()
-      const anyLive = states.some(s => s.status === 'running')
-      if (anyLive) {
-        // Fire-and-forget toast warning via activity logger
-        activityLogger.logWarning('Tab hidden — WebSocket connections may degrade. SL/TP monitoring continues but may be slower.')
-      }
+      // No intentional throttling or warning when tab is hidden
+      // SL/TP monitoring will continue at full speed as allowed by browser
     }
 
     window.addEventListener('beforeunload', handleBeforeUnload)
@@ -232,7 +227,7 @@ const App: React.FC = () => {
           </Routes>
         </Suspense>
       </BrowserRouter>
-      <MatrixToastContainer />
+      {/* <MatrixToastContainer /> removed to disable top-right notifications */}
     </ErrorBoundary>
   )
 }

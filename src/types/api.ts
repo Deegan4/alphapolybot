@@ -112,7 +112,7 @@ export interface PendingGtcOrder {
   price: number
   size: number
   costBasis: number           // USDC locked
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro'
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
   negRisk?: boolean
   stopLossPercent: number     // SL to apply when filled
   takeProfitPercent: number   // TP to apply when filled
@@ -201,13 +201,17 @@ export interface LLMConfig {
   temperature: number
   maxTokens: number
   webSearchEnabled: boolean
+  // Premium model tiering
+  premiumModel?: string            // e.g. 'openai/gpt-4o' — empty = disabled
+  premiumModelThreshold?: number   // min qualityScore to use premium (default: 25)
+  premiumBudgetUSD?: number        // daily budget for premium calls (default: $0.50)
 }
 
 // ==========================================
 // STRATEGY TYPES
 // ==========================================
 
-export type StrategyType = 'mechanical' | 'ai' | 'arbitrage'
+export type StrategyType = 'mechanical' | 'ai' | 'arbitrage' | 'copy'
 export type StrategyStatus = 'idle' | 'running' | 'paused' | 'error'
 
 export interface StrategyStats {
@@ -341,21 +345,36 @@ export interface BtcUpDownConfig {
   enableBtc: boolean           // Trade BTC Up/Down markets (default true)
   enableEth: boolean           // Trade ETH Up/Down markets (default false)
   enableSol: boolean           // Trade SOL Up/Down markets (default false)
+  enableXrp: boolean           // Trade XRP Up/Down markets (default false)
+  // Window duration toggles
+  enable5m: boolean            // Trade 5-minute windows (default true)
+  enable15m: boolean           // Trade 15-minute windows (default true)
+  enableHourly: boolean        // Trade hourly windows (default false)
+  enableDaily: boolean         // Trade daily windows (default false)
+  enable9pm: boolean           // Trade 9PM ET daily events (default false)
   // Bet sizing
   tradeSize: number            // Fixed USDC per bet (default 2.0)
   useKellySizing: boolean      // Override tradeSize with Kelly (default true)
   // Entry filters
-  minConfidence: number        // Min signal confidence 0-1 (default 0.65)
-  maxEntryPrice: number        // Max price to buy an outcome (default 0.70)
-  minWindowRemaining: number   // Min seconds left in window to enter (default 300)
+  minConfidence: number        // Min signal confidence 0-1 (default 0.38)
+  maxEntryPrice: number        // Max price to buy an outcome (default 0.45 — cheap outcomes for resolution hold)
+  minEntryPrice: number        // Min price to buy an outcome (default 0.15 — reject extreme long-shots where 10% fee kills EV)
+  minWindowRemaining: number   // Min seconds left in 15m window to enter (default 120) — auto-scaled for 5m
+  minTimeIntoWindowMs: number  // Min ms into window before trading (default 45000 for 15m, auto-scaled for 5m)
+  // Signal filters
+  regimeFilterEnabled: boolean // Skip choppy/mean-reverting markets (default true)
+  rsiFilterEnabled: boolean    // Reduce confidence on overbought/oversold entries (default true)
   // Execution
   scanIntervalMs: number       // Scan frequency in ms (default 15000)
-  maxConcurrentPositions: number // Max simultaneous positions (default 2)
-  cooldownMs: number           // Per-market cooldown in ms (default 120000)
-  // Risk management
-  stopLossPercent: number      // SL for positions (default 0.25)
-  takeProfitPercent: number    // TP for positions (default 0.20)
-  maxHoldMs: number            // Force exit before resolution (default 840000 = 14min)
+  maxConcurrentPositions: number // Max simultaneous positions (default 3)
+  maxEntriesPerMarket: number  // Max entries per market/window (default 3 — scatter-bet)
+  cooldownMs: number           // Per-market cooldown in ms (default 15000) — auto-scaled for 5m
+  // Risk management — resolution-hold strategy: wide SL/TP, hold to binary payout
+  stopLossPercent: number      // SL for positions (default 0.35 — catastrophic protection only)
+  takeProfitPercent: number    // TP for positions (default 0.70 — only exit on strong pre-resolution moves)
+  maxHoldMs: number            // Force exit before resolution (default 840000 = 14min) — auto-scaled for 5m
+  // LLM confirmation
+  useLLMConfirmation: boolean  // Use LLM to verify signals on hourly+ windows (default false)
 }
 
 export interface MicroMomentumConfig {
@@ -395,6 +414,11 @@ export interface LLMPredictionConfig {
   excludedCategories: string[]
   gtcFallbackEnabled: boolean  // When FOK is killed, resubmit as GTD limit order
   gtcExpiryMinutes: number     // GTD orders auto-expire after this duration (server-enforced)
+  // Crypto LLM mode (Phase 5)
+  cryptoLLMEnabled?: boolean          // default: false
+  cryptoModel?: string                // model for crypto analysis (can differ from main)
+  cryptoScanIntervalMs?: number       // default: 30000 (faster for crypto)
+  cryptoMinConfidence?: number        // default: 0.55 (slightly higher for volatile markets)
 }
 
 // ==========================================
@@ -446,6 +470,19 @@ export interface ApiPosition {
   percentPnl: number
   outcomeIndex: number
   lastUpdated: string
+}
+
+/** Raw trade from Polymarket Data API /trades endpoint */
+export interface ApiTrade {
+  id: string
+  market: string        // conditionId — maps to Trade.marketId
+  asset_id: string      // tokenId
+  side: 'BUY' | 'SELL'
+  price: string         // string numeric
+  size: string          // string numeric
+  fee: string           // string numeric
+  timestamp: string
+  transaction_hash: string
 }
 
 // ==========================================
@@ -660,6 +697,81 @@ export interface RTDSCryptoPricePayload {
   price: number
   change24h?: number
   volume24h?: number
+}
+
+// ==========================================
+// MEAN REVERSION / COINBASE TYPES
+// ==========================================
+
+export interface MeanRevConfig {
+  enableBtc: boolean
+  enableEth: boolean
+  enableSol: boolean
+  lookbackPeriod: number        // Rolling window size (default 20)
+  entryZScore: number           // Z-score threshold to enter (default 2.0)
+  exitZScore: number            // Z-score threshold to exit (default 0.5)
+  bollingerMultiplier: number   // StdDev multiplier for bands (default 2.0)
+  tradeSize: number             // USD per trade (default 10.0)
+  scanIntervalMs: number        // Signal check interval (default 10_000)
+  maxConcurrentPositions: number // Per asset (default 1)
+  cooldownMs: number            // Per-symbol cooldown (default 60_000)
+  stopLossPercent: number       // Hard SL (default 0.03 = 3%)
+  takeProfitPercent: number     // Hard TP (default 0.02 = 2%)
+  maxHoldMs: number             // Force exit after N ms (default 3_600_000 = 1hr)
+}
+
+export interface SpotPosition {
+  symbol: string
+  side: 'LONG'
+  entryPrice: number
+  quantity: number
+  costBasis: number       // USD spent
+  entryTime: number
+  orderId?: string
+  currentPrice: number
+  unrealizedPnl: number
+  unrealizedPnlPercent: number
+}
+
+export interface MeanRevSignal {
+  symbol: string
+  action: 'buy' | 'sell' | 'hold'
+  zScore: number
+  mean: number
+  stdDev: number
+  upperBand: number
+  lowerBand: number
+  currentPrice: number
+  confidence: number      // 0-1 mapped from Z-score magnitude
+  timestamp: number
+}
+
+export interface CoinbaseOrderResult {
+  success: boolean
+  orderId?: string
+  productId?: string
+  side?: 'BUY' | 'SELL'
+  filledSize?: number
+  filledValue?: number
+  avgPrice?: number
+  status?: string
+  error?: string
+}
+
+export interface CoinbaseAccountBalance {
+  currency: string
+  available: number
+  hold: number
+  total: number
+}
+
+export interface CoinbaseCandle {
+  start: number     // Unix timestamp
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
 }
 
 // ==========================================

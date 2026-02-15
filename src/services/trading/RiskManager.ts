@@ -98,7 +98,6 @@ export class RiskManager {
   }
 
   constructor(config?: Partial<RiskManagerConfig>) {
-    // Read persisted settings, falling back to defaults
     const settings = useSettingsStore.getState()
     this.config = {
       dailyLossLimit: settings.dailyLossLimit ?? DEFAULT_CONFIG.dailyLossLimit,
@@ -121,21 +120,14 @@ export class RiskManager {
    */
   initialize(): void {
     this.unsubscribeLogger = activityLogger.subscribe((activity) => {
+      // Skip monitoring when risk management is disabled
+      if (!this.config.enabled) return
+
       // Reset failure counter on successful trade
       if (activity.type === 'trade') {
         this.consecutiveFailures = 0
       }
-
-      // Increment on trade-related errors (defense-in-depth)
-      if (activity.type === 'error') {
-        const msg = activity.message.toLowerCase()
-        if (msg.includes('trade') || msg.includes('order') || msg.includes('execution')) {
-          this.consecutiveFailures++
-          if (this.consecutiveFailures >= this.config.consecutiveFailureLimit) {
-            this.emergencyStop(`${this.consecutiveFailures} consecutive trade-related errors`)
-          }
-        }
-      }
+      // Failure counting handled exclusively by recordTradeResult()
     })
 
     console.log('[RiskManager] Initialized with config:', {
@@ -150,7 +142,7 @@ export class RiskManager {
    * Checks are ordered cheapest-first for fast rejection
    */
   validateTrade(tradeAmountUSDC: number, conditionId?: string, category?: string): RiskCheckResult {
-    // Skip all checks if risk management is disabled
+    // Risk management disabled: skip all checks
     if (!this.config.enabled) {
       return { allowed: true }
     }

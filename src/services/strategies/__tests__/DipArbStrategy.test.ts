@@ -204,12 +204,12 @@ describe('DipArbStrategy', () => {
 
       await dipCallback!(event)
 
-      // Leg 1: Buy YES
+      // Leg 1: Buy YES — penny mode: max(1, 5 * maxLegPrice) = max(1, 5*0.60) = 3
       expect(mockPlaceBet).toHaveBeenCalledTimes(2)
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 1, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true })
 
       // Leg 2: Buy NO
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 1, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true })
 
       // Merge positions
       expect(mockMergePositions).toHaveBeenCalledWith(
@@ -311,7 +311,7 @@ describe('DipArbStrategy', () => {
 
       // Leg 1 should execute (uses original price)
       expect(mockPlaceBet).toHaveBeenCalledTimes(1)
-      expect(mockPlaceBet).toHaveBeenCalledWith(event.market, 'yes', 1, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenCalledWith(event.market, 'yes', 3, { skipGtcFallback: true })
 
       // Leg 2 should NOT execute — slippage check aborted
       // Instead, Leg 1 should be sold back
@@ -487,8 +487,8 @@ describe('DipArbStrategy', () => {
 
     it('getDipConfig returns config copy', () => {
       const config = strategy.getDipConfig()
-      expect(config.shares).toBe(1)
-      expect(config.sumTarget).toBe(1.00)
+      expect(config.shares).toBe(5)
+      expect(config.sumTarget).toBe(0.96)
       expect(config.dipThreshold).toBe(0.05)
     })
 
@@ -510,8 +510,8 @@ describe('DipArbStrategy', () => {
       await dipCallback!(event)
 
       // Leg 1 = YES, Leg 2 = NO
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 1, { skipGtcFallback: true })
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 1, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true })
     })
 
     it('buys YES when NO dips', async () => {
@@ -529,8 +529,8 @@ describe('DipArbStrategy', () => {
       await dipCallback!(event)
 
       // Leg 1 = NO, Leg 2 = YES
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, market, 'no', 1, { skipGtcFallback: true })
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, market, 'yes', 1, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, market, 'no', 3, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, market, 'yes', 3, { skipGtcFallback: true })
     })
   })
 })

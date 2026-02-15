@@ -51,13 +51,40 @@ vi.mock('../ActivityLogger', () => ({
 }))
 
 // Mock stores (PLM reads dryRun from settingsStore)
+const mockDryRun = { value: false }
 vi.mock('@/stores', () => ({
   useSettingsStore: {
-    getState: () => ({ dryRun: false }),
+    getState: () => ({ dryRun: mockDryRun.value }),
   },
   useWalletStore: {
     getState: () => ({}),
     subscribe: vi.fn(),
+  },
+}))
+
+// Mock CLOB client (PLM places resting exit orders via dynamic import)
+const mockClobPlaceOrder = vi.fn()
+vi.mock('@/services/api', () => ({
+  clobClient: {
+    placeOrder: (...args: unknown[]) => mockClobPlaceOrder(...args),
+  },
+}))
+
+// Mock storage (PLM persists positions via dynamic import — prevent unhandled rejections)
+vi.mock('@/services/storage', () => ({
+  indexedDBService: {
+    storePosition: vi.fn().mockResolvedValue(undefined),
+    removePosition: vi.fn().mockResolvedValue(undefined),
+    loadPositions: vi.fn().mockResolvedValue([]),
+  },
+}))
+
+// Mock TradeLogger (used in executeSell path)
+vi.mock('../TradeLogger', () => ({
+  tradeLogger: {
+    findOpenRecord: vi.fn(),
+    logEntry: vi.fn(),
+    logExit: vi.fn(),
   },
 }))
 
@@ -92,6 +119,7 @@ describe('PositionLifecycleManager', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockDryRun.value = false
     plm = new PositionLifecycleManager()
   })
 
@@ -168,8 +196,8 @@ describe('PositionLifecycleManager', () => {
 
       expect(positions).toHaveLength(1)
       expect(positions[0].currentPrice).toBe(0.60)
-      expect(positions[0].pnlPercent).toBeCloseTo(0.20) // +20%
-      expect(positions[0].pnlUsd).toBeCloseTo(1.0) // (0.60 - 0.50) * 10
+      expect(positions[0].pnlPercent).toBeCloseTo(0.20) // +20% gross (fees deducted at sell, not display)
+      expect(positions[0].pnlUsd).toBeCloseTo(1.00) // 10 shares * ($0.60 - $0.50)
       expect(positions[0].isStale).toBe(false)
     })
 
@@ -192,7 +220,7 @@ describe('PositionLifecycleManager', () => {
       const positions = plm.getPositions()
 
       expect(positions[0].currentPrice).toBe(0.50)
-      expect(positions[0].pnlPercent).toBe(0)
+      expect(positions[0].pnlPercent).toBeCloseTo(0) // 0% gross (no fee subtraction on display)
     })
   })
 
@@ -213,9 +241,9 @@ describe('PositionLifecycleManager', () => {
       priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
 
       // Give async sell time to complete
-      // placeSell(tokenId, size, price?, negRisk?) — price=undefined, negRisk=undefined
+      // placeSell(tokenId, size, price?, negRisk?, orderType?) — GTC for exit sells
       await vi.waitFor(() => {
-        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined)
+        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined, 'GTC')
       })
     })
 
@@ -251,7 +279,7 @@ describe('PositionLifecycleManager', () => {
       priceCallback('token-abc-123', { mid: 0.70, timestamp: new Date() })
 
       await vi.waitFor(() => {
-        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined)
+        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined, 'GTC')
       })
     })
   })
@@ -454,6 +482,125 @@ describe('PositionLifecycleManager', () => {
       expect(mockRecordTradeResult).toHaveBeenCalledWith(false, 0, 'structural')
 
       vi.useRealTimers()
+    })
+  })
+
+  describe('resting exit orders (TP-only GTC limit sells)', () => {
+    it('places TP resting order on first attempt when tokens are settled', async () => {
+      mockClobPlaceOrder.mockResolvedValue({ success: true, orderId: 'resting-1' })
+
+      plm.trackPosition(makePosition({
+        entryPrice: 0.50,
+        stopLossPercent: 0.15,
+        takeProfitPercent: 0.30, // TP price = 0.50 * 1.32 = 0.66 (includes 2% default fee)
+        size: 10,
+      }))
+
+      // Wait for fire-and-forget async to resolve
+      await vi.waitFor(() => {
+        expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1)
+      })
+
+      // TP order only — no SL resting order (GTC SELL at SL price fills immediately at market)
+      expect(mockClobPlaceOrder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          side: 'SELL',
+          price: 0.66,
+          size: 10,
+          type: 'GTC',
+        })
+      )
+    })
+
+    it('retries on balance error when tokens are not yet settled', async () => {
+      vi.useFakeTimers()
+
+      // First call (TP) fails with balance error; next one succeeds
+      mockClobPlaceOrder
+        .mockResolvedValueOnce({ success: false, error: 'not enough balance / allowance' })
+        .mockResolvedValueOnce({ success: true, orderId: 'tp-retry' })
+
+      plm.trackPosition(makePosition({
+        entryPrice: 0.50,
+        stopLossPercent: 0.15,
+        takeProfitPercent: 0.30,
+        size: 10,
+      }))
+
+      // First attempt fires immediately
+      await vi.advanceTimersByTimeAsync(100)
+      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // TP failed
+
+      // Advance past first retry delay (5s)
+      await vi.advanceTimersByTimeAsync(5100)
+      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(2) // Retry TP succeeds
+
+      vi.useRealTimers()
+    })
+
+    it('does NOT retry on non-balance errors', async () => {
+      vi.useFakeTimers()
+
+      mockClobPlaceOrder.mockResolvedValue({ success: false, error: 'invalid signature' })
+
+      plm.trackPosition(makePosition({
+        entryPrice: 0.50,
+        stopLossPercent: 0.15,
+        takeProfitPercent: 0.30,
+        size: 10,
+      }))
+
+      // Let first attempt resolve
+      await vi.advanceTimersByTimeAsync(100)
+      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // TP only
+
+      // Advance way past any retry delay — should NOT retry
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // Still just 1
+
+      vi.useRealTimers()
+    })
+
+    it('abandons retry if position was removed during wait', async () => {
+      vi.useFakeTimers()
+
+      mockClobPlaceOrder.mockResolvedValue({ success: false, error: 'not enough balance' })
+
+      plm.trackPosition(makePosition({
+        entryPrice: 0.50,
+        stopLossPercent: 0.15,
+        takeProfitPercent: 0.30,
+        size: 10,
+      }))
+
+      // Let first attempt fail
+      await vi.advanceTimersByTimeAsync(100)
+      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // TP only
+
+      // Remove position before retry fires
+      plm.removePosition('token-abc-123')
+
+      // Advance past retry delay — should NOT make more calls
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1)
+
+      vi.useRealTimers()
+    })
+
+    it('skips resting orders in dry-run mode', async () => {
+      mockDryRun.value = true
+
+      plm.trackPosition(makePosition({
+        entryPrice: 0.50,
+        stopLossPercent: 0.15,
+        takeProfitPercent: 0.30,
+        size: 10,
+      }))
+
+      // Give fire-and-forget time to resolve (if it were going to)
+      await new Promise(r => setTimeout(r, 50))
+
+      expect(mockClobPlaceOrder).not.toHaveBeenCalled()
     })
   })
 })

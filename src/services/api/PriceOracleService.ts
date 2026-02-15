@@ -6,7 +6,7 @@
  */
 
 export interface AssetPrice {
-  symbol: 'BTC' | 'ETH' | 'SOL'
+  symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'
   priceUSD: number
   timestamp: number
   source: 'binance' | 'coingecko' | 'rtds'
@@ -18,18 +18,20 @@ const BINANCE_PAIRS: Record<string, string> = {
   BTC: 'BTCUSDT',
   ETH: 'ETHUSDT',
   SOL: 'SOLUSDT',
+  XRP: 'XRPUSDT',
 }
 
 const COINGECKO_IDS: Record<string, string> = {
   BTC: 'bitcoin',
   ETH: 'ethereum',
   SOL: 'solana',
+  XRP: 'ripple',
 }
 
 export class PriceOracleService {
   private cache = new Map<string, AssetPrice>()
 
-  async getPrice(symbol: 'BTC' | 'ETH' | 'SOL'): Promise<AssetPrice> {
+  async getPrice(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
     // 1. Try RTDS cached price (streaming, <5s old = fresh)
     try {
       const { rtdsService } = await import('@/services/realtime/RTDSService')
@@ -73,10 +75,11 @@ export class PriceOracleService {
     }
   }
 
-  private async fetchBinance(symbol: 'BTC' | 'ETH' | 'SOL'): Promise<AssetPrice> {
+  private async fetchBinance(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
     const pair = BINANCE_PAIRS[symbol]
+    const binanceBase = import.meta.env.VITE_BINANCE_API_URL || 'https://api.binance.com/api/v3'
     const res = await fetch(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${pair}`,
+      `${binanceBase}/ticker/price?symbol=${pair}`,
       { signal: AbortSignal.timeout(5000) },
     )
     if (!res.ok) throw new Error(`Binance ${res.status}`)
@@ -84,10 +87,11 @@ export class PriceOracleService {
     return { symbol, priceUSD: parseFloat(data.price), timestamp: Date.now(), source: 'binance' }
   }
 
-  private async fetchCoinGecko(symbol: 'BTC' | 'ETH' | 'SOL'): Promise<AssetPrice> {
+  private async fetchCoinGecko(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
     const id = COINGECKO_IDS[symbol]
+    const coingeckoBase = import.meta.env.VITE_COINGECKO_API_URL || 'https://api.coingecko.com/api/v3'
     const res = await fetch(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`,
+      `${coingeckoBase}/simple/price?ids=${id}&vs_currencies=usd`,
       { signal: AbortSignal.timeout(5000) },
     )
     if (!res.ok) throw new Error(`CoinGecko ${res.status}`)

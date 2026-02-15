@@ -1,5 +1,6 @@
-import type { Market, OrderRequest, OrderResult, Order } from '@/types'
+import type { Market, OrderRequest, OrderResult, Order, PendingGtcOrder } from '@/types'
 import { clobClient } from '@/services/api'
+import { realtimeService } from '@/services/realtime'
 import { walletService } from '@/services/wallet'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
@@ -80,7 +81,7 @@ export class TradingService {
     market: Market,
     outcome: 'yes' | 'no',
     amount: number,
-    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number }
+    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string }
   ): Promise<OrderResult> {
     // Ensure approvals (skip actual transactions in dry run mode)
     const approvalResult = await walletService.ensureApprovals(this.config.dryRun)
@@ -153,6 +154,7 @@ export class TradingService {
       costBasis: amount,
       stopLossPercent: options?.stopLossPercent ?? 0.15,
       takeProfitPercent: options?.takeProfitPercent ?? 0.30,
+      strategy: options?.strategy ?? 'llm',
     } : undefined
 
     return this.executeOrder(orderRequest, gtdMeta)
@@ -165,7 +167,8 @@ export class TradingService {
     tokenId: string,
     shares: number,
     price?: number,
-    negRisk?: boolean
+    negRisk?: boolean,
+    orderType?: 'FOK' | 'GTC' | 'GTD'
   ): Promise<OrderResult> {
     // Ensure CTF approval for selling (skip actual transactions in dry run mode)
     const approvalResult = await walletService.ensureApprovals(this.config.dryRun)
@@ -176,14 +179,25 @@ export class TradingService {
     // Apply execution cooldown
     await this.waitForCooldown()
 
-    // Get current price if not provided
+    // Get current price if not provided — use best bid (not mid minus slippage)
     let sellPrice = price
     if (!sellPrice) {
-      const midPrice = await clobClient.getMidPrice(tokenId)
-      if (!midPrice || midPrice < 0.01) {
-        return { success: false, error: `Could not determine market price (mid=${midPrice})` }
+      // Priority: realtime bid > CLOB bid > CLOB mid (no slippage discount)
+      const priceData = realtimeService.getPrice(tokenId)
+      if (priceData?.bid && priceData.bid > 0.01) {
+        sellPrice = priceData.bid
+      } else {
+        const bestPrices = await clobClient.getBestPrices(tokenId)
+        if (bestPrices?.bid && bestPrices.bid > 0.01) {
+          sellPrice = bestPrices.bid
+        } else {
+          const midPrice = await clobClient.getMidPrice(tokenId)
+          if (!midPrice || midPrice < 0.01) {
+            return { success: false, error: `Could not determine market price` }
+          }
+          sellPrice = midPrice
+        }
       }
-      sellPrice = midPrice * (1 - this.config.maxSlippage) // Sell slightly below mid
     }
 
     // Clamp sell price to Polymarket valid range (0.01, 0.99)
@@ -198,7 +212,7 @@ export class TradingService {
       side: 'SELL',
       price: sellPrice,
       size: shares,
-      type: this.config.fokOnly ? 'FOK' : 'GTC',
+      type: orderType ?? (this.config.fokOnly ? 'FOK' : 'GTC'),
       negRisk,
     }
 
@@ -377,6 +391,19 @@ export class TradingService {
             riskManager.recordMarketExposure(request.conditionId, orderDollarValue)
           }
 
+          // Query actual fill data from CLOB (the POST /order response lacks filledSize/avgPrice)
+          if (result.orderId && !result.filledSize) {
+            try {
+              const orderDetails = await clobClient.getOrder(result.orderId)
+              if (orderDetails) {
+                result.filledSize = orderDetails.filledSize ?? result.filledSize
+                result.avgPrice = orderDetails.price ?? result.avgPrice
+              }
+            } catch {
+              // Best-effort — strategies fall back to estimated size if this fails
+            }
+          }
+
           // Log trade for backtest framework
           tradeLogger.logEntry({
             marketId: request.conditionId ?? '',
@@ -413,10 +440,10 @@ export class TradingService {
           break
         }
 
-        // "min size" errors are structural — order amount is below CLOB minimum ($1).
-        // Retrying the same amount will always fail.
-        if (lastError?.includes('min size')) {
-          console.error(`[TradingService] Order below minimum size — aborting immediately`)
+        // "min size" / "lower than the minimum" errors are structural —
+        // order share count is below CLOB minimum (5 shares).
+        if (lastError?.includes('min size') || lastError?.includes('lower than the minimum')) {
+          console.error(`[TradingService] Order below minimum size (5 shares) — aborting immediately`)
           failureReason = 'structural'
           break
         }
@@ -426,6 +453,7 @@ export class TradingService {
         // exact same order is wasteful. Break immediately.
         if (lastError?.includes("couldn't be fully filled") || lastError?.includes('FOK')) {
           console.warn(`[TradingService] FOK order killed (no liquidity at this price/size) — not retrying`)
+          failureReason = 'structural'
           break
         }
 
@@ -447,11 +475,12 @@ export class TradingService {
         if (lastError.includes('not enough balance')) { failureReason = 'structural'; break }
 
         // Don't retry min size errors surfaced as exceptions
-        if (lastError.includes('min size')) { failureReason = 'structural'; break }
+        if (lastError.includes('min size') || lastError.includes('lower than the minimum')) { failureReason = 'structural'; break }
 
         // Don't retry FOK liquidity failures surfaced as exceptions
         if (lastError.includes("couldn't be fully filled") || lastError.includes('FOK')) {
           console.warn(`[TradingService] FOK order killed (no liquidity) — not retrying`)
+          failureReason = 'structural'
           break
         }
 
@@ -502,7 +531,7 @@ export class TradingService {
               price: request.price,
               size: request.size,
               costBasis: gtdMeta.costBasis,
-              strategy: 'llm',
+              strategy: gtdMeta.strategy as PendingGtcOrder['strategy'],
               negRisk: request.negRisk,
               stopLossPercent: gtdMeta.stopLossPercent,
               takeProfitPercent: gtdMeta.takeProfitPercent,

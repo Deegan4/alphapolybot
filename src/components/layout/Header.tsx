@@ -39,7 +39,7 @@ HeaderClock.displayName = 'HeaderClock'
  * Header - Glass header with gradient border and breathing live indicator
  */
 export const Header: React.FC = () => {
-  const { isConnected, syncBalances } = useWalletStore()
+  const { isConnected, startPolling, stopPolling } = useWalletStore()
   const { dryRun, pennyTraderMode } = useSettingsStore()
   const [strategies, setStrategies] = useState(strategyManager.getStates())
 
@@ -48,14 +48,12 @@ export const Header: React.FC = () => {
     return strategyManager.subscribe(setStrategies)
   }, [])
 
-  // Refresh balances periodically when connected
-  // Fire immediately on connect, then every 30s
+  // Start/stop centralized balance polling based on connection state
   useEffect(() => {
     if (!isConnected) return
-    syncBalances()
-    const interval = setInterval(syncBalances, 30000)
-    return () => clearInterval(interval)
-  }, [isConnected, syncBalances])
+    startPolling()
+    return () => stopPolling()
+  }, [isConnected, startPolling, stopPolling])
 
   const activeStrategies = strategies.filter(s => s.enabled)
 

@@ -101,13 +101,13 @@ export const CONTRACT_ADDRESSES = {
   USDC: import.meta.env.VITE_USDC_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
 
   // USDC (Native) on Polygon — newer Circle-issued, 6 decimals
-  USDC_NATIVE: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
-  
+  USDC_NATIVE: import.meta.env.VITE_USDC_NATIVE_ADDRESS || '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+
   // Neg Risk CTF Exchange
-  NEG_RISK_CTF_EXCHANGE: '0xC5d563A36AE78145C45a50134d48A1215220f80a',
-  
+  NEG_RISK_CTF_EXCHANGE: import.meta.env.VITE_NEG_RISK_CTF_EXCHANGE || '0xC5d563A36AE78145C45a50134d48A1215220f80a',
+
   // Neg Risk Exchange
-  NEG_RISK_EXCHANGE: '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296',
+  NEG_RISK_EXCHANGE: import.meta.env.VITE_NEG_RISK_EXCHANGE || '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296',
 }
 
 // ==========================================
@@ -130,6 +130,10 @@ export const CTF_ABI = [
   // parentCollectionId is bytes32(0) for top-level markets
   // conditionId identifies the market, amount is the number of complete sets to merge
   'function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)',
+  // redeemPositions: After market resolution, converts winning outcome tokens to USDC.
+  // Burns all outcome tokens — winning tokens return collateral, losing tokens are worthless.
+  // No amount param — redeems the caller's full balance automatically.
+  'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition)',
 ]
 
 export const EXCHANGE_ABI = [

@@ -1,5 +1,6 @@
 import type { Market } from '@/types'
 import { gammaClient } from '@/services/api'
+import { calibrationTracker } from './CalibrationTracker'
 
 export interface ScanResult {
   market: Market
@@ -228,6 +229,20 @@ export class MarketScanner {
       }
     }
 
+    // Exclude crypto Up/Down markets (5m/15m price direction bets).
+    // These are mechanical-signal markets where LLMs have no informational edge.
+    // Detection: outcomes are ["Up","Down"] or slug contains "updown".
+    const hasUpDownOutcomes = market.outcomes?.includes('Up') && market.outcomes?.includes('Down')
+    const hasUpDownSlug = market.slug?.includes('updown')
+    if (hasUpDownOutcomes || hasUpDownSlug) {
+      return {
+        market,
+        eligible: false,
+        score: 0,
+        reason: 'Crypto Up/Down market (handled by BTC Up/Down strategy)',
+      }
+    }
+
     // Check market age (0 = no age limit)
     const ageHours = (Date.now() - new Date(market.createdAt).getTime()) / (1000 * 60 * 60)
     if (this.config.maxAgeHours > 0 && ageHours > this.config.maxAgeHours) {
@@ -242,6 +257,18 @@ export class MarketScanner {
     // Newer markets get a bonus (max 10 points, decays over 30 days)
     const ageScore = Math.max(0, 10 - (ageHours / 720) * 10) // 720h = 30 days
     score += ageScore
+
+    // Category edge bonus: reward categories where the LLM has proven accuracy
+    if (market.category) {
+      try {
+        const catEdge = calibrationTracker.getCategoryAccuracy(market.category)
+        if (catEdge && catEdge.sampleSize >= 10 && catEdge.accuracy > 0.6) {
+          score += (catEdge.accuracy - 0.5) * 20 // up to +10 points for proven categories
+        }
+      } catch {
+        // CalibrationTracker not ready — skip bonus
+      }
+    }
 
     return {
       market,

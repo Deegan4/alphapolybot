@@ -1,13 +1,13 @@
 # AlphaPolyBot
 
-Browser-based TypeScript/React Polymarket trading bot. Vite 4, React 18, Zustand, Ethers.js, Tailwind, Recharts.
+Browser-based TypeScript/React Polymarket trading bot. Vite 7, React 18, Zustand, Ethers.js, Tailwind, Recharts.
 
 ## Commands
 
 ```bash
 npm run dev          # Vite dev server on :4000 (auto-opens browser)
 npm run build        # Production build (uses vite build, NOT tsc)
-npm test             # Vitest single run (247 tests)
+npm test             # Vitest single run (415 tests)
 npm run test:watch   # Vitest watch mode
 npm run lint         # ESLint (.eslintrc.cjs)
 npm run preview      # Preview production build
@@ -24,44 +24,50 @@ npm run preview      # Preview production build
 - **ActivityLogger** is the central audit trail — services subscribe to it
 - **Path alias**: `@/` maps to `src/`
 
-### Five Trading Strategies
+### Seven Trading Strategies
 1. **LLM Prediction** — AI-powered via OpenRouter, analyzes markets with LLMs
 2. **Dip Arbitrage** — Mechanical, buys price dips on binary markets
 3. **ProjectFW Arb** — Frank-Wolfe optimized spread arbitrage with Bregman projection
-4. **BTC Up/Down** — 5-factor signal (momentum, velocity, time_decay, value_bet, order_flow) on crypto direction markets
+4. **BTC Up/Down** — Resolution-hold on cheap outcomes (<45c). 5-factor vol-normalized signal with regime detection, RSI filter, adaptive scan. BinanceWS 300-point high-freq buffer.
 5. **Microstructure Momentum** — Trades on bid/ask imbalance and flow toxicity signals from MicrostructureAnalyzer
+6. **Mean Reversion** — Coinbase spot crypto (BTC/ETH/SOL), Z-score mean reversion on price buffers, BinanceWS live feed
+7. **Copy Trading** — Mirrors trades from tracked Polymarket whale wallets
 
 ## Directory Structure
 
 ```
 src/
 ├── components/
-│   ├── charts/        # MatrixLineChart, MatrixAreaChart, MatrixPieChart
-│   ├── dashboard/     # 15 components: ActivePositionsCard, AssetCard, AssetCardsRow,
-│   │                  # HistoryView, PortfolioPanel, RecentTradesGrid, SniperTopBar,
-│   │                  # StrategyDropdown, WindowTimer, MatrixDataTable, MatrixStatWidget, etc.
+│   ├── charts/        # MatrixLineChart, MatrixAreaChart, MatrixBarChart, MatrixPieChart,
+│   │                  # MatrixGauge, MatrixSparkline
+│   ├── dashboard/     # 20 components: ActivePositionsCard, AssetCard, AssetCardsRow,
+│   │                  # DiagnosticsBanner, FollowTraderPanel, HistoryView, PerformancePanel,
+│   │                  # PortfolioPanel, ReadinessPanel, RecentTradesGrid, SniperTopBar,
+│   │                  # SpotCryptoView, StrategyDropdown, WindowTimer, MatrixDataTable, etc.
 │   ├── layout/        # AppLayout, DashboardLayout, SettingsLayout, Header, Sidebar, MatrixRain
 │   └── ui/            # 18 Matrix-themed components (Button, Card, Modal, Toast, etc.)
-├── hooks/             # useWallet, useBalanceHistory, useCryptoPrices
+├── hooks/             # useWallet, useBalanceHistory, useCryptoPrices, usePolymarketPrices
 ├── services/
-│   ├── api/           # CLOBClient, GammaClient, DataClient, PriceOracleService
+│   ├── api/           # BaseApiClient, CLOBClient, GammaClient, DataClient, PriceOracleService, CoinbaseClient
 │   ├── llm/           # OpenRouterService (multi-model, budget-bucketed)
 │   ├── notifications/ # NotificationService (toast + browser + Web Audio)
 │   ├── realtime/      # RealtimeService, RTDSService (crypto), UserChannelService (auth push),
 │   │                  # BinanceWSService
 │   ├── storage/       # IndexedDBService (v4, 6 object stores)
-│   ├── strategies/    # BaseStrategy, LLMPrediction, DipArb, ProjectFW, BtcUpDown, MicroMomentum
-│   │   ├── __tests__/ # DipArb, FW Optimizer, FW Strategy tests
+│   ├── strategies/    # BaseStrategy, LLMPrediction, DipArb, ProjectFW, BtcUpDown, MicroMomentum,
+│   │                  # MeanReversion, CopyTrading, DipDetector
+│   │   ├── __tests__/ # DipArb, FW Optimizer, FW Strategy, BtcUpDown, MeanReversion, CopyTrading tests
 │   │   └── projectfw/ # FrankWolfeOptimizer, ArbitrageScanner, crossmarket/
 │   ├── trading/       # TradingService, RiskManager, PLM, ActivityLogger, GtcOrderManager,
-│   │   │              # KellySizer, GasOracle, OrderBookDepth, TradeLogger,
-│   │   │              # CalibrationTracker, MicrostructureAnalyzer
-│   │   └── __tests__/ # RiskManager, PLM, KellySizer tests
+│   │   │              # KellySizer, GasOracle, OrderBookDepth, TradeLogger, EdgeTracker,
+│   │   │              # CalibrationTracker, MicrostructureAnalyzer, ReadinessChecker,
+│   │   │              # RejectionTracker, MarketScanner
+│   │   └── __tests__/ # RiskManager, PLM, KellySizer, EdgeTracker tests
 │   └── wallet/        # WalletService (Ethers.js wrapper)
-├── stores/            # settingsStore (v7), walletStore, notificationStore, balanceHistoryStore
+├── stores/            # settingsStore (v24), walletStore, notificationStore, balanceHistoryStore
 ├── types/             # api.ts, wallet.ts, index.ts
 ├── utils/             # secureStorage, cn (tailwind-merge)
-└── views/             # TradingTerminal, DashboardView, PortfolioView, ActivityView, SettingsView
+└── views/             # TradingTerminal, DashboardView, PortfolioView, ActivityView, SettingsView, NotFoundView
 ```
 
 ## Critical Gotchas
@@ -100,18 +106,26 @@ src/
 - **`signatureType`**: On-chain `Signatures.sol` dispatches to 3 different verification functions: `verifyEOASignature()` (type 0), `verifyPolyProxySignature()` (type 1), `verifyPolySafeSignature()` (type 2). Wrong type = instant "invalid signature". Standard Polymarket proxy = type 1. Type 2 is only for actual Gnosis Safe wallets.
 - **`side` field has TWO formats**: EIP-712 signed data uses uint8 `0`/`1`. The API request body uses `"BUY"`/`"SELL"` strings. Server maps them back internally. Sending `"0"`/`"1"` in the body causes "invalid signature".
 - **Tick size is per-token**: Markets have tick sizes of 0.1, 0.01, 0.001, or 0.0001. Must query `/tick-size?token_id=X`. `ROUNDING_CONFIG` maps tick to decimal places. "invalid signature" can also mean tick-size precision violation.
+- **`feeRateBps` is per-token**: Must query `/fee-rate?token_id=X`. 15-min crypto markets = 1000 bps (10%), standard markets = 0-100 bps. Wrong fee = "invalid fee rate" 400 error.
+- **`negRisk` is per-token**: Must query `/neg-risk?token_id=X`. Wrong value = wrong EIP-712 domain = "invalid signature".
 - **`VITE_SIGNATURE_TYPE` env var**: Override auto-detection with explicit 0/1/2.
+
+### Mean Reversion / CoinbaseClient
+- CoinbaseClient uses HMAC-SHA256 via Web Crypto API. Proxy `/api/coinbase` → `api.coinbase.com`.
+- `computeSignal()` takes separate `prices` array and `currentPrice` — currentPrice is NOT included in stats.
+- Test buffer gotcha: outlier in buffer shifts mean/stdDev. Use extreme outliers (e.g., 60 vs 100-baseline) to exceed Z=-2.0 threshold.
+- In-memory position tracking (not PLM). Product IDs: BTC-USD, ETH-USD, SOL-USD (native USD, not USDT).
 
 ### Environment
 - Project lives on external drive: `/Volumes/SAMSUNG 1TB/alphapolybot` — paths have spaces, always quote.
 - `useWalletStore.getState()` is synchronous Zustand read, safe in non-React service code.
-- **Vite dev proxies** (in `vite.config.ts`): `/api/clob` → Polymarket CLOB, `/api/gamma` → Gamma API, `/api/polygon-rpc` + `/api/polygon-rpc2` → Polygon RPC nodes. API calls use these proxy paths in dev to avoid CORS.
+- **Vite dev proxies** (in `vite.config.ts`): `/api/clob` → Polymarket CLOB, `/api/gamma` → Gamma API, `/api/polygon-rpc` + `/api/polygon-rpc2` → Polygon RPC nodes, `/api/coinbase` → Coinbase API. API calls use these proxy paths in dev to avoid CORS.
 
 ## Testing
 
 - **Framework**: Vitest + jsdom + @testing-library/react
 - **Config**: `vitest.config.ts` (globals enabled, jsdom environment)
-- **247 tests** across 10 files: RiskManager (31), PLM (25), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (15)
+- **415 tests** across 17 files: RiskManager (36), PLM (30), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (21), BtcUpDown (34), MeanReversion (53), EdgeTracker (24), CopyTrading (21), MCP tools (12), MCP rounding (11), MCP auth (8)
 - Test files live in `__tests__/` directories next to the code they test
 
 ## Environment Setup
@@ -126,7 +140,7 @@ src/
 - **UI**: All components use Matrix theme (green/cyan on dark). Custom components prefixed `Matrix*`.
 - **Tailwind**: Extended theme in `tailwind.config.js` with matrix colors, animations, shadows
 - **ESLint**: `.eslintrc.cjs` at project root. `npm run lint` works.
-- **TypeScript**: Strict mode via tsconfig, but build uses Vite's esbuild (not tsc)
+- **TypeScript**: Strict mode via tsconfig, but build uses Vite's esbuild transform (not tsc)
 
 ## Risk Management
 
@@ -150,6 +164,10 @@ Database `alphapolybot` at version 4 with 6 object stores:
 - `calibrationData` — LLM confidence calibration (Brier score)
 
 Storage failures are non-critical and never block bot execution.
+
+## MCP Server
+
+`mcp-server/` contains a standalone Model Context Protocol server for AI-assisted trading operations. Separate `package.json`, own test suite (31 tests across 3 files: tools, rounding, auth). Built with TypeScript, tested with Vitest.
 
 ## Deployment
 

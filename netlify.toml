@@ -29,5 +29,12 @@
   status = 200
   force = true
 
+# API proxy: Coinbase Advanced Trade (crypto spot trading)
+[[redirects]]
+  from = "/api/coinbase/*"
+  to = "https://api.coinbase.com/:splat"
+  status = 200
+  force = true
+
 [build.environment]
   NODE_VERSION = "20"

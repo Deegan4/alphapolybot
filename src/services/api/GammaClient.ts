@@ -96,11 +96,7 @@ export class GammaClient extends BaseApiClient {
       // Handle both array response and object response
       const markets = Array.isArray(response) ? response : (response.markets || [])
 
-      // Normalize: Gamma API returns outcomePrices as strings, parse to numbers
-      return markets.map(m => ({
-        ...m,
-        outcomePrices: (m.outcomePrices ?? []).map(p => typeof p === 'string' ? parseFloat(p) : p),
-      }))
+      return markets.map(normalizeMarket)
     } catch (error) {
       console.error('Failed to fetch markets:', error)
       throw error
@@ -113,7 +109,7 @@ export class GammaClient extends BaseApiClient {
   async getMarket(marketId: string): Promise<Market | null> {
     try {
       const response = await this.get<Market>(`/markets/${marketId}`)
-      return response
+      return normalizeMarket(response)
     } catch (error) {
       console.error(`Failed to fetch market ${marketId}:`, error)
       return null

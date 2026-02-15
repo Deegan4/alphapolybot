@@ -23,7 +23,7 @@ export interface TradeRecord {
   outcomes: string[]
 
   // Decision context
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro'
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'mr'
   side: 'BUY' | 'SELL'
   outcome: string
   modelProbability?: number     // LLM confidence (0-1)
@@ -53,7 +53,7 @@ export interface TradeRecord {
   // Exit (filled in later when position closes)
   exitTimestamp?: number
   exitPrice?: number
-  exitReason?: 'stop-loss' | 'take-profit' | 'trailing-stop' | 'time-exit' | 'manual' | 'emergency' | 'merge'
+  exitReason?: 'stop-loss' | 'take-profit' | 'trailing-stop' | 'time-exit' | 'manual' | 'emergency' | 'merge' | 'redemption'
   pnlUSD?: number
   pnlPercent?: number
   holdTimeMs?: number
@@ -189,7 +189,7 @@ export class TradeLogger {
 
     // By strategy breakdown
     const byStrategy: BacktestSummary['byStrategy'] = {}
-    for (const strat of ['llm', 'dip', 'fw'] as const) {
+    for (const strat of ['llm', 'dip', 'fw', 'btc', 'micro', 'mr'] as const) {
       const stratRecords = closed.filter(r => r.strategy === strat)
       const stratWins = stratRecords.filter(r => (r.pnlUSD ?? 0) > 0)
       const stratPnl = stratRecords.reduce((s, r) => s + (r.pnlUSD ?? 0), 0)

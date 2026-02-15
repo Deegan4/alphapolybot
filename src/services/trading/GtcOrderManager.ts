@@ -184,7 +184,10 @@ export class GtcOrderManager {
 
     // Hand off to PLM for stop-loss / take-profit tracking
     try {
-      const { positionLifecycleManager } = await import('./PositionLifecycleManager')
+      const [{ positionLifecycleManager }, feeRate] = await Promise.all([
+        import('./PositionLifecycleManager'),
+        import('@/services/api').then(api => api.clobClient.getFeeRateBps(order.tokenId)).catch(() => undefined),
+      ])
       positionLifecycleManager.trackPosition({
         tokenId: order.tokenId,
         marketId: order.marketId,
@@ -199,6 +202,7 @@ export class GtcOrderManager {
         takeProfitPercent: order.takeProfitPercent,
         strategy: order.strategy,
         negRisk: order.negRisk,
+        takerFeeBps: feeRate,
       })
     } catch (err) {
       console.warn('[GtcOrderManager] Failed to hand off to PLM:', err)
@@ -225,7 +229,7 @@ export class GtcOrderManager {
    * Cancel all pending orders for a specific strategy
    * Called when a strategy is stopped
    */
-  async cancelAllForStrategy(strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro'): Promise<number> {
+  async cancelAllForStrategy(strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'): Promise<number> {
     let cancelled = 0
 
     for (const [orderId, order] of this.orders) {

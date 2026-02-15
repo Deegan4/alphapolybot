@@ -20,8 +20,8 @@ import { rejectionTracker } from '@/services/trading/RejectionTracker'
  * trading on price dips"
  */
 const DEFAULT_CONFIG: DipArbConfig = {
-  shares: 1, // $1 per trade (penny mode baseline)
-  sumTarget: 1.00, // YES + NO ≤ $1.00 — let fee math decide profitability downstream (was 0.98 — too strict, ask sums are typically 1.005–1.02)
+  shares: 5, // Polymarket minimum order size is 5 shares
+  sumTarget: 0.96, // YES + NO ≤ $0.96 — need ~4% gross margin to clear two legs of taker fees (~2% total)
   dipThreshold: 0.05, // 5% dip from recent high (was 30% — too extreme, never triggers)
   slidingWindowMs: 30000, // 30 second window (was 10s — too narrow)
   targetResolutionMinutes: 15, // 15-minute markets
@@ -513,7 +513,9 @@ export class DipArbStrategy extends BaseStrategy {
       const pennyMode = useSettingsStore.getState().pennyTraderMode
       let tradeAmount: number
       if (pennyMode) {
-        tradeAmount = 1
+        // Polymarket CLOB requires minimum 5 shares per order
+        const maxLegPrice = Math.max(event.currentPrice, complementPrice)
+        tradeAmount = Math.max(1, 5 * maxLegPrice)
       } else {
         const bankroll = useWalletStore.getState().usdcBridgedBalance ?? useWalletStore.getState().usdcBalance
         const kellyFraction = useSettingsStore.getState().kellyFraction
@@ -598,9 +600,13 @@ export class DipArbStrategy extends BaseStrategy {
               activityLogger.logSell('Leg 1 sold back (slippage abort)', { orderId: sellResult.orderId })
             } else {
               activityLogger.logError(`Slippage fallback sell failed: ${sellResult.error}`)
-              import('@/services/trading/PositionLifecycleManager').then(m => {
+              const slipTokenId = event.market.clobTokenIds[dippedIndex]
+              Promise.all([
+                import('@/services/trading/PositionLifecycleManager'),
+                import('@/services/api').then(api => api.clobClient.getFeeRateBps(slipTokenId)).catch(() => undefined),
+              ]).then(([m, feeRate]) => {
                 m.positionLifecycleManager.trackPosition({
-                  tokenId: event.market.clobTokenIds[dippedIndex],
+                  tokenId: slipTokenId,
                   marketId: event.market.id,
                   conditionId: event.market.conditionId,
                   outcome: event.outcome,
@@ -613,6 +619,7 @@ export class DipArbStrategy extends BaseStrategy {
                   takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
                   strategy: 'dip',
                   negRisk: event.market.negRisk,
+                  takerFeeBps: feeRate,
                 })
               }).catch(err => console.warn('[DipArb] Failed to track slippage fallback position:', err))
             }
@@ -656,9 +663,13 @@ export class DipArbStrategy extends BaseStrategy {
         } else {
           // Failed to sell back — track position for PLM safety net
           activityLogger.logError(`Fallback sell failed: ${sellResult.error}`)
-          import('@/services/trading/PositionLifecycleManager').then(m => {
+          const fbTokenId = event.market.clobTokenIds[dippedIndex]
+          Promise.all([
+            import('@/services/trading/PositionLifecycleManager'),
+            import('@/services/api').then(api => api.clobClient.getFeeRateBps(fbTokenId)).catch(() => undefined),
+          ]).then(([m, feeRate]) => {
             m.positionLifecycleManager.trackPosition({
-              tokenId: event.market.clobTokenIds[dippedIndex],
+              tokenId: fbTokenId,
               marketId: event.market.id,
               conditionId: event.market.conditionId,
               outcome: event.outcome,
@@ -671,6 +682,7 @@ export class DipArbStrategy extends BaseStrategy {
               takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
               strategy: 'dip',
               negRisk: event.market.negRisk,
+              takerFeeBps: feeRate,
             })
           }).catch(err => console.warn('[DipArb] Failed to track fallback position:', err))
         }
@@ -779,9 +791,14 @@ export class DipArbStrategy extends BaseStrategy {
           this.log(`Merge failed after ${MAX_MERGE_RETRIES} retries: ${lastMergeError}`)
 
           // Track both positions with PLM as safety net
-          import('@/services/trading/PositionLifecycleManager').then(m => {
+          const mergeToken1 = event.market.clobTokenIds[dippedIndex]
+          const mergeToken2 = event.market.clobTokenIds[complementIndex]
+          Promise.all([
+            import('@/services/trading/PositionLifecycleManager'),
+            import('@/services/api').then(api => api.clobClient.getFeeRateBps(mergeToken1)).catch(() => undefined),
+          ]).then(([m, feeRate]) => {
             m.positionLifecycleManager.trackPosition({
-              tokenId: event.market.clobTokenIds[dippedIndex],
+              tokenId: mergeToken1,
               marketId: event.market.id,
               conditionId: event.market.conditionId,
               outcome: event.outcome,
@@ -794,9 +811,10 @@ export class DipArbStrategy extends BaseStrategy {
               takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
               strategy: 'dip',
               negRisk: event.market.negRisk,
+              takerFeeBps: feeRate,
             })
             m.positionLifecycleManager.trackPosition({
-              tokenId: event.market.clobTokenIds[complementIndex],
+              tokenId: mergeToken2,
               marketId: event.market.id,
               conditionId: event.market.conditionId,
               outcome: complementOutcome,
@@ -809,6 +827,7 @@ export class DipArbStrategy extends BaseStrategy {
               takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
               strategy: 'dip',
               negRisk: event.market.negRisk,
+              takerFeeBps: feeRate, // same market, same fee
             })
           }).catch(err => console.warn('[DipArb] Failed to track unmerged positions:', err))
         }

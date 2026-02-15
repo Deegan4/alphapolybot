@@ -9,11 +9,17 @@ interface WalletStore extends WalletState {
   disconnect: () => void
   setProxyAddress: (proxy: string | null) => void
   syncBalances: () => Promise<void>
+  startPolling: () => void
+  stopPolling: () => void
   checkApprovals: () => Promise<void>
   approveUSDC: () => Promise<boolean>
   approveCTF: () => Promise<boolean>
   ensureApprovals: () => Promise<boolean>
 }
+
+// Module-level polling state (not persisted, not in store)
+const BALANCE_POLL_MS = 15_000
+let pollIntervalId: ReturnType<typeof setInterval> | null = null
 
 export const useWalletStore = create<WalletStore>()(
   persist(
@@ -80,6 +86,20 @@ export const useWalletStore = create<WalletStore>()(
           usdcNativeBalance: state.usdcNativeBalance,
           lastSync: state.lastSync,
         })
+      },
+
+      startPolling: () => {
+        if (pollIntervalId !== null) return          // idempotent
+        const sync = () => useWalletStore.getState().syncBalances()
+        sync()                                        // fire immediately
+        pollIntervalId = setInterval(sync, BALANCE_POLL_MS)
+      },
+
+      stopPolling: () => {
+        if (pollIntervalId !== null) {
+          clearInterval(pollIntervalId)
+          pollIntervalId = null
+        }
       },
 
       checkApprovals: async () => {

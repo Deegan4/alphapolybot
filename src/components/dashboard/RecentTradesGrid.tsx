@@ -41,44 +41,45 @@ export const RecentTradesGrid: React.FC = () => {
   }
 
   return (
-    <div className="bg-agent-card border border-agent-border rounded-sm p-3 flex flex-col min-h-0">
+    <div className="bg-agent-card border border-agent-border rounded-lg p-4 flex flex-col min-h-0">
       <div className="flex items-center gap-2 mb-2">
         <span className="text-sm">&#128200;</span>
-        <span className="text-[10px] uppercase tracking-wider text-agent-text-muted font-mono">
+        <span className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium">
           Recent Trades
         </span>
       </div>
 
       {trades.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-agent-text-label text-xs font-mono">
-          No closed trades yet
+        <div className="flex-1 flex flex-col items-center justify-center text-center px-4 gap-2">
+          <span className="text-2xl opacity-30">&#128200;</span>
+          <span className="text-sm font-sans text-agent-text-label">No closed trades yet</span>
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-1.5 flex-1 min-h-0">
+        <div className="grid grid-cols-2 gap-2 flex-1 min-h-0">
           {trades.map((t) => {
             const isWin = (t.pnlUSD ?? 0) >= 0
             return (
               <div
                 key={t.id}
-                className={`flex flex-col justify-between rounded px-2.5 py-2 border ${
+                className={`flex flex-col justify-between rounded-md px-3 py-2.5 border transition-colors ${
                   isWin
-                    ? 'bg-agent-green/5 border-agent-green/20'
-                    : 'bg-agent-red/5 border-agent-red/20'
+                    ? 'bg-agent-green/5 border-agent-green/20 hover:bg-agent-green/10'
+                    : 'bg-agent-red/5 border-agent-red/20 hover:bg-agent-red/10'
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-mono font-semibold text-agent-text">
+                  <span className="text-xs font-sans font-semibold text-agent-text">
                     {stratLabel(t)}
                   </span>
                   <span
-                    className={`text-[10px] font-mono font-bold ${
+                    className={`text-xs font-mono font-bold tabular-nums ${
                       isWin ? 'text-agent-green' : 'text-agent-red'
                     }`}
                   >
                     {isWin ? '+' : ''}${(t.pnlUSD ?? 0).toFixed(2)}
                   </span>
                 </div>
-                <span className="text-[9px] font-mono text-agent-text-muted mt-0.5">
+                <span className="text-xs font-sans text-agent-text-muted mt-0.5">
                   {timeAgo(t.exitTimestamp!)}
                 </span>
               </div>

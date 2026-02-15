@@ -54,7 +54,7 @@ const navItems: NavItem[] = [
  * SidebarContent — the inner content, reused in both desktop and mobile drawer
  */
 const SidebarContent: React.FC<{ onNavigate?: () => void }> = ({ onNavigate }) => {
-  const { isConnected, address, proxyAddress, usdcBalance, balance } = useWalletStore()
+  const { isConnected, address, proxyAddress, usdcBalance, usdcBridgedBalance, usdcNativeBalance, balance } = useWalletStore()
 
   const formatAddress = (addr: string) => {
     return `${addr.slice(0, 6)}...${addr.slice(-4)}`
@@ -103,6 +103,11 @@ const SidebarContent: React.FC<{ onNavigate?: () => void }> = ({ onNavigate }) =
                 ${usdcBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
               </span>
             </div>
+            {(usdcNativeBalance ?? 0) > 0 && (usdcBridgedBalance ?? 0) < 1 && (
+              <div className="text-yellow-400/80 text-[10px] font-sans leading-tight">
+                ⚠ ${(usdcNativeBalance ?? 0).toFixed(2)} stuck in native USDC — swap to USDC.e to trade
+              </div>
+            )}
             <div className="text-matrix-text-muted text-[10px] font-mono">
               MATIC: {balance.toFixed(4)}
             </div>

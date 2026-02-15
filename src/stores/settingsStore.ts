@@ -44,13 +44,24 @@ export interface AppSettingsState {
   btcEnableBtc: boolean
   btcEnableEth: boolean
   btcEnableSol: boolean
+  btcEnableXrp: boolean
+  btcEnable5m: boolean          // Trade 5-minute windows
+  btcEnable15m: boolean         // Trade 15-minute windows
+  btcEnableHourly: boolean      // Trade hourly windows
+  btcEnableDaily: boolean       // Trade daily windows
+  btcEnable9pm: boolean         // Trade 9PM ET daily events
   btcTradeSize: number
   btcUseKellySizing: boolean
   btcMinConfidence: number
   btcMaxEntryPrice: number
+  btcMinEntryPrice: number
   btcMinWindowRemaining: number
   btcStopLossPercent: number
   btcTakeProfitPercent: number
+  btcMinTimeIntoWindowMs: number  // Min ms into window before trading
+  btcRegimeFilterEnabled: boolean // Skip choppy markets
+  btcRsiFilterEnabled: boolean    // RSI overbought/oversold filter
+  btcUseLLMConfirmation: boolean  // LLM confirmation gate on hourly+ windows
 
   // Aggressive Mode (meta-toggle — relaxes conservative defaults)
   aggressiveMode: boolean
@@ -65,6 +76,41 @@ export interface AppSettingsState {
   microTradeSize: number
   microStopLossPercent: number
   microTakeProfitPercent: number
+
+  // Follow & Copy Trader
+  followedAddress: string
+  copyTradeSize: number           // USD per copied trade
+  copyMaxConcurrent: number       // Max simultaneous copied positions
+  copyPollIntervalMs: number      // Polling frequency (ms)
+  copyStopLossPercent: number     // SL for copied positions (0-1)
+  copyTakeProfitPercent: number   // TP for copied positions (0-1)
+  copyBuysOnly: boolean           // Only copy BUY trades
+
+  // LLM Premium Model Tiering
+  llmPremiumModel: string             // e.g. 'openai/gpt-4o' (empty = disabled)
+  llmPremiumThreshold: number         // min qualityScore to use premium (default: 25)
+  llmPremiumBudgetUSD: number         // daily budget for premium calls (default: $0.50)
+
+  // Crypto LLM Mode
+  cryptoLLMEnabled: boolean           // enable crypto-specific LLM scan loop
+  cryptoModel: string                 // model for crypto analysis (empty = use default)
+  cryptoScanIntervalMs: number        // scan interval for crypto markets (default: 30s)
+  cryptoMinConfidence: number         // min confidence for crypto trades (default: 0.55)
+
+  // Coinbase Spot — Mean Reversion Strategy
+  coinbaseApiKey: string
+  coinbaseSecret: string
+  mrEnableBtc: boolean
+  mrEnableEth: boolean
+  mrEnableSol: boolean
+  mrLookbackPeriod: number
+  mrEntryZScore: number
+  mrExitZScore: number
+  mrTradeSize: number
+  mrScanIntervalMs: number
+  mrStopLossPercent: number
+  mrTakeProfitPercent: number
+  mrMaxHoldMs: number
 }
 
 interface SettingsStore extends AppSettingsState {
@@ -94,13 +140,22 @@ interface SettingsStore extends AppSettingsState {
   setBtcEnableBtc: (enabled: boolean) => void
   setBtcEnableEth: (enabled: boolean) => void
   setBtcEnableSol: (enabled: boolean) => void
+  setBtcEnable5m: (enabled: boolean) => void
+  setBtcEnable15m: (enabled: boolean) => void
+  setBtcEnableHourly: (enabled: boolean) => void
+  setBtcEnableDaily: (enabled: boolean) => void
   setBtcTradeSize: (size: number) => void
   setBtcUseKellySizing: (enabled: boolean) => void
   setBtcMinConfidence: (confidence: number) => void
   setBtcMaxEntryPrice: (price: number) => void
+  setBtcMinEntryPrice: (price: number) => void
   setBtcMinWindowRemaining: (seconds: number) => void
   setBtcStopLossPercent: (percent: number) => void
   setBtcTakeProfitPercent: (percent: number) => void
+  setBtcMinTimeIntoWindowMs: (ms: number) => void
+  setBtcRegimeFilterEnabled: (enabled: boolean) => void
+  setBtcRsiFilterEnabled: (enabled: boolean) => void
+  setBtcUseLLMConfirmation: (enabled: boolean) => void
   setLlmWebSearchEnabled: (enabled: boolean) => void
   setMicroMinCompositeSignal: (value: number) => void
   setMicroMinSignalConfidence: (value: number) => void
@@ -109,6 +164,33 @@ interface SettingsStore extends AppSettingsState {
   setMicroStopLossPercent: (percent: number) => void
   setMicroTakeProfitPercent: (percent: number) => void
   setAggressiveMode: (enabled: boolean) => void
+  setCoinbaseApiKey: (key: string) => void
+  setCoinbaseSecret: (secret: string) => void
+  setMrEnableBtc: (enabled: boolean) => void
+  setMrEnableEth: (enabled: boolean) => void
+  setMrEnableSol: (enabled: boolean) => void
+  setMrLookbackPeriod: (period: number) => void
+  setMrEntryZScore: (z: number) => void
+  setMrExitZScore: (z: number) => void
+  setMrTradeSize: (size: number) => void
+  setMrScanIntervalMs: (ms: number) => void
+  setMrStopLossPercent: (percent: number) => void
+  setMrTakeProfitPercent: (percent: number) => void
+  setMrMaxHoldMs: (ms: number) => void
+  setFollowedAddress: (address: string) => void
+  setCopyTradeSize: (size: number) => void
+  setCopyMaxConcurrent: (max: number) => void
+  setCopyPollIntervalMs: (ms: number) => void
+  setCopyStopLossPercent: (percent: number) => void
+  setCopyTakeProfitPercent: (percent: number) => void
+  setCopyBuysOnly: (enabled: boolean) => void
+  setLlmPremiumModel: (model: string) => void
+  setLlmPremiumThreshold: (threshold: number) => void
+  setLlmPremiumBudgetUSD: (budget: number) => void
+  setCryptoLLMEnabled: (enabled: boolean) => void
+  setCryptoModel: (model: string) => void
+  setCryptoScanIntervalMs: (ms: number) => void
+  setCryptoMinConfidence: (confidence: number) => void
   resetSettings: () => void
 }
 
@@ -135,16 +217,27 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   fwMinProfitBps: 50,
   fwEnableCrossMarket: false,
   fwCrossMarketBudgetUSD: 0.50,
-  btcEnableBtc: false, // Disabled by default — 5-factor formula rarely fires
+  btcEnableBtc: false, // Disabled by default — enable when ready to trade
   btcEnableEth: false,
   btcEnableSol: false,
+  btcEnableXrp: false,
+  btcEnable5m: false,  // 5-min windows disabled — lower edge, higher fees, less liquidity
+  btcEnable15m: true,  // 15-min windows enabled by default
+  btcEnableHourly: false,  // Hourly windows (opt-in)
+  btcEnableDaily: false,   // Daily windows (opt-in)
+  btcEnable9pm: false,  // 9PM ET daily events (disabled by default — opt-in)
   btcTradeSize: 2.0,
   btcUseKellySizing: true,
-  btcMinConfidence: 0.40,
-  btcMaxEntryPrice: 0.75,
-  btcMinWindowRemaining: 120, // 2 min before resolution (was 300)
-  btcStopLossPercent: 0.25,
-  btcTakeProfitPercent: 0.20,
+  btcMinConfidence: 0.55,    // Higher confidence for selective entries on small bankroll
+  btcMaxEntryPrice: 0.45,    // Tight range — with $16 bankroll, selectivity > volume
+  btcMinEntryPrice: 0.10,    // Low floor — only reject extreme long-shots
+  btcMinWindowRemaining: 120, // 2 min before resolution
+  btcStopLossPercent: 0.95,  // Effectively disabled — hold to resolution
+  btcTakeProfitPercent: 0.95, // Effectively disabled — hold to resolution
+  btcMinTimeIntoWindowMs: 45_000, // 45s into 15m window (auto-scaled for 5m)
+  btcRegimeFilterEnabled: true,   // Skip choppy/mean-reverting markets
+  btcRsiFilterEnabled: true,      // Reduce confidence on overbought/oversold
+  btcUseLLMConfirmation: false,   // LLM confirmation gate (opt-in)
   aggressiveMode: false,
   llmWebSearchEnabled: false,
   microMinCompositeSignal: 0.4,
@@ -153,6 +246,33 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   microTradeSize: 2.0,
   microStopLossPercent: 0.15,
   microTakeProfitPercent: 0.20,
+  followedAddress: '',
+  copyTradeSize: 5,
+  copyMaxConcurrent: 5,
+  copyPollIntervalMs: 15_000,
+  copyStopLossPercent: 0.30,
+  copyTakeProfitPercent: 0.50,
+  copyBuysOnly: true,
+  llmPremiumModel: '',
+  llmPremiumThreshold: 25,
+  llmPremiumBudgetUSD: 0.50,
+  cryptoLLMEnabled: false,
+  cryptoModel: '',
+  cryptoScanIntervalMs: 30_000,
+  cryptoMinConfidence: 0.55,
+  coinbaseApiKey: '',
+  coinbaseSecret: '',
+  mrEnableBtc: false,
+  mrEnableEth: false,
+  mrEnableSol: false,
+  mrLookbackPeriod: 20,
+  mrEntryZScore: 2.0,
+  mrExitZScore: 0.5,
+  mrTradeSize: 10.0,
+  mrScanIntervalMs: 10_000,
+  mrStopLossPercent: 0.03,
+  mrTakeProfitPercent: 0.02,
+  mrMaxHoldMs: 3_600_000,
 }
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -273,6 +393,30 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ btcEnableSol: enabled })
         import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ enableSol: enabled }))
       },
+      setBtcEnableXrp: (enabled: boolean) => {
+        set({ btcEnableXrp: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ enableXrp: enabled }))
+      },
+      setBtcEnable5m: (enabled: boolean) => {
+        set({ btcEnable5m: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ enable5m: enabled }))
+      },
+      setBtcEnable15m: (enabled: boolean) => {
+        set({ btcEnable15m: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ enable15m: enabled }))
+      },
+      setBtcEnableHourly: (enabled: boolean) => {
+        set({ btcEnableHourly: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ enableHourly: enabled }))
+      },
+      setBtcEnableDaily: (enabled: boolean) => {
+        set({ btcEnableDaily: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ enableDaily: enabled }))
+      },
+      setBtcEnable9pm: (enabled: boolean) => {
+        set({ btcEnable9pm: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ enable9pm: enabled }))
+      },
       setBtcTradeSize: (size: number) => {
         set({ btcTradeSize: size })
         import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ tradeSize: size }))
@@ -289,6 +433,10 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ btcMaxEntryPrice: price })
         import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ maxEntryPrice: price }))
       },
+      setBtcMinEntryPrice: (price: number) => {
+        set({ btcMinEntryPrice: price })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ minEntryPrice: price }))
+      },
       setBtcMinWindowRemaining: (seconds: number) => {
         set({ btcMinWindowRemaining: seconds })
         import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ minWindowRemaining: seconds }))
@@ -300,6 +448,22 @@ export const useSettingsStore = create<SettingsStore>()(
       setBtcTakeProfitPercent: (percent: number) => {
         set({ btcTakeProfitPercent: percent })
         import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ takeProfitPercent: percent }))
+      },
+      setBtcMinTimeIntoWindowMs: (ms: number) => {
+        set({ btcMinTimeIntoWindowMs: ms })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ minTimeIntoWindowMs: ms }))
+      },
+      setBtcRegimeFilterEnabled: (enabled: boolean) => {
+        set({ btcRegimeFilterEnabled: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ regimeFilterEnabled: enabled }))
+      },
+      setBtcRsiFilterEnabled: (enabled: boolean) => {
+        set({ btcRsiFilterEnabled: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ rsiFilterEnabled: enabled }))
+      },
+      setBtcUseLLMConfirmation: (enabled: boolean) => {
+        set({ btcUseLLMConfirmation: enabled })
+        import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ useLLMConfirmation: enabled }))
       },
 
       setLlmWebSearchEnabled: (enabled: boolean) => {
@@ -332,6 +496,99 @@ export const useSettingsStore = create<SettingsStore>()(
         import('@/services/strategies/MicrostructureMomentumStrategy').then(m => m.microMomentumStrategy.setMicroConfig({ takeProfitPercent: percent }))
       },
 
+      setCoinbaseApiKey: (key: string) => {
+        set({ coinbaseApiKey: key })
+        import('@/services/api/CoinbaseClient').then(m => m.coinbaseClient.setCredentials(key, useSettingsStore.getState().coinbaseSecret))
+      },
+      setCoinbaseSecret: (secret: string) => {
+        set({ coinbaseSecret: secret })
+        import('@/services/api/CoinbaseClient').then(m => m.coinbaseClient.setCredentials(useSettingsStore.getState().coinbaseApiKey, secret))
+      },
+      setMrEnableBtc: (enabled: boolean) => {
+        set({ mrEnableBtc: enabled })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ enableBtc: enabled }))
+      },
+      setMrEnableEth: (enabled: boolean) => {
+        set({ mrEnableEth: enabled })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ enableEth: enabled }))
+      },
+      setMrEnableSol: (enabled: boolean) => {
+        set({ mrEnableSol: enabled })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ enableSol: enabled }))
+      },
+      setMrLookbackPeriod: (period: number) => {
+        set({ mrLookbackPeriod: period })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ lookbackPeriod: period }))
+      },
+      setMrEntryZScore: (z: number) => {
+        set({ mrEntryZScore: z })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ entryZScore: z }))
+      },
+      setMrExitZScore: (z: number) => {
+        set({ mrExitZScore: z })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ exitZScore: z }))
+      },
+      setMrTradeSize: (size: number) => {
+        set({ mrTradeSize: size })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ tradeSize: size }))
+      },
+      setMrScanIntervalMs: (ms: number) => {
+        set({ mrScanIntervalMs: ms })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ scanIntervalMs: ms }))
+      },
+      setMrStopLossPercent: (percent: number) => {
+        set({ mrStopLossPercent: percent })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ stopLossPercent: percent }))
+      },
+      setMrTakeProfitPercent: (percent: number) => {
+        set({ mrTakeProfitPercent: percent })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ takeProfitPercent: percent }))
+      },
+      setMrMaxHoldMs: (ms: number) => {
+        set({ mrMaxHoldMs: ms })
+        import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ maxHoldMs: ms }))
+      },
+
+      setFollowedAddress: (address: string) => {
+        set({ followedAddress: address.toLowerCase().trim() })
+      },
+
+      setCopyTradeSize: (size: number) => set({ copyTradeSize: size }),
+      setCopyMaxConcurrent: (max: number) => set({ copyMaxConcurrent: max }),
+      setCopyPollIntervalMs: (ms: number) => set({ copyPollIntervalMs: ms }),
+      setCopyStopLossPercent: (percent: number) => set({ copyStopLossPercent: percent }),
+      setCopyTakeProfitPercent: (percent: number) => set({ copyTakeProfitPercent: percent }),
+      setCopyBuysOnly: (enabled: boolean) => set({ copyBuysOnly: enabled }),
+
+      setLlmPremiumModel: (model: string) => {
+        set({ llmPremiumModel: model })
+        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ premiumModel: model || undefined }))
+      },
+      setLlmPremiumThreshold: (threshold: number) => {
+        set({ llmPremiumThreshold: threshold })
+        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ premiumModelThreshold: threshold }))
+      },
+      setLlmPremiumBudgetUSD: (budget: number) => {
+        set({ llmPremiumBudgetUSD: budget })
+        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ premiumBudgetUSD: budget }))
+      },
+      setCryptoLLMEnabled: (enabled: boolean) => {
+        set({ cryptoLLMEnabled: enabled })
+        import('@/services/strategies/LLMPredictionStrategy').then(m => m.llmPredictionStrategy.setLLMConfig?.({ cryptoLLMEnabled: enabled })).catch(() => {})
+      },
+      setCryptoModel: (model: string) => {
+        set({ cryptoModel: model })
+        import('@/services/strategies/LLMPredictionStrategy').then(m => m.llmPredictionStrategy.setLLMConfig?.({ cryptoModel: model || undefined })).catch(() => {})
+      },
+      setCryptoScanIntervalMs: (ms: number) => {
+        set({ cryptoScanIntervalMs: ms })
+        import('@/services/strategies/LLMPredictionStrategy').then(m => m.llmPredictionStrategy.setLLMConfig?.({ cryptoScanIntervalMs: ms })).catch(() => {})
+      },
+      setCryptoMinConfidence: (confidence: number) => {
+        set({ cryptoMinConfidence: confidence })
+        import('@/services/strategies/LLMPredictionStrategy').then(m => m.llmPredictionStrategy.setLLMConfig?.({ cryptoMinConfidence: confidence })).catch(() => {})
+      },
+
       setAggressiveMode: (enabled: boolean) => {
         console.log(`[Settings] Aggressive mode ${enabled ? 'ENABLED' : 'DISABLED'}`)
         set({ aggressiveMode: enabled })
@@ -349,6 +606,8 @@ export const useSettingsStore = create<SettingsStore>()(
             fwMinProfitBps: 30,
             btcEnableBtc: true,
             btcEnableEth: true,
+            btcEnable5m: false,
+            btcEnable15m: true,
           })
           // Push to singletons via dynamic imports (same pattern as individual setters)
           import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({
@@ -379,6 +638,8 @@ export const useSettingsStore = create<SettingsStore>()(
             fwMinProfitBps: DEFAULT_SETTINGS.fwMinProfitBps,
             btcEnableBtc: DEFAULT_SETTINGS.btcEnableBtc,
             btcEnableEth: DEFAULT_SETTINGS.btcEnableEth,
+            btcEnable5m: DEFAULT_SETTINGS.btcEnable5m,
+            btcEnable15m: DEFAULT_SETTINGS.btcEnable15m,
           })
           import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({
             dailyLossLimit: DEFAULT_SETTINGS.dailyLossLimit,
@@ -401,7 +662,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'alphapolybot-settings',
-      version: 10, // Bump when defaults change — triggers migrate()
+      version: 25, // Bump when defaults change — triggers migrate()
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
         if (version < 1) {
@@ -485,6 +746,129 @@ export const useSettingsStore = create<SettingsStore>()(
           // v9→v10: BTC strategy slug-based discovery — relax timing for 15-min windows
           if (state.btcMinWindowRemaining === 300) state.btcMinWindowRemaining = 120
         }
+        if (version < 11) {
+          // v10→v11: Add 5-minute window support for BTC Up/Down strategy
+          if (state.btcEnable5m === undefined) state.btcEnable5m = true
+          if (state.btcEnable15m === undefined) state.btcEnable15m = true
+        }
+        if (version < 12) {
+          // v11→v12: Lower BTC confidence threshold — 5-factor formula typically outputs 0.20-0.35,
+          // so 0.40/0.55 threshold almost never fires. 0.30 allows moderate directional moves.
+          if (state.btcMinConfidence === 0.55 || state.btcMinConfidence === 0.40) {
+            state.btcMinConfidence = 0.30
+          }
+        }
+        if (version < 13) {
+          // v12→v13: Add Coinbase Spot / Mean Reversion strategy
+          if (state.coinbaseApiKey === undefined) state.coinbaseApiKey = ''
+          if (state.coinbaseSecret === undefined) state.coinbaseSecret = ''
+          if (state.mrEnableBtc === undefined) state.mrEnableBtc = false
+          if (state.mrEnableEth === undefined) state.mrEnableEth = false
+          if (state.mrEnableSol === undefined) state.mrEnableSol = false
+          if (state.mrLookbackPeriod === undefined) state.mrLookbackPeriod = 20
+          if (state.mrEntryZScore === undefined) state.mrEntryZScore = 2.0
+          if (state.mrExitZScore === undefined) state.mrExitZScore = 0.5
+          if (state.mrTradeSize === undefined) state.mrTradeSize = 10.0
+          if (state.mrScanIntervalMs === undefined) state.mrScanIntervalMs = 10_000
+          if (state.mrStopLossPercent === undefined) state.mrStopLossPercent = 0.03
+          if (state.mrTakeProfitPercent === undefined) state.mrTakeProfitPercent = 0.02
+          if (state.mrMaxHoldMs === undefined) state.mrMaxHoldMs = 3_600_000
+        }
+        if (version < 14) {
+          // v13→v14: BTC Up/Down overhaul — fee-aware parameters for 10% crypto fee
+          // New signal filters
+          if (state.btcMinTimeIntoWindowMs === undefined) state.btcMinTimeIntoWindowMs = 45_000
+          if (state.btcRegimeFilterEnabled === undefined) state.btcRegimeFilterEnabled = true
+          if (state.btcRsiFilterEnabled === undefined) state.btcRsiFilterEnabled = true
+          // Retune existing params for resolution-hold strategy (only if still at old defaults)
+          if (state.btcMinConfidence === 0.30) state.btcMinConfidence = 0.38
+          if (state.btcMaxEntryPrice === 0.75) state.btcMaxEntryPrice = 0.45
+          if (state.btcStopLossPercent === 0.25) state.btcStopLossPercent = 0.35
+          if (state.btcTakeProfitPercent === 0.20) state.btcTakeProfitPercent = 0.70
+        }
+        if (version < 15) {
+          // v14→v15: Add Follow Trader address field
+          if (state.followedAddress === undefined) state.followedAddress = ''
+        }
+        if (version < 16) {
+          // v15→v16: BTC strategy was unable to trade — maxEntryPrice 0.45 rejects all
+          // near-balanced markets (outcomes ~50c). Raise to 0.55 and lower minConfidence
+          // so the signal model can actually fire trades.
+          if (state.btcMaxEntryPrice === 0.45) state.btcMaxEntryPrice = 0.55
+          if (state.btcMinConfidence === 0.38) state.btcMinConfidence = 0.30
+        }
+        if (version < 17) {
+          // v16→v17: 10% crypto taker fee makes low-confidence trades negative EV.
+          // Raise minConfidence from 0.30 to 0.55 so only high-conviction signals trade.
+          if (state.btcMinConfidence === 0.30) state.btcMinConfidence = 0.55
+        }
+        if (version < 18) {
+          // v17→v18: Tighten entry price band for 10% crypto fee profitability.
+          // Add minEntryPrice floor — extreme long-shots (<15¢) are deeply
+          // negative EV. A 5¢ entry needs >5.6% true probability just to break even.
+          if (state.btcMinEntryPrice === undefined) state.btcMinEntryPrice = 0.15
+          // Lower maxEntryPrice from 0.55→0.45 — at 55¢ entry, need 61% accuracy
+          // to break even (after 10% fee). At 45¢, only need 50%.
+          if (state.btcMaxEntryPrice === 0.55) state.btcMaxEntryPrice = 0.45
+        }
+        if (version < 19) {
+          // v18→v19: Multi-asset expansion — replicate Square-Guy's approach.
+          // Widen entry range, increase throughput, hold-to-resolution.
+          // New fields with defaults:
+          if (state.btcEnableXrp === undefined) state.btcEnableXrp = false
+          if (state.btcEnable9pm === undefined) state.btcEnable9pm = false
+          // Widen entry prices: Square-Guy enters at 52-73c
+          if (state.btcMaxEntryPrice === 0.45) state.btcMaxEntryPrice = 0.75
+          if (state.btcMinEntryPrice === 0.15) state.btcMinEntryPrice = 0.10
+          // Lower confidence threshold for wider price range
+          if (state.btcMinConfidence === 0.55) state.btcMinConfidence = 0.40
+          // Hold-to-resolution: effectively disable SL/TP
+          if (state.btcStopLossPercent === 0.35) state.btcStopLossPercent = 0.95
+          if (state.btcTakeProfitPercent === 0.70) state.btcTakeProfitPercent = 0.95
+        }
+        if (version < 20) {
+          // v19→v20: Drop 5m markets — lower edge, higher fees, less liquidity.
+          // Force disable for existing users who had it on.
+          state.btcEnable5m = false
+        }
+        if (version < 21) {
+          // v20→v21: Tighten BTC entry for small bankroll ($16).
+          // At 75¢ entry + 10% fee, need ~78% accuracy to profit — unrealistic.
+          // At 45¢ entry + 10% fee, only need ~50% — achievable with signal.
+          // Raise confidence threshold back to 0.55 for selectivity.
+          // Also force-disable 5m again (belt-and-suspenders — v20 may not re-fire).
+          state.btcMaxEntryPrice = 0.45
+          state.btcMinConfidence = 0.55
+          state.btcEnable5m = false
+        }
+        if (version < 22) {
+          // v21→v22: Add hourly and daily window duration toggles
+          if (state.btcEnableHourly === undefined) state.btcEnableHourly = false
+          if (state.btcEnableDaily === undefined) state.btcEnableDaily = false
+        }
+        if (version < 23) {
+          // v22→v23: Add LLM confirmation gate for BTC Up/Down strategy
+          if (state.btcUseLLMConfirmation === undefined) state.btcUseLLMConfirmation = false
+        }
+        if (version < 24) {
+          // v23→v24: Add copy-trading settings
+          if (state.copyTradeSize === undefined) state.copyTradeSize = 5
+          if (state.copyMaxConcurrent === undefined) state.copyMaxConcurrent = 5
+          if (state.copyPollIntervalMs === undefined) state.copyPollIntervalMs = 15_000
+          if (state.copyStopLossPercent === undefined) state.copyStopLossPercent = 0.30
+          if (state.copyTakeProfitPercent === undefined) state.copyTakeProfitPercent = 0.50
+          if (state.copyBuysOnly === undefined) state.copyBuysOnly = true
+        }
+        if (version < 25) {
+          // v24→v25: LLM premium model tiering + crypto LLM mode
+          if (state.llmPremiumModel === undefined) state.llmPremiumModel = ''
+          if (state.llmPremiumThreshold === undefined) state.llmPremiumThreshold = 25
+          if (state.llmPremiumBudgetUSD === undefined) state.llmPremiumBudgetUSD = 0.50
+          if (state.cryptoLLMEnabled === undefined) state.cryptoLLMEnabled = false
+          if (state.cryptoModel === undefined) state.cryptoModel = ''
+          if (state.cryptoScanIntervalMs === undefined) state.cryptoScanIntervalMs = 30_000
+          if (state.cryptoMinConfidence === undefined) state.cryptoMinConfidence = 0.55
+        }
         return state as AppSettingsState
       },
       partialize: (state) => ({
@@ -513,13 +897,24 @@ export const useSettingsStore = create<SettingsStore>()(
         btcEnableBtc: state.btcEnableBtc,
         btcEnableEth: state.btcEnableEth,
         btcEnableSol: state.btcEnableSol,
+        btcEnableXrp: state.btcEnableXrp,
+        btcEnable5m: state.btcEnable5m,
+        btcEnable15m: state.btcEnable15m,
+        btcEnableHourly: state.btcEnableHourly,
+        btcEnableDaily: state.btcEnableDaily,
+        btcEnable9pm: state.btcEnable9pm,
         btcTradeSize: state.btcTradeSize,
         btcUseKellySizing: state.btcUseKellySizing,
         btcMinConfidence: state.btcMinConfidence,
         btcMaxEntryPrice: state.btcMaxEntryPrice,
+        btcMinEntryPrice: state.btcMinEntryPrice,
         btcMinWindowRemaining: state.btcMinWindowRemaining,
         btcStopLossPercent: state.btcStopLossPercent,
         btcTakeProfitPercent: state.btcTakeProfitPercent,
+        btcMinTimeIntoWindowMs: state.btcMinTimeIntoWindowMs,
+        btcRegimeFilterEnabled: state.btcRegimeFilterEnabled,
+        btcRsiFilterEnabled: state.btcRsiFilterEnabled,
+        btcUseLLMConfirmation: state.btcUseLLMConfirmation,
         aggressiveMode: state.aggressiveMode,
         llmWebSearchEnabled: state.llmWebSearchEnabled,
         microMinCompositeSignal: state.microMinCompositeSignal,
@@ -528,6 +923,33 @@ export const useSettingsStore = create<SettingsStore>()(
         microTradeSize: state.microTradeSize,
         microStopLossPercent: state.microStopLossPercent,
         microTakeProfitPercent: state.microTakeProfitPercent,
+        followedAddress: state.followedAddress,
+        copyTradeSize: state.copyTradeSize,
+        copyMaxConcurrent: state.copyMaxConcurrent,
+        copyPollIntervalMs: state.copyPollIntervalMs,
+        copyStopLossPercent: state.copyStopLossPercent,
+        copyTakeProfitPercent: state.copyTakeProfitPercent,
+        copyBuysOnly: state.copyBuysOnly,
+        llmPremiumModel: state.llmPremiumModel,
+        llmPremiumThreshold: state.llmPremiumThreshold,
+        llmPremiumBudgetUSD: state.llmPremiumBudgetUSD,
+        cryptoLLMEnabled: state.cryptoLLMEnabled,
+        cryptoModel: state.cryptoModel,
+        cryptoScanIntervalMs: state.cryptoScanIntervalMs,
+        cryptoMinConfidence: state.cryptoMinConfidence,
+        coinbaseApiKey: state.coinbaseApiKey,
+        coinbaseSecret: state.coinbaseSecret,
+        mrEnableBtc: state.mrEnableBtc,
+        mrEnableEth: state.mrEnableEth,
+        mrEnableSol: state.mrEnableSol,
+        mrLookbackPeriod: state.mrLookbackPeriod,
+        mrEntryZScore: state.mrEntryZScore,
+        mrExitZScore: state.mrExitZScore,
+        mrTradeSize: state.mrTradeSize,
+        mrScanIntervalMs: state.mrScanIntervalMs,
+        mrStopLossPercent: state.mrStopLossPercent,
+        mrTakeProfitPercent: state.mrTakeProfitPercent,
+        mrMaxHoldMs: state.mrMaxHoldMs,
       }),
     }
   )

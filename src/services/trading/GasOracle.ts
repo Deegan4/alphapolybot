@@ -24,7 +24,7 @@ export interface GasEstimate {
 }
 
 // Polygon gas station V2 endpoint
-const GAS_STATION_URL = 'https://gasstation.polygon.technology/v2'
+const GAS_STATION_URL = import.meta.env.VITE_GAS_STATION_URL || 'https://gasstation.polygon.technology/v2'
 
 // POL (formerly MATIC) price in USD — updated via setMaticPrice() from PriceOracleService.
 // Fallback only used until first real price arrives. POL was ~$0.09 as of Feb 2025.
@@ -142,8 +142,9 @@ export class GasOracle {
    */
   private async refreshPolPrice(): Promise<void> {
     try {
+      const coingeckoBase = import.meta.env.VITE_COINGECKO_API_URL || 'https://api.coingecko.com/api/v3'
       const resp = await fetch(
-        'https://api.coingecko.com/api/v3/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd',
+        `${coingeckoBase}/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd`,
         { signal: AbortSignal.timeout(5000) }
       )
       if (!resp.ok) return

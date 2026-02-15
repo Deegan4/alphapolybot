@@ -116,12 +116,31 @@ npm run dev        # Dev server on :4000
 
 ```bash
 npm run dev          # Vite dev server on :4000
+npm run dev:strict-csp # Dev server with Fast Refresh disabled for strict CSP testing
 npm run build        # Production build
 npm test             # 247 tests (Vitest)
 npm run test:watch   # Watch mode
 npm run lint         # ESLint
 npm run preview      # Preview production build
 ```
+
+## Local CSP Troubleshooting (Strict Mode)
+
+If your browser blocks scripts during local development under a strict CSP:
+
+1. Run strict mode:
+```bash
+npm run dev:strict-csp
+```
+This sets `VITE_STRICT_CSP_DEV=true` and disables React Fast Refresh injection in dev.
+
+2. Test in a clean browser profile (or Incognito with extensions disabled).
+
+3. Check DevTools Console details for source location:
+- If the source looks like `chrome-extension://...`, the violation is extension-origin, not app-origin.
+- If the source points to your local app URL (`http://localhost:...`), inspect the exact script path and CSP directive.
+
+Production should remain strict: do not add `unsafe-eval` to `script-src` unless you explicitly accept the security tradeoff.
 
 ## Testing
 

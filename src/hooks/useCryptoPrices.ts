@@ -9,8 +9,8 @@ export interface CryptoAssetState {
   sparklineHistory: number[] // last ~30 readings for sparkline
 }
 
-type AssetKey = 'BTC' | 'ETH' | 'SOL'
-const ASSETS: AssetKey[] = ['BTC', 'ETH', 'SOL']
+type AssetKey = 'BTC' | 'ETH' | 'SOL' | 'XRP'
+const ASSETS: AssetKey[] = ['BTC', 'ETH', 'SOL', 'XRP']
 const MAX_SPARKLINE = 60
 
 /** If neither WS has delivered in this window, fall back to HTTP polling */
@@ -35,6 +35,7 @@ export function useCryptoPrices(): Record<AssetKey, CryptoAssetState> {
     BTC: { ...emptyState },
     ETH: { ...emptyState },
     SOL: { ...emptyState },
+    XRP: { ...emptyState },
   })
 
   const sessionStartPrices = useRef<Map<AssetKey, number>>(new Map())

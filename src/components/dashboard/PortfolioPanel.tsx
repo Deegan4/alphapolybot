@@ -10,7 +10,7 @@ import {
 } from 'recharts'
 import { useWalletStore } from '@/stores'
 import { useBalanceHistoryStore } from '@/stores/balanceHistoryStore'
-import { tradeLogger } from '@/services/trading'
+import { tradeLogger, positionLifecycleManager } from '@/services/trading'
 import type { BacktestSummary } from '@/services/trading/TradeLogger'
 
 export const PortfolioPanel: React.FC = () => {
@@ -19,14 +19,21 @@ export const PortfolioPanel: React.FC = () => {
   const initialBalance = useBalanceHistoryStore((s) => s.initialBalance)
   const simulatedBalance = useBalanceHistoryStore((s) => s.simulatedBalance)
   const [summary, setSummary] = useState<BacktestSummary>(tradeLogger.getSummary())
+  const [unrealizedPnl, setUnrealizedPnl] = useState(0)
 
   useEffect(() => {
-    const id = setInterval(() => setSummary(tradeLogger.getSummary()), 5000)
+    const tick = () => {
+      setSummary(tradeLogger.getSummary())
+      setUnrealizedPnl(positionLifecycleManager.getUnrealizedPnl().totalUsd)
+    }
+    tick()
+    const id = setInterval(tick, 5000)
     return () => clearInterval(id)
   }, [])
 
   const displayBalance = simulatedBalance > 0 ? simulatedBalance : balance
-  const todayPnl = summary.totalPnlUSD
+  // Total PnL = realized (closed trades) + unrealized (open positions)
+  const todayPnl = summary.totalPnlUSD + unrealizedPnl
 
   const data = snapshots.map((s) => ({
     time: s.timestamp,
@@ -41,28 +48,28 @@ export const PortfolioPanel: React.FC = () => {
   return (
     <div className="flex flex-col gap-3 h-full">
       {/* Portfolio Value card */}
-      <div className="bg-agent-card border border-agent-border rounded-sm p-4">
-        <div className="text-[10px] uppercase tracking-wider text-agent-text-muted mb-1">
+      <div className="bg-agent-card border border-agent-border rounded-lg p-4 gradient-border">
+        <div className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium mb-1">
           Portfolio Value
         </div>
-        <div className="text-2xl font-mono font-bold text-agent-text">
+        <div className="text-3xl font-mono font-bold text-agent-text">
           ${displayBalance.toFixed(2)}
         </div>
-        <div className={`text-xs font-mono mt-1 ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
+        <div className={`text-sm font-mono mt-1 ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
           {todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)} today
         </div>
       </div>
 
       {/* Equity Curve card */}
-      <div className="bg-agent-card border border-agent-border rounded-sm p-4 flex-1 flex flex-col min-h-0">
-        <div className="text-[10px] uppercase tracking-wider text-agent-text-muted mb-2">
+      <div className="bg-agent-card border border-agent-border rounded-lg p-4 flex-1 flex flex-col min-h-0">
+        <div className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium mb-2">
           Equity Curve
         </div>
 
         <ChartContainer>
           {(w, h) =>
             data.length < 2 ? (
-              <div className="h-full flex items-center justify-center text-agent-text-label text-xs font-mono">
+              <div className="h-full flex items-center justify-center text-agent-text-label text-sm font-mono">
                 Collecting data...
               </div>
             ) : (
@@ -72,14 +79,14 @@ export const PortfolioPanel: React.FC = () => {
                     dataKey="time"
                     tickFormatter={formatTime}
                     stroke="#1a1f2e"
-                    tick={{ fill: '#6b7280', fontSize: 9, fontFamily: 'JetBrains Mono, monospace' }}
+                    tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'JetBrains Mono, monospace' }}
                     tickLine={false}
                     axisLine={false}
                     minTickGap={40}
                   />
                   <YAxis
                     stroke="#1a1f2e"
-                    tick={{ fill: '#6b7280', fontSize: 9, fontFamily: 'JetBrains Mono, monospace' }}
+                    tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'JetBrains Mono, monospace' }}
                     tickLine={false}
                     axisLine={false}
                     tickFormatter={(v: number) => `$${v.toFixed(0)}`}
@@ -88,7 +95,7 @@ export const PortfolioPanel: React.FC = () => {
                   {initialBalance > 0 && (
                     <ReferenceLine
                       y={initialBalance}
-                      stroke="#6b7280"
+                      stroke="#8b949e"
                       strokeDasharray="4 4"
                       strokeWidth={1}
                     />
@@ -97,9 +104,9 @@ export const PortfolioPanel: React.FC = () => {
                     contentStyle={{
                       backgroundColor: '#0d1117',
                       border: '1px solid #1a1f2e',
-                      borderRadius: '2px',
+                      borderRadius: '8px',
                       fontFamily: 'JetBrains Mono, monospace',
-                      fontSize: '10px',
+                      fontSize: '12px',
                     }}
                     labelFormatter={(ts: number) => {
                       const d = new Date(ts)
@@ -109,7 +116,7 @@ export const PortfolioPanel: React.FC = () => {
                       })
                     }}
                     formatter={(value: number) => [`$${value.toFixed(2)}`, 'Balance']}
-                    labelStyle={{ color: '#6b7280' }}
+                    labelStyle={{ color: '#8b949e' }}
                     itemStyle={{ color: '#22c55e' }}
                   />
                   <Line
@@ -129,26 +136,26 @@ export const PortfolioPanel: React.FC = () => {
       </div>
 
       {/* Quick stats */}
-      <div className="bg-agent-card border border-agent-border rounded-sm p-3">
-        <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+      <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
+        <div className="grid grid-cols-2 gap-3 text-sm font-mono">
           <div>
-            <div className="text-[9px] uppercase tracking-wider text-agent-text-muted">Win Rate</div>
+            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Win Rate</div>
             <div className={`font-semibold ${summary.winRate >= 0.5 ? 'text-agent-green' : summary.totalTrades > 0 ? 'text-agent-red' : 'text-agent-text'}`}>
               {summary.totalTrades > 0 ? `${Math.round(summary.winRate * 100)}%` : '--'}
             </div>
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-wider text-agent-text-muted">Trades</div>
+            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Trades</div>
             <div className="font-semibold text-agent-text">{summary.totalTrades}</div>
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-wider text-agent-text-muted">Avg P&L</div>
+            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Avg P&L</div>
             <div className={`font-semibold ${summary.avgPnlPerTrade >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
               {summary.totalTrades > 0 ? `${summary.avgPnlPerTrade >= 0 ? '+' : ''}$${summary.avgPnlPerTrade.toFixed(2)}` : '--'}
             </div>
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-wider text-agent-text-muted">Max DD</div>
+            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Max DD</div>
             <div className="font-semibold text-agent-red">
               {summary.maxDrawdownPercent > 0 ? `-${summary.maxDrawdownPercent.toFixed(1)}%` : '--'}
             </div>

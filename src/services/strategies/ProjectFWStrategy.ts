@@ -26,7 +26,7 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
   epsilon0: 0.1,
   maxIterations: 50,
   // Trading parameters
-  tradeSize: 3,
+  tradeSize: 5, // Polymarket minimum order size is 5 shares
   minProfitBps: 50,
   maxConcurrentArbs: 2,
   scanIntervalMs: 30000, // 30s (was 15s) — gives time for 75 order book checks
@@ -370,7 +370,12 @@ export class ProjectFWStrategy extends BaseStrategy {
       // Position sizing: penny mode → $1, otherwise Kelly-sized by arb profit ratio
       let effectiveTradeSize: number
       if (useSettingsStore.getState().pennyTraderMode) {
-        effectiveTradeSize = 1
+        // Polymarket CLOB requires minimum 5 shares per leg.
+        // Each leg gets effectiveTradeSize * leg.proportion dollars at leg.price,
+        // so ensure the smallest leg yields >= 5 shares.
+        const minProportion = Math.min(...opp.result.tradeLegs.map(l => l.proportion))
+        const maxPrice = Math.max(...opp.result.tradeLegs.map(l => l.price))
+        effectiveTradeSize = Math.max(1, (5 * maxPrice) / Math.max(minProportion, 0.01))
       } else {
         const bankroll = useWalletStore.getState().usdcBridgedBalance ?? useWalletStore.getState().usdcBalance
         const kellyFraction = useSettingsStore.getState().kellyFraction
@@ -574,7 +579,10 @@ export class ProjectFWStrategy extends BaseStrategy {
    * Uses dynamic import to avoid circular dependency (same pattern as DipArb).
    */
   private trackFallbackPosition(leg: FWArbLeg, opp: ArbOpportunity): void {
-    import('@/services/trading/PositionLifecycleManager').then(m => {
+    Promise.all([
+      import('@/services/trading/PositionLifecycleManager'),
+      import('@/services/api').then(api => api.clobClient.getFeeRateBps(leg.tokenId)).catch(() => undefined),
+    ]).then(([m, feeRate]) => {
       m.positionLifecycleManager.trackPosition({
         tokenId: leg.tokenId,
         marketId: opp.market.id,
@@ -589,6 +597,7 @@ export class ProjectFWStrategy extends BaseStrategy {
         takeProfitPercent: this.fwConfig.takeProfitPercent,
         strategy: 'fw',
         negRisk: opp.market.negRisk,
+        takerFeeBps: feeRate,
       })
     }).catch(err => console.warn('[ProjectFW] Failed to track fallback position:', err))
   }

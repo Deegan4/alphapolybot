@@ -6,17 +6,19 @@ import { ActivePositionsCard } from '@/components/dashboard/ActivePositionsCard'
 import { RecentTradesGrid } from '@/components/dashboard/RecentTradesGrid'
 import { ActivitySidebar } from '@/components/dashboard/ActivitySidebar'
 import { HistoryView } from '@/components/dashboard/HistoryView'
+import { SpotCryptoView } from '@/components/dashboard/SpotCryptoView'
 import { DiagnosticsBanner } from '@/components/dashboard/DiagnosticsBanner'
-import { ReadinessPanel } from '@/components/dashboard/ReadinessPanel'
+import { FollowTraderPanel } from '@/components/dashboard/FollowTraderPanel'
+import { PerformancePanel } from '@/components/dashboard/PerformancePanel'
 import { useBalanceHistory } from '@/hooks/useBalanceHistory'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import { positionLifecycleManager, activityLogger } from '@/services/trading'
 
 /**
- * DashboardView — 3-column trading dashboard with Live/History tabs.
+ * DashboardView — 3-column trading dashboard with Live/History/Spot Crypto tabs.
  */
 const DashboardView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'live' | 'history'>('live')
+  const [activeTab, setActiveTab] = useState<'live' | 'history' | 'spotcrypto'>('live')
   useBalanceHistory() // drives balance snapshot pipeline
 
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
@@ -63,31 +65,35 @@ const DashboardView: React.FC = () => {
         /* ====== LIVE TRADING — 3 column layout ====== */
         <>
         <DiagnosticsBanner />
-        <div className="flex-1 flex gap-3 p-4 min-h-0">
-          {/* Left column — Readiness + Portfolio */}
-          <div className="w-[280px] shrink-0 flex flex-col min-h-0">
-            <ReadinessPanel />
+        <div className="flex-1 flex gap-4 p-5 min-h-0">
+          {/* Left column — Readiness + Portfolio + Performance */}
+          <div className="w-[290px] shrink-0 flex flex-col gap-3 min-h-0 overflow-y-auto">
+            <FollowTraderPanel />
             <PortfolioPanel />
+            <PerformancePanel />
           </div>
 
           {/* Center column — Asset cards + positions/trades */}
-          <div className="flex-1 flex flex-col gap-3 min-h-0">
+          <div className="flex-1 flex flex-col gap-4 min-h-0">
             <AssetCardsRow />
-            <div className="flex-1 grid grid-cols-2 gap-3 min-h-0">
+            <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
               <ActivePositionsCard />
               <RecentTradesGrid />
             </div>
           </div>
 
           {/* Right column — Activity */}
-          <div className="w-[340px] shrink-0 flex flex-col min-h-0">
+          <div className="w-[350px] shrink-0 flex flex-col min-h-0">
             <ActivitySidebar />
           </div>
         </div>
         </>
-      ) : (
+      ) : activeTab === 'history' ? (
         /* ====== HISTORY TAB ====== */
         <HistoryView />
+      ) : (
+        /* ====== SPOT CRYPTO TAB ====== */
+        <SpotCryptoView />
       )}
 
       {/* Floating emergency stop — fixed bottom-left */}

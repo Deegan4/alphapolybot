@@ -153,7 +153,7 @@ describe('ProjectFWStrategy', () => {
     it('returns default config', () => {
       const config = strategy.getFWConfig()
       expect(config.alpha).toBe(0.5)
-      expect(config.tradeSize).toBe(3)
+      expect(config.tradeSize).toBe(5)
       expect(config.minProfitBps).toBe(50)
       expect(config.maxConcurrentArbs).toBe(2)
       expect(config.takerFeeBps).toBe(100)

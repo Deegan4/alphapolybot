@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useSettingsStore, useWalletStore } from '@/stores'
-import { riskManager, rejectionTracker, readinessChecker } from '@/services/trading'
+import { riskManager, rejectionTracker, readinessChecker, positionLifecycleManager } from '@/services/trading'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import type { RejectionSummary } from '@/services/trading/RejectionTracker'
 
@@ -167,7 +167,7 @@ function computeBanner(ctx: {
     }
   }
 
-  // 5. High rejection rate — show top blocker
+  // 5. High rejection rate — show top blocker with actionable resolution
   if (ctx.rejections.total > 10 && ctx.rejections.topBlocker) {
     const tb = ctx.rejections.topBlocker
     const countStr = Object.entries(ctx.rejections.counts)
@@ -176,10 +176,27 @@ function computeBanner(ctx: {
       .map(([cat, n]) => `${cat}: ${n}`)
       .join(' · ')
 
+    // Offer "Clean Stale" action when position_limit is the top blocker
+    let action: BannerState['action'] = undefined
+    if (tb.category === 'position_limit') {
+      const stalePositions = positionLifecycleManager.getPositions().filter(p => p.isStale)
+      if (stalePositions.length > 0) {
+        action = {
+          label: `Clean ${stalePositions.length} Stale`,
+          onClick: () => {
+            for (const p of stalePositions) {
+              positionLifecycleManager.abandonPosition(p.tokenId)
+            }
+          },
+        }
+      }
+    }
+
     return {
       severity: 'yellow',
       message: `TOP BLOCKER: ${tb.category.toUpperCase()}`,
       detail: `${ctx.rejections.total} rejections in 1h — ${countStr}`,
+      action,
     }
   }
 

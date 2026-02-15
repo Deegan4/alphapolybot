@@ -7,6 +7,7 @@ import { tradingService } from '@/services/trading/TradingService'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import { tradeLogger } from '@/services/trading/TradeLogger'
 import { KellySizer } from '@/services/trading/KellySizer'
+import { edgeTracker } from '@/services/trading/EdgeTracker'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
@@ -324,11 +325,15 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           { marketId: market.id, orderId: result.orderId },
         )
 
-        // Track with PLM
+        // Track with PLM — fetch per-token fee rate for accurate TP adjustment
         const filledSize = result.filledSize ?? positionSize / currentPrice
-        import('@/services/trading/PositionLifecycleManager').then(m => {
+        const tokenIdForPlm = market.clobTokenIds[outcomeIndex]
+        Promise.all([
+          import('@/services/trading/PositionLifecycleManager'),
+          import('@/services/api').then(api => api.clobClient.getFeeRateBps(tokenIdForPlm)).catch(() => undefined),
+        ]).then(([m, feeRate]) => {
           m.positionLifecycleManager.trackPosition({
-            tokenId: market.clobTokenIds[outcomeIndex],
+            tokenId: tokenIdForPlm,
             marketId: market.id,
             conditionId: market.conditionId,
             outcome,
@@ -342,6 +347,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
             strategy: 'micro',
             negRisk: market.negRisk,
             maxHoldMs: this.microConfig.maxHoldMs,
+            takerFeeBps: feeRate,
           })
         }).catch(err => console.warn('[MicroMomentum] PLM track failed:', err))
 
@@ -393,11 +399,13 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
   private calculatePositionSize(modelProb: number, marketPrice: number): number {
     const pennyMode = useSettingsStore.getState().pennyTraderMode
-    if (pennyMode) return 1.0
+    // Polymarket CLOB requires minimum 5 shares per order
+    if (pennyMode) return Math.max(1.0, 5 * marketPrice)
 
     const bankroll = useWalletStore.getState().usdcBridgedBalance ?? useWalletStore.getState().usdcBalance
     const kellyFraction = useSettingsStore.getState().kellyFraction
-    const fStar = KellySizer.polymarketKelly(modelProb, marketPrice)
+    const adaptiveProb = edgeTracker.getAdaptiveModelProb('micro', modelProb)
+    const fStar = KellySizer.polymarketKelly(adaptiveProb, marketPrice)
 
     if (fStar <= 0) return 0 // No edge — don't trade
 

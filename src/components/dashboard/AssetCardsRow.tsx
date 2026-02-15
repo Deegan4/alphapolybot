@@ -1,16 +1,17 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { AssetCard } from './AssetCard'
-import { useCryptoPrices } from '@/hooks/useCryptoPrices'
+import { usePolymarketPrices } from '@/hooks/usePolymarketPrices'
 import { btcUpDownStrategy } from '@/services/strategies/BtcUpDownStrategy'
-import { tradeLogger } from '@/services/trading'
+import { tradeLogger, positionLifecycleManager } from '@/services/trading'
 import type { TradeRecord } from '@/services/trading/TradeLogger'
 
-type AssetKey = 'BTC' | 'ETH' | 'SOL'
+type AssetKey = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
 const ASSET_COLORS: Record<AssetKey, { dot: string; border: string }> = {
   BTC: { dot: '#f7931a', border: '#f7931a' },
   ETH: { dot: '#627eea', border: '#627eea' },
   SOL: { dot: '#9945ff', border: '#9945ff' },
+  XRP: { dot: '#23292f', border: '#23292f' },
 }
 
 interface AssetStats {
@@ -27,11 +28,12 @@ const emptyStats: AssetStats = {
 }
 
 export const AssetCardsRow: React.FC = () => {
-  const prices = useCryptoPrices()
+  const polyPrices = usePolymarketPrices()
   const [stats, setStats] = useState<Record<AssetKey, AssetStats>>({
     BTC: { ...emptyStats },
     ETH: { ...emptyStats },
     SOL: { ...emptyStats },
+    XRP: { ...emptyStats },
   })
 
   // Compute per-asset stats from trade records + strategy signals
@@ -41,6 +43,7 @@ export const AssetCardsRow: React.FC = () => {
       BTC: { ...emptyStats },
       ETH: { ...emptyStats },
       SOL: { ...emptyStats },
+      XRP: { ...emptyStats },
     }
 
     // Group closed BTC-strategy trades by asset
@@ -55,13 +58,27 @@ export const AssetCardsRow: React.FC = () => {
       result[asset].recentPnls.push(pnl)
     }
 
+    // Add unrealized PnL from open positions
+    const openPositions = positionLifecycleManager.getPositions()
+    for (const pos of openPositions) {
+      const q = (pos.question ?? '').toUpperCase()
+      let asset: AssetKey | null = null
+      if (q.includes('BTC') || q.includes('BITCOIN')) asset = 'BTC'
+      else if (q.includes('ETH') || q.includes('ETHEREUM')) asset = 'ETH'
+      else if (q.includes('SOL') || q.includes('SOLANA')) asset = 'SOL'
+      else if (q.includes('XRP') || q.includes('RIPPLE')) asset = 'XRP'
+      if (asset) {
+        result[asset].pnl += pos.pnlUsd
+      }
+    }
+
     // Trim recent P&Ls to last 6
-    for (const key of ['BTC', 'ETH', 'SOL'] as AssetKey[]) {
+    for (const key of ['BTC', 'ETH', 'SOL', 'XRP'] as AssetKey[]) {
       result[key].recentPnls = result[key].recentPnls.slice(-6)
     }
 
     // Get latest strategy signals
-    for (const asset of ['BTC', 'ETH', 'SOL'] as AssetKey[]) {
+    for (const asset of ['BTC', 'ETH', 'SOL', 'XRP'] as AssetKey[]) {
       const sig = btcUpDownStrategy.getLastSignal(asset)
       if (sig) {
         result[asset].direction = sig.signal.direction === 'up' ? 'UP' : 'DOWN'
@@ -86,17 +103,22 @@ export const AssetCardsRow: React.FC = () => {
   }, [refresh])
 
   return (
-    <div className="grid grid-cols-3 gap-3">
-      {(['BTC', 'ETH', 'SOL'] as AssetKey[]).map((asset) => (
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {(['BTC', 'ETH', 'SOL', 'XRP'] as AssetKey[]).map((asset) => (
         <AssetCard
           key={asset}
           symbol={asset}
           dotColor={ASSET_COLORS[asset].dot}
           borderColor={ASSET_COLORS[asset].border}
-          price={prices[asset].price}
-          priceChange={prices[asset].priceChange}
+          upPrice={polyPrices[asset].upPrice}
+          downPrice={polyPrices[asset].downPrice}
+          upPriceChange={polyPrices[asset].upPriceChange}
+          referencePrice={polyPrices[asset].referencePrice}
+          windowEnd={polyPrices[asset].windowEnd}
+          windowDuration={polyPrices[asset].windowDuration}
+          marketFound={polyPrices[asset].marketFound}
           direction={stats[asset].direction}
-          sparklineData={prices[asset].sparklineHistory}
+          sparklineData={polyPrices[asset].sparklineHistory}
           edgeStrength={stats[asset].edgeStrength}
           wins={stats[asset].wins}
           losses={stats[asset].losses}
@@ -114,5 +136,6 @@ function detectAsset(r: TradeRecord): AssetKey | null {
   if (q.includes('BTC') || q.includes('BITCOIN')) return 'BTC'
   if (q.includes('ETH') || q.includes('ETHEREUM')) return 'ETH'
   if (q.includes('SOL') || q.includes('SOLANA')) return 'SOL'
+  if (q.includes('XRP') || q.includes('RIPPLE')) return 'XRP'
   return null
 }

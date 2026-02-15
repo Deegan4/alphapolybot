@@ -4,8 +4,8 @@
 
 /* Agent Theme Variables */
 :root {
-  --agent-text: #e6edf3;
-  --agent-text-muted: #6b7280;
+  --agent-text: #f0f6fc;
+  --agent-text-muted: #8b949e;
   --agent-bg: #0a0e1a;
   --agent-card: #0d1117;
   --agent-border: #1a1f2e;
@@ -13,8 +13,8 @@
   --agent-orange: #f97316;
 
   /* Legacy matrix vars — kept for any leftover references */
-  --matrix-text-primary: #e6edf3;
-  --matrix-text-secondary: #6b7280;
+  --matrix-text-primary: #f0f6fc;
+  --matrix-text-secondary: #8b949e;
   --matrix-bg: #0a0e1a;
   --matrix-card: #0d1117;
   --matrix-border: #1a1f2e;
@@ -50,6 +50,7 @@
 
 html {
   background-color: var(--agent-bg);
+  font-size: 16px;
 }
 
 body {
@@ -247,6 +248,32 @@ body {
   );
   background-size: 200% 100%;
   animation: shimmer 2s infinite linear;
+}
+
+/* Dashboard utility classes */
+.card-base {
+  @apply bg-agent-card border border-agent-border rounded-lg;
+}
+
+.section-label {
+  @apply text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium;
+}
+
+.data-value {
+  @apply font-mono font-semibold text-agent-text tabular-nums;
+}
+
+.row-hover {
+  @apply transition-colors duration-150 hover:bg-agent-elevated/40;
+}
+
+/* Activity feed entry animation */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in {
+  animation: fade-in 0.25s ease-out;
 }
 
 /* Scrollbar with cyan accent */
