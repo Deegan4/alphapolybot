@@ -1,18 +1,27 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { Suspense, useEffect, useState, useCallback } from 'react'
 import { SniperTopBar } from '@/components/dashboard/SniperTopBar'
 import { PortfolioPanel } from '@/components/dashboard/PortfolioPanel'
 import { AssetCardsRow } from '@/components/dashboard/AssetCardsRow'
 import { ActivePositionsCard } from '@/components/dashboard/ActivePositionsCard'
 import { RecentTradesGrid } from '@/components/dashboard/RecentTradesGrid'
 import { ActivitySidebar } from '@/components/dashboard/ActivitySidebar'
-import { HistoryView } from '@/components/dashboard/HistoryView'
-import { SpotCryptoView } from '@/components/dashboard/SpotCryptoView'
 import { DiagnosticsBanner } from '@/components/dashboard/DiagnosticsBanner'
-import { FollowTraderPanel } from '@/components/dashboard/FollowTraderPanel'
-import { PerformancePanel } from '@/components/dashboard/PerformancePanel'
 import { useBalanceHistory } from '@/hooks/useBalanceHistory'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import { positionLifecycleManager, activityLogger } from '@/services/trading'
+
+// Lazy-load tab-specific components — only downloaded when their tab is active.
+// Keeps initial bundle smaller by deferring chart-heavy and feature-specific panels.
+const HistoryView = React.lazy(() => import('@/components/dashboard/HistoryView').then(m => ({ default: m.HistoryView })))
+const SpotCryptoView = React.lazy(() => import('@/components/dashboard/SpotCryptoView').then(m => ({ default: m.SpotCryptoView })))
+const FollowTraderPanel = React.lazy(() => import('@/components/dashboard/FollowTraderPanel').then(m => ({ default: m.FollowTraderPanel })))
+const PerformancePanel = React.lazy(() => import('@/components/dashboard/PerformancePanel').then(m => ({ default: m.PerformancePanel })))
+
+const LazyFallback: React.FC = () => (
+  <div className="flex items-center justify-center p-4">
+    <div className="text-green-500 font-mono text-sm animate-pulse">Loading...</div>
+  </div>
+)
 
 /**
  * DashboardView — 3-column trading dashboard with Live/History/Spot Crypto tabs.
@@ -68,9 +77,9 @@ const DashboardView: React.FC = () => {
         <div className="flex-1 flex gap-4 p-5 min-h-0">
           {/* Left column — Readiness + Portfolio + Performance */}
           <div className="w-[290px] shrink-0 flex flex-col gap-3 min-h-0 overflow-y-auto">
-            <FollowTraderPanel />
+            <Suspense fallback={<LazyFallback />}><FollowTraderPanel /></Suspense>
             <PortfolioPanel />
-            <PerformancePanel />
+            <Suspense fallback={<LazyFallback />}><PerformancePanel /></Suspense>
           </div>
 
           {/* Center column — Asset cards + positions/trades */}
@@ -90,10 +99,10 @@ const DashboardView: React.FC = () => {
         </>
       ) : activeTab === 'history' ? (
         /* ====== HISTORY TAB ====== */
-        <HistoryView />
+        <Suspense fallback={<LazyFallback />}><HistoryView /></Suspense>
       ) : (
         /* ====== SPOT CRYPTO TAB ====== */
-        <SpotCryptoView />
+        <Suspense fallback={<LazyFallback />}><SpotCryptoView /></Suspense>
       )}
 
       {/* Floating emergency stop — fixed bottom-left */}

@@ -29,6 +29,7 @@ export interface RejectionStats {
   lowLiquidity: number
   lowVolume: number
   missingData: number
+  spreadPreFilter: number
   coherent: number
   multiOutcome: number
   snapshotFailed: number
@@ -117,6 +118,7 @@ export class ArbitrageScanner {
       lowLiquidity: 0,
       lowVolume: 0,
       missingData: 0,
+      spreadPreFilter: 0,
       coherent: 0,
       multiOutcome: 0,
       snapshotFailed: 0,
@@ -147,15 +149,53 @@ export class ArbitrageScanner {
     let closestAskSum = Infinity
 
     if (allCandidates.length > 0) {
-      console.log(`[ArbitrageScanner] ${allCandidates.length} candidates passed basic filters, checking ${candidates.length} order books (sorted by liquidity asc)...`)
+      console.log(`[ArbitrageScanner] ${allCandidates.length} candidates passed basic filters, pre-screening ${candidates.length} with spread data...`)
     }
 
+    // Phase 1: Lightweight spread pre-screen.
+    // Fetch best bid/ask for all tokens in one batch, then filter out markets
+    // where askSum >= 1.02 (obviously no arb). Saves ~90% of full order book fetches.
+    // Threshold is 1.02 (loose) because full snapshot check at 1.0 is the real gate.
+    let spreadScreened = candidates
+    if (candidates.length > 0) {
+      try {
+        const allTokenIds = new Set<string>()
+        for (const m of candidates) {
+          if (m.clobTokenIds) m.clobTokenIds.forEach(tid => allTokenIds.add(tid))
+        }
+
+        if (allTokenIds.size > 0) {
+          const spreadsMap = await clobClient.getSpreads(Array.from(allTokenIds))
+
+          spreadScreened = candidates.filter(market => {
+            if (!market.clobTokenIds || market.clobTokenIds.length === 0) return true // keep if no tokens to check
+            const askPrices = market.clobTokenIds.map(tid => {
+              const spread = spreadsMap.get(tid)
+              return spread?.ask ?? 1.0
+            })
+            const askSum = askPrices.reduce((s, p) => s + p, 0)
+            if (askSum >= 1.02) {
+              rejections.spreadPreFilter++
+              return false
+            }
+            return true
+          })
+
+          console.log(`[ArbitrageScanner] Spread pre-screen: ${candidates.length} → ${spreadScreened.length} survivors (${rejections.spreadPreFilter} filtered)`)
+        }
+      } catch (err) {
+        // Spread pre-screen is best-effort — fall through to full snapshot on failure
+        console.warn('[ArbitrageScanner] Spread pre-screen failed, falling back to full scan:', err)
+      }
+    }
+
+    // Phase 2: Full order book snapshot for survivors.
     // Process candidates in parallel (batches of 5 to avoid rate limits).
     // For each market: fetch order books → check ask-sum < 1.0 → if yes, run optimizer.
     // Gamma mid-prices always sum to 1.00 so we MUST check real ask prices.
     const batchSize = 5
-    for (let i = 0; i < candidates.length; i += batchSize) {
-      const batch = candidates.slice(i, i + batchSize)
+    for (let i = 0; i < spreadScreened.length; i += batchSize) {
+      const batch = spreadScreened.slice(i, i + batchSize)
       const results = await Promise.allSettled(
         batch.map(async market => {
           const snapshot = await this.buildSnapshot(market)
@@ -215,7 +255,7 @@ export class ArbitrageScanner {
 
     // Diagnostic: log closest askSum so we can see how close markets get to profitability
     if (closestAskSum < Infinity) {
-      console.log(`[ArbitrageScanner] Scan complete: ${candidates.length} checked, closest askSum=${closestAskSum.toFixed(4)} (need < 1.0000), arbs=${opportunities.length}`)
+      console.log(`[ArbitrageScanner] Scan complete: ${spreadScreened.length}/${candidates.length} checked (${rejections.spreadPreFilter} spread-filtered), closest askSum=${closestAskSum.toFixed(4)} (need < 1.0000), arbs=${opportunities.length}`)
     }
 
     const metrics = { total: markets.length, candidates: allCandidates.length, eligible: opportunities.length, rejections }

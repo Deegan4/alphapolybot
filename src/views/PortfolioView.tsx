@@ -22,12 +22,15 @@ const itemVariants = {
  */
 export const PortfolioView: React.FC = () => {
   const { isConnected, usdcBalance } = useWalletStore()
-  const [activeView, setActiveView] = useState<'markets' | 'spot'>('markets')
+  const [activeView, setActiveView] = useState<'markets' | 'spot' | 'closed'>('markets')
   const [positions, setPositions] = useState<Position[]>([])
   const [trackedPositions, setTrackedPositions] = useState<PositionStatus[]>([])
   const [recentTrades, setRecentTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [closedPositions, setClosedPositions] = useState<Position[]>([])
+  const [closedLoading, setClosedLoading] = useState(false)
+  const [closedFetched, setClosedFetched] = useState(false)
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set())
   const [confirmClose, setConfirmClose] = useState<string | null>(null)
   const [confirmCloseAll, setConfirmCloseAll] = useState(false)
@@ -58,6 +61,25 @@ export const PortfolioView: React.FC = () => {
     const interval = setInterval(fetchData, 30000)
     return () => clearInterval(interval)
   }, [isConnected])
+
+  // Fetch closed positions on-demand when tab is selected
+  useEffect(() => {
+    if (activeView !== 'closed' || !isConnected || closedFetched) return
+
+    const fetchClosed = async () => {
+      setClosedLoading(true)
+      try {
+        const data = await dataClient.getClosedPositions({ limit: 50 })
+        setClosedPositions(data)
+        setClosedFetched(true)
+      } catch (err) {
+        console.error('Failed to fetch closed positions:', err)
+      } finally {
+        setClosedLoading(false)
+      }
+    }
+    fetchClosed()
+  }, [activeView, isConnected, closedFetched])
 
   // Subscribe to locally tracked positions (PLM)
   useEffect(() => {
@@ -166,6 +188,17 @@ export const PortfolioView: React.FC = () => {
         >
           <span className={activeView === 'spot' ? 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-matrix-primary' : 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-matrix-text-secondary'} />
           Spot Crypto
+        </button>
+        <button
+          onClick={() => setActiveView('closed')}
+          className={`px-4 py-2 rounded-md text-sm font-sans font-semibold transition-colors ${
+            activeView === 'closed'
+              ? 'bg-matrix-primary/15 text-matrix-primary border border-matrix-primary/30'
+              : 'text-matrix-text-secondary hover:text-matrix-text'
+          }`}
+        >
+          <span className={activeView === 'closed' ? 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-matrix-primary' : 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-matrix-text-secondary'} />
+          Closed
         </button>
       </div>
 
@@ -288,8 +321,39 @@ export const PortfolioView: React.FC = () => {
           </div>
         </MatrixCard>
       </div>
-      ) : (
+      ) : activeView === 'spot' ? (
         <SpotPortfolioView />
+      ) : (
+        /* Closed Positions View */
+        <div className="flex-1 min-h-0">
+          <MatrixCard title="CLOSED POSITIONS" subtitle={`${closedPositions.length} resolved`} variant="gradient" className="h-full flex flex-col min-h-0">
+            <div className="flex-1 overflow-auto">
+              {closedLoading ? (
+                <div className="flex justify-center py-8">
+                  <MatrixLoading text="Loading closed positions..." />
+                </div>
+              ) : closedPositions.length === 0 ? (
+                <div className="text-center py-8 text-matrix-text-secondary">
+                  <p className="font-sans">No closed positions</p>
+                  <p className="text-xs mt-1 font-sans">Resolved positions will appear here</p>
+                </div>
+              ) : (
+                <motion.div
+                  className="space-y-2"
+                  variants={containerVariants}
+                  initial="hidden"
+                  animate="show"
+                >
+                  {closedPositions.map((position) => (
+                    <motion.div key={position.tokenId} variants={itemVariants}>
+                      <PositionCard position={position} />
+                    </motion.div>
+                  ))}
+                </motion.div>
+              )}
+            </div>
+          </MatrixCard>
+        </div>
       )}
     </div>
   )

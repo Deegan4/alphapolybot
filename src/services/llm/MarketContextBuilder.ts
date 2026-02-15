@@ -48,6 +48,9 @@ export interface MarketContext {
   // Price trend (from CLOB price history, async-fetched)
   priceTrend: 'rising' | 'falling' | 'stable' | null
   priceMomentum: number | null   // % change over 1h
+  priceVolatility: number | null // stddev/mean as %, from 1h history
+  priceSupport: number | null    // min price in 1h window
+  priceResistance: number | null // max price in 1h window
 
   // Crypto mode fields (populated by gatherCryptoContext)
   priceChange24h: number | null
@@ -115,6 +118,9 @@ export function gatherMarketContext(
     // Price trend — populated separately by enrichWithPriceTrend()
     priceTrend: null,
     priceMomentum: null,
+    priceVolatility: null,
+    priceSupport: null,
+    priceResistance: null,
     // Crypto fields — populated separately by gatherCryptoContext
     priceChange24h: null,
     volume24hUSD: null,
@@ -202,6 +208,11 @@ export function formatContextForPrompt(ctx: MarketContext): string {
     lines.push(`- Price trend (1h): ${ctx.priceTrend} ${sign}${ctx.priceMomentum.toFixed(1)}%`)
   }
 
+  // Line 7: Volatility + support/resistance (from async enrichment)
+  if (ctx.priceVolatility !== null && ctx.priceSupport !== null && ctx.priceResistance !== null) {
+    lines.push(`- 1h volatility: ${ctx.priceVolatility.toFixed(1)}%, range: ${(ctx.priceSupport * 100).toFixed(1)}¢ – ${(ctx.priceResistance * 100).toFixed(1)}¢`)
+  }
+
   // Crypto-specific lines (Phase 5)
   if (ctx.priceChange24h !== null) {
     lines.push(`- 24h crypto: ${ctx.priceChange24h > 0 ? '+' : ''}${ctx.priceChange24h.toFixed(1)}% change, $${(ctx.volume24hUSD ?? 0).toLocaleString()} vol`)
@@ -220,6 +231,9 @@ export function formatContextForPrompt(ctx: MarketContext): string {
 interface TrendCacheEntry {
   trend: 'rising' | 'falling' | 'stable'
   momentum: number  // % change
+  volatility: number // stddev/mean as %
+  support: number    // min price in window
+  resistance: number // max price in window
   fetchedAt: number
 }
 
@@ -240,7 +254,14 @@ export async function enrichWithPriceTrend(
   // Check cache
   const cached = trendCache.get(tokenId)
   if (cached && Date.now() - cached.fetchedAt < TREND_CACHE_TTL_MS) {
-    return { ...ctx, priceTrend: cached.trend, priceMomentum: cached.momentum }
+    return {
+      ...ctx,
+      priceTrend: cached.trend,
+      priceMomentum: cached.momentum,
+      priceVolatility: cached.volatility,
+      priceSupport: cached.support,
+      priceResistance: cached.resistance,
+    }
   }
 
   try {
@@ -261,10 +282,26 @@ export async function enrichWithPriceTrend(
       : momentum < -1.0 ? 'falling'
       : 'stable'
 
-    // Cache result
-    trendCache.set(tokenId, { trend, momentum, fetchedAt: Date.now() })
+    // Compute volatility, support, resistance from same data
+    const prices = history.map(h => h.p)
+    const mean = prices.reduce((s, p) => s + p, 0) / prices.length
+    const variance = prices.reduce((s, p) => s + (p - mean) ** 2, 0) / prices.length
+    const stddev = Math.sqrt(variance)
+    const volatility = mean > 0 ? (stddev / mean) * 100 : 0
+    const support = Math.min(...prices)
+    const resistance = Math.max(...prices)
 
-    return { ...ctx, priceTrend: trend, priceMomentum: momentum }
+    // Cache result
+    trendCache.set(tokenId, { trend, momentum, volatility, support, resistance, fetchedAt: Date.now() })
+
+    return {
+      ...ctx,
+      priceTrend: trend,
+      priceMomentum: momentum,
+      priceVolatility: volatility,
+      priceSupport: support,
+      priceResistance: resistance,
+    }
   } catch {
     return ctx // Fail silently
   }
