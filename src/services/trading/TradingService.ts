@@ -81,7 +81,7 @@ export class TradingService {
     market: Market,
     outcome: 'yes' | 'no',
     amount: number,
-    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string }
+    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number }
   ): Promise<OrderResult> {
     // Ensure approvals (skip actual transactions in dry run mode)
     const approvalResult = await walletService.ensureApprovals(this.config.dryRun)
@@ -136,12 +136,19 @@ export class TradingService {
     // Apply slippage tolerance
     const maxPrice = currentPrice * (1 + this.config.maxSlippage)
 
+    // Determine order type: caller can override (e.g., DipArb uses GTD), otherwise use config default
+    const resolvedOrderType = options?.orderType ?? (this.config.fokOnly ? 'FOK' : 'GTC')
+    const gtdExpiration = resolvedOrderType === 'GTD'
+      ? Math.floor((Date.now() + (options?.gtdExpiryMs ?? this.config.gtcExpiryMs)) / 1000)
+      : undefined
+
     const orderRequest: OrderRequest = {
       tokenId,
       side: 'BUY',
       price: maxPrice,
       size: shares,
-      type: this.config.fokOnly ? 'FOK' : 'GTC',
+      type: resolvedOrderType,
+      expiration: gtdExpiration,
       conditionId: market.conditionId,
       negRisk: market.negRisk,
     }

@@ -13,6 +13,7 @@ import { KellySizer } from '@/services/trading/KellySizer'
 import { gasOracle } from '@/services/trading/GasOracle'
 import { tradeLogger } from '@/services/trading/TradeLogger'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
+import { orderBookDepth } from '@/services/trading/OrderBookDepth'
 
 /**
  * Proven configuration with 86% ROI
@@ -388,12 +389,15 @@ export class DipArbStrategy extends BaseStrategy {
           })
 
           // Fire the dip event handler with order book ask prices
+          // Add 1¢ premium above best ask to improve fill likelihood on GTD orders
+          const premiumAsk0 = Math.min(0.99, ask0 + 0.01)
+          const premiumAsk1 = Math.min(0.99, ask1 + 0.01)
           const dipEvent: DipEvent = {
-            market: { ...market, outcomePrices: [ask0, ask1] }, // Use ask prices for execution
+            market: { ...market, outcomePrices: [premiumAsk0, premiumAsk1] }, // Ask + 1¢ premium
             tokenId: market.clobTokenIds[dippedIndex],
             outcome,
             previousPrice: dippedAsk, // No "previous" in spread scan
-            currentPrice: dippedAsk,
+            currentPrice: dippedIndex === 0 ? premiumAsk0 : premiumAsk1,
             dipPercent: 1.0 - askSum, // Profit ratio as "dip percent"
             timestamp: Date.now(),
             windowMs: 0,
@@ -544,15 +548,49 @@ export class DipArbStrategy extends BaseStrategy {
       }
 
       // ========================
-      // LEG 1: Buy dipped outcome
+      // DEPTH CHECK: Cap order size to available liquidity
       // ========================
-      this.log(`LEG 1: Buying ${event.outcome.toUpperCase()} at ${(event.currentPrice * 100).toFixed(1)}¢`)
+      try {
+        const dippedTokenId = event.market.clobTokenIds[dippedIndex]
+        const complementTokenId = event.market.clobTokenIds[complementIndex]
+        const [depthDipped, depthComplement] = await Promise.all([
+          orderBookDepth.checkBuyDepth(dippedTokenId, tradeAmount, 0.03),
+          orderBookDepth.checkBuyDepth(complementTokenId, tradeAmount, 0.03),
+        ])
+
+        // Cap to the smaller side's liquidity (both legs need to fill)
+        const maxFillable = Math.min(
+          depthDipped.maxFillableUSD,
+          depthComplement.maxFillableUSD,
+        )
+
+        if (maxFillable < 1.00) {
+          this.log(`Insufficient depth: dipped=$${depthDipped.maxFillableUSD.toFixed(2)}, complement=$${depthComplement.maxFillableUSD.toFixed(2)} — skipping`)
+          rejectionTracker.record('liquidity', 'dip', `depth too thin: $${maxFillable.toFixed(2)}`)
+          round.leg1Executed = false
+          this.arbRounds.push(round)
+          return
+        }
+
+        if (maxFillable < tradeAmount) {
+          const capped = maxFillable * 0.9 // 10% safety margin
+          this.log(`Order capped by depth: $${tradeAmount.toFixed(2)} → $${capped.toFixed(2)}`)
+          tradeAmount = Math.max(1, capped)
+        }
+      } catch {
+        // Depth check is best-effort — proceed with original size
+      }
+
+      // ========================
+      // LEG 1: Buy dipped outcome (GTD — sits on book up to 2 minutes)
+      // ========================
+      this.log(`LEG 1: Buying ${event.outcome.toUpperCase()} at ${(event.currentPrice * 100).toFixed(1)}¢ (GTD)`)
 
       const leg1Result = await tradingService.placeBet(
         event.market,
         event.outcome,
         tradeAmount,
-        { skipGtcFallback: true }
+        { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 }
       )
 
       if (!leg1Result.success) {
@@ -636,15 +674,15 @@ export class DipArbStrategy extends BaseStrategy {
       }
 
       // ========================
-      // LEG 2: Buy complement outcome
+      // LEG 2: Buy complement outcome (GTD — sits on book up to 2 minutes)
       // ========================
-      this.log(`LEG 2: Buying ${complementOutcome.toUpperCase()} at ${(leg2Price * 100).toFixed(1)}¢`)
+      this.log(`LEG 2: Buying ${complementOutcome.toUpperCase()} at ${(leg2Price * 100).toFixed(1)}¢ (GTD)`)
 
       const leg2Result = await tradingService.placeBet(
         event.market,
         complementOutcome,
         tradeAmount,
-        { skipGtcFallback: true }
+        { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 }
       )
 
       if (!leg2Result.success) {

@@ -98,6 +98,16 @@ vi.mock('@/services/trading/TradeLogger', () => ({
   },
 }))
 
+// Mock orderBookDepth (imported by DipArbStrategy for depth-capped sizing)
+const mockCheckBuyDepth = vi.fn()
+vi.mock('@/services/trading/OrderBookDepth', () => ({
+  orderBookDepth: {
+    checkBuyDepth: (...args: unknown[]) => mockCheckBuyDepth(...args),
+    checkSellDepth: vi.fn().mockResolvedValue({ sufficient: true, maxFillableUSD: 1000 }),
+    getMaxFillableSize: vi.fn().mockResolvedValue(1000),
+  },
+}))
+
 // ==========================================
 // HELPERS
 // ==========================================
@@ -168,6 +178,16 @@ describe('DipArbStrategy', () => {
       Promise.resolve(createTestMarket({ id: marketId }))
     )
 
+    // Default: sufficient depth for both legs
+    mockCheckBuyDepth.mockResolvedValue({
+      sufficient: true,
+      maxFillableUSD: 1000,
+      availableLiquidity: 1000,
+      estimatedFillPrice: 0.35,
+      estimatedSlippage: 0.001,
+      bestPrice: 0.35,
+    })
+
     // Import fresh instance each test
     const { DipArbStrategy } = await import('../DipArbStrategy')
     strategy = new DipArbStrategy()
@@ -206,10 +226,10 @@ describe('DipArbStrategy', () => {
 
       // Leg 1: Buy YES — penny mode: max(1, 5 * maxLegPrice) = max(1, 5*0.60) = 3
       expect(mockPlaceBet).toHaveBeenCalledTimes(2)
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
 
       // Leg 2: Buy NO
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
 
       // Merge positions
       expect(mockMergePositions).toHaveBeenCalledWith(
@@ -311,7 +331,7 @@ describe('DipArbStrategy', () => {
 
       // Leg 1 should execute (uses original price)
       expect(mockPlaceBet).toHaveBeenCalledTimes(1)
-      expect(mockPlaceBet).toHaveBeenCalledWith(event.market, 'yes', 3, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenCalledWith(event.market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
 
       // Leg 2 should NOT execute — slippage check aborted
       // Instead, Leg 1 should be sold back
@@ -510,8 +530,8 @@ describe('DipArbStrategy', () => {
       await dipCallback!(event)
 
       // Leg 1 = YES, Leg 2 = NO
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true })
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
     })
 
     it('buys YES when NO dips', async () => {
@@ -529,8 +549,8 @@ describe('DipArbStrategy', () => {
       await dipCallback!(event)
 
       // Leg 1 = NO, Leg 2 = YES
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, market, 'no', 3, { skipGtcFallback: true })
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, market, 'yes', 3, { skipGtcFallback: true })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, market, 'no', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
     })
   })
 })
