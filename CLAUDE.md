@@ -6,8 +6,9 @@ Browser-based TypeScript/React Polymarket trading bot. Vite 7, React 18, Zustand
 
 ```bash
 npm run dev          # Vite dev server on :4000 (auto-opens browser)
+npm run dev:strict-csp # Dev server with strict CSP headers
 npm run build        # Production build (uses vite build, NOT tsc)
-npm test             # Vitest single run (415 tests)
+npm test             # Vitest single run (445 tests)
 npm run test:watch   # Vitest watch mode
 npm run lint         # ESLint (.eslintrc.cjs)
 npm run preview      # Preview production build
@@ -40,7 +41,7 @@ src/
 ├── components/
 │   ├── charts/        # MatrixLineChart, MatrixAreaChart, MatrixBarChart, MatrixPieChart,
 │   │                  # MatrixGauge, MatrixSparkline
-│   ├── dashboard/     # 20 components: ActivePositionsCard, AssetCard, AssetCardsRow,
+│   ├── dashboard/     # 21 components: ActivePositionsCard, AssetCard, AssetCardsRow,
 │   │                  # DiagnosticsBanner, FollowTraderPanel, HistoryView, PerformancePanel,
 │   │                  # PortfolioPanel, ReadinessPanel, RecentTradesGrid, SniperTopBar,
 │   │                  # SpotCryptoView, StrategyDropdown, WindowTimer, MatrixDataTable, etc.
@@ -64,7 +65,7 @@ src/
 │   │   │              # RejectionTracker, MarketScanner
 │   │   └── __tests__/ # RiskManager, PLM, KellySizer, EdgeTracker tests
 │   └── wallet/        # WalletService (Ethers.js wrapper)
-├── stores/            # settingsStore (v24), walletStore, notificationStore, balanceHistoryStore
+├── stores/            # settingsStore (v26), walletStore, notificationStore, balanceHistoryStore
 ├── types/             # api.ts, wallet.ts, index.ts
 ├── utils/             # secureStorage, cn (tailwind-merge)
 └── views/             # TradingTerminal, DashboardView, PortfolioView, ActivityView, SettingsView, NotFoundView
@@ -125,7 +126,7 @@ src/
 
 - **Framework**: Vitest + jsdom + @testing-library/react
 - **Config**: `vitest.config.ts` (globals enabled, jsdom environment)
-- **415 tests** across 17 files: RiskManager (36), PLM (30), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (21), BtcUpDown (34), MeanReversion (53), EdgeTracker (24), CopyTrading (21), MCP tools (12), MCP rounding (11), MCP auth (8)
+- **445 tests** across 18 files: RiskManager (36), PLM (30), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (21), BtcUpDown (34), MeanReversion (53), EdgeTracker (24), CopyTrading (21), ArbitrageProfitFormula (30), MCP tools (12), MCP rounding (11), MCP auth (8)
 - Test files live in `__tests__/` directories next to the code they test
 
 ## Environment Setup

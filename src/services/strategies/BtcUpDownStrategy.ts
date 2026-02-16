@@ -10,27 +10,17 @@ import { edgeTracker } from '@/services/trading/EdgeTracker'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
+import {
+  computeSignal as _computeSignal,
+  computeVolatility as _computeVolatility,
+  classifyRegime as _classifyRegime,
+  computeRSI as _computeRSI,
+  linearRegressionSlope as _linearRegressionSlope,
+} from './btcupdown/signalEngine'
 
-// ==========================================
-// TYPES
-// ==========================================
-
-export interface SignalInput {
-  asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'
-  currentPrice: number       // Live asset price from oracle
-  windowOpenPrice: number    // "Price to beat" from market question
-  upPrice: number            // Current Up outcome price (0-1)
-  downPrice: number          // Current Down outcome price (0-1)
-  timeIntoWindowMs: number   // Elapsed ms since window start
-  windowDurationMs: number   // 15 * 60 * 1000 or longer for 9PM events
-  recentPriceHistory: Array<{ price: number; timestamp: number }>
-  market: Market
-}
-
-export interface Signal {
-  direction: 'up' | 'down'
-  confidence: number // 0-1
-}
+// Re-export types from signalEngine for backward compatibility
+export type { SignalInput, Signal } from './btcupdown/signalEngine'
+import type { SignalInput, Signal } from './btcupdown/signalEngine'
 
 // ==========================================
 // DEFAULTS
@@ -853,6 +843,30 @@ export class BtcUpDownStrategy extends BaseStrategy {
       // Multi-factor mechanical signal (with vol normalization + RSI)
       const signal = this.computeSignal(signalInput)
 
+      // Historical enrichment — non-blocking, best-effort confidence adjustment
+      try {
+        const apiKey = useSettingsStore.getState().polyBacktestApiKey || import.meta.env.VITE_POLYBACKTEST_API_KEY
+        if (apiKey) {
+          const { historicalEnrichment } = await import('./btcupdown/HistoricalEnrichment')
+          const hour = new Date().getUTCHours()
+          const dow = new Date().getUTCDay()
+          const durationKeyMap: Record<string, string> = { '5m': '5m', '15m': '15m', '1hr': '1hr', '4hr': '4hr', '24hr': '24hr' }
+          const backtestType = durationKeyMap[durationLabel]
+          if (backtestType) {
+            const enrichment = await historicalEnrichment.getEnrichment(
+              backtestType as import('@/types').PolyBacktestMarketType, hour, dow,
+            )
+            if (enrichment.sampleSize >= 20) {
+              // Conservative: max +/-5% confidence adjustment based on historical win rate
+              const historicalDelta = (enrichment.historicalWinRate - 0.5) * 0.10
+              signal.confidence = Math.max(0, Math.min(1, signal.confidence + historicalDelta))
+            }
+          }
+        }
+      } catch {
+        // Enrichment unavailable — continue without
+      }
+
       // Store for dashboard display + emit event for real-time UI updates
       this._lastSignals.set(asset, { signal, windowOpenPrice, currentPrice })
       this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice })
@@ -1103,57 +1117,7 @@ Respond ONLY with JSON:
    * - RSI filter: -15% confidence when entering overbought/oversold
    */
   private computeSignal(input: SignalInput): Signal {
-    const {
-      currentPrice, windowOpenPrice, upPrice, downPrice,
-      timeIntoWindowMs, windowDurationMs, recentPriceHistory,
-    } = input
-
-    const timeScale = windowDurationMs / BASELINE_WINDOW_MS          // 1.0 for 15m
-
-    // === Factor 1: MOMENTUM — vol-normalized z-score ===
-    // Uses capped time normalization: sqrt(min(remaining, elapsed)) prevents
-    // signal suppression early in windows when remaining time is large.
-    const priceDelta = (currentPrice - windowOpenPrice) / windowOpenPrice
-    const sigma = this.computeVolatility(recentPriceHistory)
-    const elapsedS = Math.max(1, timeIntoWindowMs / 1000)
-    const windowRemainingS = Math.max(1, (windowDurationMs - timeIntoWindowMs) / 1000)
-    const timeNorm = Math.sqrt(Math.min(windowRemainingS, elapsedS))
-    let momentumScore: number
-    if (sigma > 0) {
-      const zScore = priceDelta / (sigma * timeNorm)
-      momentumScore = Math.tanh(zScore * 1.5)  // smooth saturation to [-1, 1]
-    } else {
-      // Fallback: fixed scaler when insufficient data for vol estimate
-      momentumScore = Math.max(-1, Math.min(1, priceDelta * 50 / Math.sqrt(timeScale)))
-    }
-
-    const direction: 'up' | 'down' = priceDelta >= 0 ? 'up' : 'down'
-
-    // === Factor 2: VELOCITY — linear regression slope ===
-    let velocityScore = 0
-    if (recentPriceHistory.length >= 3) {
-      const slope = this.linearRegressionSlope(recentPriceHistory)
-      const relativeSlope = slope / windowOpenPrice
-      const velocityScaler = 30 / Math.sqrt(timeScale)
-      velocityScore = Math.max(-1, Math.min(1, relativeSlope * 60_000 * velocityScaler))
-    }
-
-    // === Factor 3: TIME DECAY — direction consistency ===
-    const timeRatio = Math.max(0, Math.min(1, timeIntoWindowMs / windowDurationMs))
-    let directionConsistency = 0
-    if (recentPriceHistory.length >= 2) {
-      const onSameSide = recentPriceHistory.filter(p =>
-        direction === 'up' ? p.price >= windowOpenPrice : p.price < windowOpenPrice,
-      ).length
-      directionConsistency = onSameSide / recentPriceHistory.length
-    }
-    const timeDecayBoost = timeRatio * directionConsistency
-
-    // === Factor 4: VALUE BET — cheapness of target outcome ===
-    const targetPrice = direction === 'up' ? upPrice : downPrice
-    const cheapness = Math.max(0, Math.min(1, 1 - targetPrice))
-
-    // === Factor 5: ORDER FLOW IMBALANCE ===
+    // Compute live order flow imbalance from MicrostructureAnalyzer
     let imbalanceScore = 0
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1164,6 +1128,7 @@ Respond ONLY with JSON:
         if (signal && signal.signalConfidence > 0.3) {
           const isFirstUp = input.market.outcomes[0] === 'Up' || input.market.question.toUpperCase().includes('UP')
           const adjustedSignal = isFirstUp ? signal.compositeSignal : -signal.compositeSignal
+          const direction = ((input.currentPrice - input.windowOpenPrice) / input.windowOpenPrice) >= 0 ? 'up' : 'down'
           imbalanceScore = direction === 'up' ? adjustedSignal : -adjustedSignal
         }
       }
@@ -1171,138 +1136,27 @@ Respond ONLY with JSON:
       // MicrostructureAnalyzer not available — continue without
     }
 
-    // === COMPOSITE with dynamic weights ===
-    const wMomentum = 0.25
-    const wVelocity = 0.25
-    const wTime     = 0.20
-    const wValue    = 0.15
-    const wFlow     = 0.15
-
-    const rawScore =
-      momentumScore * wMomentum +
-      velocityScore * wVelocity +
-      timeDecayBoost * wTime +
-      cheapness * wValue +
-      imbalanceScore * wFlow
-
-    // Sqrt scaling: stretches [0, 0.5] → [0, 0.7]
-    const amplifiedScore = Math.sign(rawScore) * Math.sqrt(Math.abs(rawScore))
-
-    // Noise dampening for shorter windows
-    const noiseScale = Math.sqrt(timeScale)
-    const noiseDampener = 0.85 + 0.15 * noiseScale
-    let confidence = Math.max(0, Math.min(1, Math.abs(amplifiedScore) * noiseDampener))
-
-    // === REGIME BOOST ===
-    if (this.btcConfig.regimeFilterEnabled) {
-      const regime = this.classifyRegime(recentPriceHistory)
-      if (regime === 'trending') {
-        confidence = Math.min(1, confidence * 1.10)  // +10% in trending markets
-      }
-      // Note: 'choppy' regime is gate-filtered in analyzeAndTrade before computeSignal
-    }
-
-    // === RSI FILTER ===
-    if (this.btcConfig.rsiFilterEnabled && recentPriceHistory.length >= 20) {
-      const rsi = this.computeRSI(recentPriceHistory, 14)
-      if ((rsi > 75 && direction === 'up') || (rsi < 25 && direction === 'down')) {
-        confidence *= 0.85  // -15% when chasing extended moves
-      }
-    }
-
-    // === EARLY WINDOW RAMP ===
-    const earlyRampMs = 60_000 * timeScale
-    if (timeIntoWindowMs < earlyRampMs) {
-      const earlyPenalty = 0.85 + 0.15 * (timeIntoWindowMs / earlyRampMs)
-      confidence *= earlyPenalty
-    }
-
-    return { direction, confidence }
+    return _computeSignal(input, {
+      regimeFilterEnabled: this.btcConfig.regimeFilterEnabled,
+      rsiFilterEnabled: this.btcConfig.rsiFilterEnabled,
+      baselineWindowMs: BASELINE_WINDOW_MS,
+    }, imbalanceScore)
   }
 
-  /**
-   * Compute volatility (stddev of returns) from price history.
-   * Returns 0 if insufficient data (< 5 points).
-   */
   private computeVolatility(prices: Array<{ price: number; timestamp: number }>): number {
-    if (prices.length < 5) return 0
-    const returns: number[] = []
-    for (let i = 1; i < prices.length; i++) {
-      if (prices[i].price > 0 && prices[i - 1].price > 0) {
-        returns.push((prices[i].price - prices[i - 1].price) / prices[i - 1].price)
-      }
-    }
-    if (returns.length < 3) return 0
-    const mean = returns.reduce((s, r) => s + r, 0) / returns.length
-    const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length
-    return Math.sqrt(variance)
+    return _computeVolatility(prices)
   }
 
-  /**
-   * Classify market regime using efficiency ratio.
-   * Efficiency = |net displacement| / total path length.
-   *   < 0.15 → choppy (mean-reverting, skip trading)
-   *   > 0.40 → trending (boost confidence)
-   *   else   → neutral
-   */
   classifyRegime(prices: Array<{ price: number; timestamp: number }>): 'choppy' | 'trending' | 'neutral' {
-    if (prices.length < 10) return 'neutral'
-    const netDisplacement = Math.abs(prices[prices.length - 1].price - prices[0].price)
-    let totalPath = 0
-    for (let i = 1; i < prices.length; i++) {
-      totalPath += Math.abs(prices[i].price - prices[i - 1].price)
-    }
-    if (totalPath === 0) return 'neutral'
-    const efficiency = netDisplacement / totalPath
-    if (efficiency < 0.15) return 'choppy'
-    if (efficiency > 0.40) return 'trending'
-    return 'neutral'
+    return _classifyRegime(prices)
   }
 
-  /**
-   * Fast RSI computation over price history.
-   * @param period Number of intervals for RSI (default 14)
-   */
   private computeRSI(prices: Array<{ price: number; timestamp: number }>, period = 14): number {
-    if (prices.length < period + 1) return 50  // neutral default
-    const recent = prices.slice(-period - 1)
-    let gains = 0, losses = 0
-    for (let i = 1; i < recent.length; i++) {
-      const change = recent[i].price - recent[i - 1].price
-      if (change > 0) gains += change
-      else losses -= change
-    }
-    if (losses === 0) return 100
-    if (gains === 0) return 0
-    const rs = (gains / period) / (losses / period)
-    return 100 - 100 / (1 + rs)
+    return _computeRSI(prices, period)
   }
 
-  /**
-   * Compute linear regression slope over price history.
-   * Returns price change per millisecond.
-   */
-  private linearRegressionSlope(
-    points: Array<{ price: number; timestamp: number }>,
-  ): number {
-    const n = points.length
-    if (n < 2) return 0
-
-    // Use relative timestamps (ms from first point)
-    const t0 = points[0].timestamp
-    let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0
-    for (const p of points) {
-      const x = p.timestamp - t0
-      const y = p.price
-      sumX += x
-      sumY += y
-      sumXY += x * y
-      sumXX += x * x
-    }
-
-    const denom = n * sumXX - sumX * sumX
-    if (Math.abs(denom) < 1e-12) return 0
-    return (n * sumXY - sumX * sumY) / denom
+  private linearRegressionSlope(points: Array<{ price: number; timestamp: number }>): number {
+    return _linearRegressionSlope(points)
   }
 
   // ==========================================

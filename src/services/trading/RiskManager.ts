@@ -52,11 +52,11 @@ export interface RiskManagerStatus {
 // ==========================================
 
 const DEFAULT_CONFIG: RiskManagerConfig = {
-  dailyLossLimit: 4,
-  weeklyLossLimit: 20,
+  dailyLossLimit: 3,
+  weeklyLossLimit: 10,
   maxTradesPerHour: 20,
   consecutiveFailureLimit: 5,
-  minBalanceForTrade: 1.50,
+  minBalanceForTrade: 1.00,
   minMaticForGas: 0.01,
   maxDrawdownPercent: 0.30,       // 30% drawdown triggers emergency stop
   maxPerMarketExposure: 0.20,     // 20% of capital max per market

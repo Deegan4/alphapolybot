@@ -787,3 +787,116 @@ export interface UserActivity {
   side?: 'BUY' | 'SELL'
   asset_id?: string
 }
+
+// ==========================================
+// POLYBACKTEST API TYPES
+// ==========================================
+
+export type PolyBacktestMarketType = '5m' | '15m' | '1hr' | '4hr' | '24hr'
+
+export interface PolyBacktestMarket {
+  market_id: string
+  event_id: string
+  slug: string
+  market_type: PolyBacktestMarketType
+  start_time: string       // ISO8601
+  end_time: string         // ISO8601
+  btc_price_start: number | null
+  btc_price_end: number | null
+  condition_id: string | null
+  clob_token_up: string | null
+  clob_token_down: string | null
+  winner: 'up' | 'down' | null
+  final_volume: number | null
+  final_liquidity: number | null
+  resolved_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface PolyBacktestOrderBookLevel {
+  price: number
+  size: number
+}
+
+export interface PolyBacktestOrderBook {
+  bids: PolyBacktestOrderBookLevel[]
+  asks: PolyBacktestOrderBookLevel[]
+}
+
+export interface PolyBacktestSnapshot {
+  id: string
+  time: string             // ISO8601
+  market_id: string
+  btc_price: number
+  price_up: number
+  price_down: number
+  orderbook_up: PolyBacktestOrderBook | null
+  orderbook_down: PolyBacktestOrderBook | null
+}
+
+export interface PolyBacktestMarketsResponse {
+  markets: PolyBacktestMarket[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface PolyBacktestSnapshotsResponse {
+  market: PolyBacktestMarket
+  snapshots: PolyBacktestSnapshot[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface PolyBacktestHealthResponse {
+  status: string
+  timestamp: string
+}
+
+// ==========================================
+// BACKTEST RESULT TYPES
+// ==========================================
+
+export interface BacktestTradeRecord {
+  snapshotTime: string
+  direction: 'up' | 'down'
+  confidence: number
+  entryPrice: number          // outcome price paid
+  btcPriceAtEntry: number
+  resolved: boolean
+  winner: 'up' | 'down' | null
+  pnl: number                 // after fee
+  holdTimeMs: number
+}
+
+export interface BacktestSummary {
+  totalTrades: number
+  wins: number
+  losses: number
+  winRate: number
+  totalPnl: number
+  avgPnl: number
+  avgHoldTimeMs: number
+  maxDrawdown: number
+  sharpeRatio: number | null
+  profitFactor: number | null
+}
+
+export interface BacktestResult {
+  marketId: string
+  slug: string
+  marketType: PolyBacktestMarketType
+  config: Partial<BtcUpDownConfig>
+  trades: BacktestTradeRecord[]
+  summary: BacktestSummary
+}
+
+export interface BacktestEnrichment {
+  historicalWinRate: number
+  avgSpread: number
+  sampleSize: number
+  timeOfDayWinRate: number | null
+  dayOfWeekWinRate: number | null
+}

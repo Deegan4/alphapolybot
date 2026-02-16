@@ -17,6 +17,7 @@ vi.mock('@/services/api/CLOBClient', () => ({
       asks: [{ price: 0.46, size: 100 }],
     }),
     cancelOrder: vi.fn().mockResolvedValue(undefined),
+    getFeeRateBps: vi.fn().mockResolvedValue(100),
   },
 }))
 
@@ -154,7 +155,7 @@ describe('ProjectFWStrategy', () => {
       const config = strategy.getFWConfig()
       expect(config.alpha).toBe(0.5)
       expect(config.tradeSize).toBe(5)
-      expect(config.minProfitBps).toBe(50)
+      expect(config.minProfitBps).toBe(30)
       expect(config.maxConcurrentArbs).toBe(2)
       expect(config.takerFeeBps).toBe(100)
     })
@@ -165,7 +166,7 @@ describe('ProjectFWStrategy', () => {
       expect(config.tradeSize).toBe(5)
       expect(config.alpha).toBe(0.8)
       // Other values remain default
-      expect(config.minProfitBps).toBe(50)
+      expect(config.minProfitBps).toBe(30)
     })
 
     it('emits configUpdated event', () => {

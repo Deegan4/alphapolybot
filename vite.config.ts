@@ -51,6 +51,12 @@ export default defineConfig(({ mode }) => {
           rewrite: path => path.replace(/^\/api\/coinbase/, ''),
           secure: true,
         },
+        '/api/polybacktest': {
+          target: 'https://api.polybacktest.com',
+          changeOrigin: true,
+          rewrite: path => path.replace(/^\/api\/polybacktest/, ''),
+          secure: true,
+        },
       },
     },
     build: {

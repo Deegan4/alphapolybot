@@ -766,6 +766,13 @@ export class WalletService {
    *   - amount = number of complete sets to merge (in USDC decimals, 6)
    */
   async mergePositions(conditionId: string, amount: number): Promise<TransactionResult> {
+    // Gate on dry-run: simulate success without touching the chain
+    const { useSettingsStore } = await import('@/stores/settingsStore')
+    if (useSettingsStore.getState().dryRun) {
+      console.log(`[DRY RUN] Skipping merge of ${amount.toFixed(2)} sets — simulating success`)
+      return { success: true }
+    }
+
     if (!this.wallet) {
       return { success: false, error: 'Wallet not connected' }
     }
@@ -777,8 +784,11 @@ export class WalletService {
         this.wallet
       )
 
-      // Convert to 6-decimal USDC units (both YES and NO tokens use USDC decimals)
-      const mergeAmount = ethers.parseUnits(amount.toString(), 6)
+      // Convert to 6-decimal USDC units (both YES and NO tokens use USDC decimals).
+      // Truncate to 6 decimals to avoid ethers "too many decimals" error from
+      // floating-point arithmetic (e.g. 5 * 0.98 = 4.8999999999999995).
+      const truncated = Math.floor(amount * 1e6) / 1e6
+      const mergeAmount = ethers.parseUnits(truncated.toString(), 6)
 
       // Binary market partition: outcome slots 1 (YES) and 2 (NO)
       const partition = [1, 2]
@@ -814,6 +824,80 @@ export class WalletService {
       }
     }
   }
+
+  /**
+   * Split USDC.e into conditional tokens (Buy-a-Bundle).
+   *
+   * Inverse of mergePositions. Takes USDC.e collateral and creates
+   * one conditional token for each outcome in the market.
+   * Used by the overpriced arbitrage path from the Bregman Projection paper:
+   *   Buy complete set at $1 → sell each outcome at bid > $1 total.
+   *
+   * CTF.splitPosition(collateralToken, parentCollectionId, conditionId, partition, amount):
+   *   - Same params as mergePositions
+   *   - Requires USDC.e approval to CTF contract
+   *   - Creates `amount` of each conditional token
+   */
+  async splitPosition(conditionId: string, amount: number): Promise<TransactionResult> {
+    // Gate on dry-run: simulate success without touching the chain
+    const { useSettingsStore } = await import('@/stores/settingsStore')
+    if (useSettingsStore.getState().dryRun) {
+      console.log(`[DRY RUN] Skipping split of ${amount.toFixed(2)} USDC.e — simulating success`)
+      return { success: true }
+    }
+
+    if (!this.wallet) {
+      return { success: false, error: 'Wallet not connected' }
+    }
+
+    try {
+      const ctfContract = new ethers.Contract(
+        CONTRACT_ADDRESSES.CTF,
+        CTF_ABI,
+        this.wallet
+      )
+
+      // Convert to 6-decimal USDC units.
+      // Truncate to 6 decimals to avoid ethers "too many decimals" error from
+      // floating-point arithmetic (e.g. 5 * 0.98 = 4.8999999999999995).
+      const truncated = Math.floor(amount * 1e6) / 1e6
+      const splitAmount = ethers.parseUnits(truncated.toString(), 6)
+
+      // Binary market partition: outcome slots 1 (YES) and 2 (NO)
+      const partition = [1, 2]
+
+      // parentCollectionId = bytes32(0) for top-level condition
+      const parentCollectionId = ethers.ZeroHash
+
+      console.log(`[WalletService] Splitting ${amount} USDC.e into conditional tokens for condition ${conditionId}`)
+
+      const tx = await ctfContract.splitPosition(
+        CONTRACT_ADDRESSES.USDC,
+        parentCollectionId,
+        conditionId,
+        partition,
+        splitAmount
+      )
+
+      const receipt = await tx.wait()
+
+      console.log(`[WalletService] Split successful — tx: ${receipt.hash}`)
+
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed,
+      }
+    } catch (error) {
+      console.error('[WalletService] Split position failed:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Split failed',
+      }
+    }
+  }
+
   /**
    * Redeem resolved CTF positions for USDC.e.
    *
@@ -827,6 +911,13 @@ export class WalletService {
    * it redeems the caller's entire balance automatically.
    */
   async redeemPositions(conditionId: string): Promise<TransactionResult> {
+    // Gate on dry-run: simulate success without touching the chain
+    const { useSettingsStore } = await import('@/stores/settingsStore')
+    if (useSettingsStore.getState().dryRun) {
+      console.log(`[DRY RUN] Skipping redeem for condition ${conditionId} — simulating success`)
+      return { success: true }
+    }
+
     if (!this.wallet) {
       return { success: false, error: 'Wallet not connected' }
     }

@@ -27,7 +27,7 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
   maxIterations: 50,
   // Trading parameters
   tradeSize: 5, // Polymarket minimum order size is 5 shares
-  minProfitBps: 50,
+  minProfitBps: 30, // 30bps — catches thin-edge arbs at small bankroll ($10-25)
   maxConcurrentArbs: 2,
   scanIntervalMs: 30000, // 30s (was 15s) — gives time for 75 order book checks
   cooldownMs: 60000,
@@ -47,7 +47,7 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
   takeProfitPercent: 0.10,
   // Cross-market analysis (validation-only MVP)
   enableCrossMarket: false,
-  crossMarketBudgetUSD: 0.50,
+  crossMarketBudgetUSD: 0.25,
   mutexConfidenceThreshold: 0.75,
   crossMarketCacheTTL: 3_600_000,
   maxPairsPerLLMCall: 10,
@@ -105,6 +105,8 @@ export class ProjectFWStrategy extends BaseStrategy {
         gasEstimateUSD: this.fwConfig.gasEstimateUSD,
         enableMultiOutcome: this.fwConfig.enableMultiOutcome,
         tradeSize: this.fwConfig.tradeSize,
+        maxConcurrency: 10,
+        maxOpportunitiesPerScan: 5,
       }
     )
   }
@@ -256,7 +258,8 @@ export class ProjectFWStrategy extends BaseStrategy {
     const priceSumDisplay = (priceSum * 100).toFixed(1)
     const profitDisplay = (opp.netProfitUSD * 100).toFixed(2)
 
-    this.log(`ARB OPPORTUNITY: ${opp.market.question.substring(0, 40)}...`)
+    const arbPath = opp.arbType === 'overpriced' ? 'OVERPRICED (bundle→sell)' : 'UNDERPRICED (buy→merge)'
+    this.log(`ARB OPPORTUNITY [${arbPath}]: ${opp.market.question.substring(0, 40)}...`)
     this.log(`  Price sum: ${priceSumDisplay}¢ | Net profit: ${profitDisplay}¢ | KL: ${opp.result.klDivergence.toFixed(4)}`)
 
     activityLogger.logSystem(
@@ -340,9 +343,18 @@ export class ProjectFWStrategy extends BaseStrategy {
             return
           }
 
+          // Recompute askSum from fresh order books using VWAP pricing
+          const freshAskPrices = freshSnapshot.depth.map((d, idx) => {
+            const vwap = ArbitrageScanner.computeVWAP(d.asks, this.fwConfig.tradeSize)
+            return vwap?.vwap ?? freshSnapshot.prices[idx]
+          })
+          const freshAskSum = freshAskPrices.reduce((s, p) => s + p, 0)
+          const freshDeviation = freshAskSum < 1.0 ? 1 - freshAskSum : 0
+
           const freshNetProfit = this.scanner.computeNetProfit(
-            freshResult.guaranteedProfit,
-            freshResult.tradeLegs.length
+            freshDeviation,
+            freshResult.tradeLegs.length,
+            opp.feeRateBps
           )
           if (freshNetProfit <= 0) {
             this.log(`Revalidation: net profit $${freshNetProfit.toFixed(4)} ≤ 0 — aborting`)
@@ -382,56 +394,135 @@ export class ProjectFWStrategy extends BaseStrategy {
         const fStar = KellySizer.arbKelly(opp.result.guaranteedProfit)
         effectiveTradeSize = KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar })
       }
-      for (let i = 0; i < opp.result.tradeLegs.length; i++) {
-        const leg = opp.result.tradeLegs[i]
-        const amount = effectiveTradeSize * leg.proportion
-        const outcomeName = opp.snapshot.outcomes[leg.outcomeIndex]
-        // For binary markets: map to 'yes'/'no'. For multi-outcome: use explicit outcomeIndex.
-        const isBinary = opp.snapshot.outcomes.length === 2
-        const outcome: 'yes' | 'no' = isBinary
-          ? (outcomeName.toLowerCase() === 'yes' ? 'yes' : 'no')
-          : 'yes' // placeholder — outcomeIndex below overrides the token selection
 
-        this.log(`LEG ${i + 1}: ${leg.side} ${outcomeName} $${amount.toFixed(2)} at ${(leg.price * 100).toFixed(1)}¢`)
+      // ── OVERPRICED PATH: Buy-a-Bundle at $1, sell outcomes at bid ──
+      // Paper: π = max(0, (bidSum - 1) * tradeSize - N·γ) - gas
+      // Buy-a-Bundle avoids the 2N·γ short-sell penalty from the paper.
+      if (opp.arbType === 'overpriced') {
+        // Step 1: Buy a complete set (on-chain splitPosition or mintSet)
+        const bundleShares = effectiveTradeSize // $1 per complete set = effectiveTradeSize sets
+        this.log(`OVERPRICED ARB: Buy-a-Bundle (${bundleShares.toFixed(2)} sets at $1 each)`)
 
-        const result = await tradingService.placeBet(
-          opp.market,
-          outcome,
-          amount,
-          { skipGtcFallback: true, outcomeIndex: leg.outcomeIndex }
-        )
+        try {
+          const splitResult = await walletService.splitPosition(
+            opp.market.conditionId,
+            bundleShares
+          )
 
-        const arbLeg: FWArbLeg = {
-          tokenId: opp.snapshot.tokenIds[leg.outcomeIndex],
-          outcome: opp.snapshot.outcomes[leg.outcomeIndex],
-          side: leg.side,
-          shares: result.filledSize ?? amount / leg.price,
-          price: leg.price,
-          orderId: result.orderId,
-          executed: result.success,
-        }
-        round.legs.push(arbLeg)
+          if (!splitResult.success) {
+            this.log(`Bundle purchase failed: ${splitResult.error} — aborting`)
+            activityLogger.logError(`FW overpriced: bundle purchase failed: ${splitResult.error}`)
+            round.status = 'failed'
+            this.arbRounds.push(round)
+            return
+          }
 
-        if (!result.success) {
-          // Leg failed — unwind previous legs
-          activityLogger.logError(`Leg ${i + 1} failed: ${result.error}`)
-          await this.unwindLegs(round, opp)
+          round.totalCost = bundleShares // Each set costs $1
+          activityLogger.logTrade(
+            `FW BUNDLE: Bought ${bundleShares.toFixed(2)} complete sets at $1`,
+            { conditionId: opp.market.conditionId, txHash: splitResult.txHash }
+          )
+        } catch (error) {
+          this.logError('Bundle purchase threw', error)
           round.status = 'failed'
           this.arbRounds.push(round)
           return
         }
 
-        round.totalCost += amount
+        // Step 2: Sell each outcome at bid price
+        for (let i = 0; i < opp.result.tradeLegs.length; i++) {
+          const leg = opp.result.tradeLegs[i]
+          const tokenId = opp.snapshot.tokenIds[leg.outcomeIndex]
+          const sharesToSell = bundleShares // 1 share of each outcome per set
 
-        activityLogger.logTrade(
-          `FW LEG ${i + 1}: ${leg.side} ${opp.snapshot.outcomes[leg.outcomeIndex]} $${amount.toFixed(2)}`,
-          { price: leg.price, orderId: result.orderId }
-        )
+          this.log(`SELL LEG ${i + 1}: SELL ${opp.snapshot.outcomes[leg.outcomeIndex]} ${sharesToSell.toFixed(2)} shares at ${(leg.price * 100).toFixed(1)}¢`)
+
+          const sellResult = await tradingService.placeSell(tokenId, sharesToSell)
+
+          const arbLeg: FWArbLeg = {
+            tokenId,
+            outcome: opp.snapshot.outcomes[leg.outcomeIndex],
+            side: 'SELL',
+            shares: sellResult.filledSize ?? sharesToSell,
+            price: leg.price,
+            orderId: sellResult.orderId,
+            executed: sellResult.success,
+          }
+          round.legs.push(arbLeg)
+
+          if (!sellResult.success) {
+            activityLogger.logError(`Sell leg ${i + 1} failed: ${sellResult.error}`)
+            // Don't unwind — we own the shares, PLM will track them
+            this.trackFallbackPosition(arbLeg, opp)
+          } else {
+            activityLogger.logSell(
+              `FW SELL ${i + 1}: ${opp.snapshot.outcomes[leg.outcomeIndex]} ${sharesToSell.toFixed(2)} shares`,
+              { price: leg.price, orderId: sellResult.orderId }
+            )
+          }
+        }
+
+        // All sell legs attempted
+        const successLegs = round.legs.filter(l => l.executed).length
+        round.status = successLegs === opp.result.tradeLegs.length ? 'complete' : 'partial'
+        this.log(`OVERPRICED ARB: ${successLegs}/${opp.result.tradeLegs.length} sell legs executed`)
+      } else {
+        // ── UNDERPRICED PATH: Buy all outcomes, merge for $1 ──
+        // Paper: π = max(0, (1 - askSum) * tradeSize - N·γ) - gas
+        for (let i = 0; i < opp.result.tradeLegs.length; i++) {
+          const leg = opp.result.tradeLegs[i]
+          const amount = effectiveTradeSize * leg.proportion
+          const outcomeName = opp.snapshot.outcomes[leg.outcomeIndex]
+          // For binary markets: map to 'yes'/'no'. For multi-outcome: use explicit outcomeIndex.
+          const isBinary = opp.snapshot.outcomes.length === 2
+          const outcome: 'yes' | 'no' = isBinary
+            ? (outcomeName.toLowerCase() === 'yes' ? 'yes' : 'no')
+            : 'yes' // placeholder — outcomeIndex below overrides the token selection
+
+          this.log(`LEG ${i + 1}: ${leg.side} ${outcomeName} $${amount.toFixed(2)} at ${(leg.price * 100).toFixed(1)}¢`)
+
+          const result = await tradingService.placeBet(
+            opp.market,
+            outcome,
+            amount,
+            { skipGtcFallback: true, outcomeIndex: leg.outcomeIndex }
+          )
+
+          const arbLeg: FWArbLeg = {
+            tokenId: opp.snapshot.tokenIds[leg.outcomeIndex],
+            outcome: opp.snapshot.outcomes[leg.outcomeIndex],
+            side: leg.side,
+            shares: result.filledSize ?? amount / leg.price,
+            price: leg.price,
+            orderId: result.orderId,
+            executed: result.success,
+          }
+          round.legs.push(arbLeg)
+
+          if (!result.success) {
+            // Leg failed — unwind previous legs
+            activityLogger.logError(`Leg ${i + 1} failed: ${result.error}`)
+            await this.unwindLegs(round, opp)
+            round.status = 'failed'
+            this.arbRounds.push(round)
+            return
+          }
+
+          round.totalCost += amount
+
+          activityLogger.logTrade(
+            `FW LEG ${i + 1}: ${leg.side} ${opp.snapshot.outcomes[leg.outcomeIndex]} $${amount.toFixed(2)}`,
+            { price: leg.price, orderId: result.orderId }
+          )
+        }
+
+        // All legs succeeded
+        round.status = 'complete'
+        this.log('ALL LEGS COMPLETE — Arb locked in!')
+
+        // Merge positions back to USDC
+        await this.mergePositions(round, opp)
       }
-
-      // All legs succeeded
-      round.status = 'complete'
-      this.log('ALL LEGS COMPLETE — Arb locked in!')
 
       // Record trade stats
       this.recordTrade(opp.netProfitUSD, round.totalCost, 0)
@@ -445,7 +536,7 @@ export class ProjectFWStrategy extends BaseStrategy {
           conditionId: opp.market.conditionId,
           question: opp.market.question,
           outcome: leg.outcome.toLowerCase() === 'yes' ? 'yes' : 'no',
-          side: 'buy',
+          side: leg.side.toLowerCase() === 'sell' ? 'sell' : 'buy',
           tokenId: leg.tokenId,
           price: leg.price,
           shares: leg.shares,
@@ -457,12 +548,10 @@ export class ProjectFWStrategy extends BaseStrategy {
             guaranteedProfit: opp.result.guaranteedProfit,
             netProfitUSD: opp.netProfitUSD,
             numLegs: opp.result.tradeLegs.length,
+            arbType: opp.arbType ?? 'underpriced',
           },
         })
       }
-
-      // Merge positions back to USDC
-      await this.mergePositions(round, opp)
 
       this.arbRounds.push(round)
     } catch (error) {

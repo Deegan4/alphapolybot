@@ -97,6 +97,9 @@ export interface AppSettingsState {
   cryptoScanIntervalMs: number        // scan interval for crypto markets (default: 30s)
   cryptoMinConfidence: number         // min confidence for crypto trades (default: 0.55)
 
+  // PolyBacktest — Historical BTC Up/Down Data
+  polyBacktestApiKey: string
+
   // Coinbase Spot — Mean Reversion Strategy
   coinbaseApiKey: string
   coinbaseSecret: string
@@ -164,6 +167,7 @@ interface SettingsStore extends AppSettingsState {
   setMicroStopLossPercent: (percent: number) => void
   setMicroTakeProfitPercent: (percent: number) => void
   setAggressiveMode: (enabled: boolean) => void
+  setPolyBacktestApiKey: (key: string) => void
   setCoinbaseApiKey: (key: string) => void
   setCoinbaseSecret: (secret: string) => void
   setMrEnableBtc: (enabled: boolean) => void
@@ -203,20 +207,20 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   clobPassphrase: '',
   enableNotifications: true,
   enableSoundAlerts: false,
-  dailyLossLimit: 4,
-  weeklyLossLimit: 20,
+  dailyLossLimit: 3,
+  weeklyLossLimit: 10,
   maxTradesPerHour: 20,
   consecutiveFailureLimit: 5,
-  minBalanceForTrade: 1.50,
+  minBalanceForTrade: 1.00,
   minMaticForGas: 0.01,
   riskManagementEnabled: true,
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
-  kellyFraction: 0.25,
-  fwTradeSize: 3,
-  fwMinProfitBps: 50,
+  kellyFraction: 0.15,
+  fwTradeSize: 5,
+  fwMinProfitBps: 30,
   fwEnableCrossMarket: false,
-  fwCrossMarketBudgetUSD: 0.50,
+  fwCrossMarketBudgetUSD: 0.25,
   btcEnableBtc: false, // Disabled by default — enable when ready to trade
   btcEnableEth: false,
   btcEnableSol: false,
@@ -260,6 +264,7 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   cryptoModel: '',
   cryptoScanIntervalMs: 30_000,
   cryptoMinConfidence: 0.55,
+  polyBacktestApiKey: '',
   coinbaseApiKey: '',
   coinbaseSecret: '',
   mrEnableBtc: false,
@@ -496,6 +501,10 @@ export const useSettingsStore = create<SettingsStore>()(
         import('@/services/strategies/MicrostructureMomentumStrategy').then(m => m.microMomentumStrategy.setMicroConfig({ takeProfitPercent: percent }))
       },
 
+      setPolyBacktestApiKey: (key: string) => {
+        set({ polyBacktestApiKey: key })
+        import('@/services/api/PolyBacktestClient').then(m => m.polyBacktestClient.setApiKey(key))
+      },
       setCoinbaseApiKey: (key: string) => {
         set({ coinbaseApiKey: key })
         import('@/services/api/CoinbaseClient').then(m => m.coinbaseClient.setCredentials(key, useSettingsStore.getState().coinbaseSecret))
@@ -662,7 +671,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'alphapolybot-settings',
-      version: 25, // Bump when defaults change — triggers migrate()
+      version: 27, // Bump when defaults change — triggers migrate()
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
         if (version < 1) {
@@ -869,6 +878,25 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.cryptoScanIntervalMs === undefined) state.cryptoScanIntervalMs = 30_000
           if (state.cryptoMinConfidence === undefined) state.cryptoMinConfidence = 0.55
         }
+        if (version < 27) {
+          // v26→v27: Add PolyBacktest API key for historical market data.
+          if (state.polyBacktestApiKey === undefined) state.polyBacktestApiKey = ''
+        }
+        if (version < 26) {
+          // v25→v26: Align FW arb + risk limits for $10-25 wallet balance.
+          // fwTradeSize 3→5 (CLOB minimum is 5 shares — orders below this get rejected).
+          // fwMinProfitBps 50→30 (lower threshold catches more thin-edge arbs at small size).
+          // dailyLossLimit 4→3, weeklyLossLimit 20→10, minBalanceForTrade 1.5→1.0
+          // (tighten loss limits relative to bankroll, allow trading closer to zero).
+          // kellyFraction 0.25→0.15 (quarter Kelly too aggressive at $15).
+          if (state.fwTradeSize === 3) state.fwTradeSize = 5
+          if (state.fwMinProfitBps === 50) state.fwMinProfitBps = 30
+          if (state.fwCrossMarketBudgetUSD === 0.50) state.fwCrossMarketBudgetUSD = 0.25
+          if (state.dailyLossLimit === 4) state.dailyLossLimit = 3
+          if (state.weeklyLossLimit === 20) state.weeklyLossLimit = 10
+          if (state.minBalanceForTrade === 1.50) state.minBalanceForTrade = 1.00
+          if (state.kellyFraction === 0.25) state.kellyFraction = 0.15
+        }
         return state as AppSettingsState
       },
       partialize: (state) => ({
@@ -937,6 +965,7 @@ export const useSettingsStore = create<SettingsStore>()(
         cryptoModel: state.cryptoModel,
         cryptoScanIntervalMs: state.cryptoScanIntervalMs,
         cryptoMinConfidence: state.cryptoMinConfidence,
+        polyBacktestApiKey: state.polyBacktestApiKey,
         coinbaseApiKey: state.coinbaseApiKey,
         coinbaseSecret: state.coinbaseSecret,
         mrEnableBtc: state.mrEnableBtc,

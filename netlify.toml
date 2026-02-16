@@ -36,5 +36,12 @@
   status = 200
   force = true
 
+# API proxy: PolyBacktest (historical BTC Up/Down market data for backtesting)
+[[redirects]]
+  from = "/api/polybacktest/*"
+  to = "https://api.polybacktest.com/:splat"
+  status = 200
+  force = true
+
 [build.environment]
   NODE_VERSION = "20"
