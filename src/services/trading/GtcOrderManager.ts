@@ -1,5 +1,5 @@
 import type { PendingGtcOrder } from '@/types'
-import { clobClient } from '@/services/api'
+import { polymarketUSClient } from '@/services/api'
 import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
 
@@ -9,7 +9,7 @@ type OrderChangeCallback = (orders: PendingGtcOrder[]) => void
  * GTC Order Manager
  *
  * Tracks pending GTD (Good-Til-Date) limit orders that were submitted as
- * fallback when FOK orders were killed due to liquidity. Polls the CLOB
+ * fallback when FOK orders were killed due to liquidity. Polls the PM US
  * API for fill status and hands off to PLM on fill.
  *
  * Lifecycle: initialize() once from App.tsx, destroy() on teardown.
@@ -110,7 +110,7 @@ export class GtcOrderManager {
       `GTD order pending: ${order.question.substring(0, 40)}...`,
       {
         orderId: order.orderId,
-        tokenId: order.tokenId,
+        marketSlug: order.marketSlug,
         price: order.price,
         size: order.size,
         expiresAt: order.expiresAt,
@@ -124,14 +124,15 @@ export class GtcOrderManager {
   }
 
   /**
-   * Poll CLOB API for order status — batch via single getOpenOrders() call
+   * Poll PM US API for order status — batch via single getOpenOrders() call
    */
   private async pollOrders(): Promise<void> {
     if (this.orders.size === 0) return
 
     try {
-      // Single API call to get all open orders
-      const openOrders = await clobClient.getOpenOrders()
+      // Collect slugs for efficient batch query
+      const slugs = [...new Set([...this.orders.values()].map(o => o.marketSlug))]
+      const openOrders = await polymarketUSClient.getOpenOrders(slugs)
       const openOrderIds = new Set(openOrders.map(o => o.id))
 
       for (const [orderId, pending] of this.orders) {
@@ -139,15 +140,14 @@ export class GtcOrderManager {
 
         if (openOrderIds.has(orderId)) {
           // Order is still open — check if partially filled
-          const clobOrder = openOrders.find(o => o.id === orderId)
-          if (clobOrder?.filledSize && clobOrder.filledSize >= pending.size) {
+          const apiOrder = openOrders.find(o => o.id === orderId)
+          if (apiOrder?.filledSize && apiOrder.filledSize >= pending.size) {
             // Fully filled
             await this.handleFill(pending)
           }
           // Otherwise still waiting — nothing to do
         } else {
           // Order is no longer open — it either filled or expired/cancelled
-          // Check the current time against expiry to infer
           const nowSec = Math.floor(Date.now() / 1000)
           if (pending.expiresAt > 0 && nowSec >= pending.expiresAt) {
             this.handleExpiry(pending)
@@ -173,8 +173,7 @@ export class GtcOrderManager {
       `GTD FILLED: ${order.outcome.toUpperCase()} $${order.costBasis.toFixed(2)}`,
       {
         orderId: order.orderId,
-        tokenId: order.tokenId,
-        marketId: order.marketId,
+        marketSlug: order.marketSlug,
         strategy: order.strategy,
       },
     )
@@ -184,14 +183,9 @@ export class GtcOrderManager {
 
     // Hand off to PLM for stop-loss / take-profit tracking
     try {
-      const [{ positionLifecycleManager }, feeRate] = await Promise.all([
-        import('./PositionLifecycleManager'),
-        import('@/services/api').then(api => api.clobClient.getFeeRateBps(order.tokenId)).catch(() => undefined),
-      ])
+      const { positionLifecycleManager } = await import('./PositionLifecycleManager')
       positionLifecycleManager.trackPosition({
-        tokenId: order.tokenId,
-        marketId: order.marketId,
-        conditionId: order.conditionId,
+        marketSlug: order.marketSlug,
         outcome: order.outcome,
         question: order.question,
         entryPrice: order.price,
@@ -201,8 +195,7 @@ export class GtcOrderManager {
         stopLossPercent: order.stopLossPercent,
         takeProfitPercent: order.takeProfitPercent,
         strategy: order.strategy,
-        negRisk: order.negRisk,
-        takerFeeBps: feeRate,
+        takerFeeBps: 10, // Flat 10bps on PM US
       })
     } catch (err) {
       console.warn('[GtcOrderManager] Failed to hand off to PLM:', err)
@@ -236,7 +229,7 @@ export class GtcOrderManager {
       if (order.strategy !== strategy || order.status !== 'pending') continue
 
       try {
-        await clobClient.cancelOrder(orderId)
+        await polymarketUSClient.cancelOrder(orderId, order.marketSlug)
       } catch {
         // Best-effort — the GTD will expire server-side anyway
       }
@@ -256,17 +249,19 @@ export class GtcOrderManager {
    * Cancel ALL pending orders (emergency stop)
    */
   async cancelAll(): Promise<number> {
-    let cancelled = 0
-
-    for (const [orderId, order] of this.orders) {
-      if (order.status !== 'pending') continue
-
+    // Batch cancel via API if we have slugs
+    const slugs = [...new Set([...this.orders.values()].filter(o => o.status === 'pending').map(o => o.marketSlug))]
+    if (slugs.length > 0) {
       try {
-        await clobClient.cancelOrder(orderId)
+        await polymarketUSClient.cancelAllOrders(slugs)
       } catch {
         // Best-effort
       }
+    }
 
+    let cancelled = 0
+    for (const [orderId, order] of this.orders) {
+      if (order.status !== 'pending') continue
       order.status = 'cancelled'
       this.removeOrder(orderId)
       cancelled++
@@ -276,7 +271,7 @@ export class GtcOrderManager {
   }
 
   /**
-   * Total USDC locked in pending GTD orders (synchronous for RiskManager)
+   * Total USD locked in pending GTD orders (synchronous for RiskManager)
    */
   getReservedCapital(): number {
     let total = 0

@@ -14,7 +14,7 @@ import { tradeLogger, positionLifecycleManager } from '@/services/trading'
 import type { BacktestSummary } from '@/services/trading/TradeLogger'
 
 export const PortfolioPanel: React.FC = () => {
-  const balance = useWalletStore((s) => s.usdcBalance)
+  const balance = useWalletStore((s) => s.balance)
   const snapshots = useBalanceHistoryStore((s) => s.snapshots)
   const initialBalance = useBalanceHistoryStore((s) => s.initialBalance)
   const simulatedBalance = useBalanceHistoryStore((s) => s.simulatedBalance)
@@ -46,51 +46,84 @@ export const PortfolioPanel: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col gap-3 h-full">
-      {/* Portfolio Value card */}
-      <div className="bg-agent-card border border-agent-border rounded-lg p-4 gradient-border">
-        <div className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium mb-1">
-          Portfolio Value
+    <div className="flex flex-col gap-2">
+      {/* Portfolio Value — compact */}
+      <div className="card-base p-3 gradient-border">
+        <div className="flex items-baseline justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-agent-text-muted font-sans font-medium">
+              Portfolio
+            </div>
+            <div className="text-2xl font-mono font-bold text-agent-text leading-tight">
+              ${displayBalance.toFixed(2)}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className={`text-sm font-mono font-semibold ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
+              {todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)}
+            </div>
+            <div className="text-[10px] text-agent-text-muted font-sans">today</div>
+          </div>
         </div>
-        <div className="text-3xl font-mono font-bold text-agent-text">
-          ${displayBalance.toFixed(2)}
-        </div>
-        <div className={`text-sm font-mono mt-1 ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
-          {todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)} today
+
+        {/* Inline quick stats */}
+        <div className="grid grid-cols-4 gap-1.5 mt-2 pt-2 border-t border-agent-border/40">
+          <div className="text-center">
+            <div className="text-[9px] text-agent-text-muted font-sans uppercase">Win%</div>
+            <div className={`text-xs font-mono font-semibold ${summary.winRate >= 0.5 ? 'text-agent-green' : summary.totalTrades > 0 ? 'text-agent-red' : 'text-agent-text'}`}>
+              {summary.totalTrades > 0 ? `${Math.round(summary.winRate * 100)}%` : '--'}
+            </div>
+          </div>
+          <div className="text-center">
+            <div className="text-[9px] text-agent-text-muted font-sans uppercase">Trades</div>
+            <div className="text-xs font-mono font-semibold text-agent-text">{summary.totalTrades}</div>
+          </div>
+          <div className="text-center">
+            <div className="text-[9px] text-agent-text-muted font-sans uppercase">Avg</div>
+            <div className={`text-xs font-mono font-semibold ${summary.avgPnlPerTrade >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
+              {summary.totalTrades > 0 ? `${summary.avgPnlPerTrade >= 0 ? '+' : ''}$${summary.avgPnlPerTrade.toFixed(2)}` : '--'}
+            </div>
+          </div>
+          <div className="text-center">
+            <div className="text-[9px] text-agent-text-muted font-sans uppercase">DD</div>
+            <div className="text-xs font-mono font-semibold text-agent-red">
+              {summary.maxDrawdownPercent > 0 ? `-${summary.maxDrawdownPercent.toFixed(1)}%` : '--'}
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Equity Curve card */}
-      <div className="bg-agent-card border border-agent-border rounded-lg p-4 flex-1 flex flex-col min-h-0">
-        <div className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium mb-2">
+      {/* Equity Curve — compact */}
+      <div className="card-base p-3 flex flex-col min-h-0">
+        <div className="text-[10px] uppercase tracking-wider text-agent-text-muted font-sans font-medium mb-1">
           Equity Curve
         </div>
 
         <ChartContainer>
           {(w, h) =>
             data.length < 2 ? (
-              <div className="h-full flex items-center justify-center text-agent-text-label text-sm font-mono">
+              <div className="h-full flex items-center justify-center text-agent-text-label text-[11px] font-mono">
                 Collecting data...
               </div>
             ) : (
               <ResponsiveContainer width={w} height={h}>
-                <LineChart data={data} margin={{ top: 5, right: 5, left: 5, bottom: 5 }}>
+                <LineChart data={data} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
                   <XAxis
                     dataKey="time"
                     tickFormatter={formatTime}
                     stroke="#1a1f2e"
-                    tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'JetBrains Mono, monospace' }}
+                    tick={{ fill: '#8b949e', fontSize: 10, fontFamily: 'JetBrains Mono, monospace' }}
                     tickLine={false}
                     axisLine={false}
                     minTickGap={40}
                   />
                   <YAxis
                     stroke="#1a1f2e"
-                    tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'JetBrains Mono, monospace' }}
+                    tick={{ fill: '#8b949e', fontSize: 10, fontFamily: 'JetBrains Mono, monospace' }}
                     tickLine={false}
                     axisLine={false}
                     tickFormatter={(v: number) => `$${v.toFixed(0)}`}
-                    width={40}
+                    width={35}
                   />
                   {initialBalance > 0 && (
                     <ReferenceLine
@@ -102,11 +135,12 @@ export const PortfolioPanel: React.FC = () => {
                   )}
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#0d1117',
-                      border: '1px solid #1a1f2e',
-                      borderRadius: '8px',
+                      backgroundColor: 'rgba(13, 17, 23, 0.8)',
+                      backdropFilter: 'blur(16px)',
+                      border: '1px solid rgba(34, 197, 94, 0.1)',
+                      borderRadius: '12px',
                       fontFamily: 'JetBrains Mono, monospace',
-                      fontSize: '12px',
+                      fontSize: '11px',
                     }}
                     labelFormatter={(ts: number) => {
                       const d = new Date(ts)
@@ -133,34 +167,6 @@ export const PortfolioPanel: React.FC = () => {
             )
           }
         </ChartContainer>
-      </div>
-
-      {/* Quick stats */}
-      <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
-        <div className="grid grid-cols-2 gap-3 text-sm font-mono">
-          <div>
-            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Win Rate</div>
-            <div className={`font-semibold ${summary.winRate >= 0.5 ? 'text-agent-green' : summary.totalTrades > 0 ? 'text-agent-red' : 'text-agent-text'}`}>
-              {summary.totalTrades > 0 ? `${Math.round(summary.winRate * 100)}%` : '--'}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Trades</div>
-            <div className="font-semibold text-agent-text">{summary.totalTrades}</div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Avg P&L</div>
-            <div className={`font-semibold ${summary.avgPnlPerTrade >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
-              {summary.totalTrades > 0 ? `${summary.avgPnlPerTrade >= 0 ? '+' : ''}$${summary.avgPnlPerTrade.toFixed(2)}` : '--'}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Max DD</div>
-            <div className="font-semibold text-agent-red">
-              {summary.maxDrawdownPercent > 0 ? `-${summary.maxDrawdownPercent.toFixed(1)}%` : '--'}
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   )

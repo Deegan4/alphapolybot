@@ -366,7 +366,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           kellyFraction: fStar,
           kellyBetSize: KellySizer.sizeBet({
             kellyFraction,
-            bankroll: useWalletStore.getState().usdcBridgedBalance ?? 0,
+            bankroll: useWalletStore.getState().balance,
             fullKelly: fStar,
           }),
           actualBetSize: positionSize,
@@ -402,7 +402,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     // Polymarket CLOB requires minimum 5 shares per order
     if (pennyMode) return Math.max(1.0, 5 * marketPrice)
 
-    const bankroll = useWalletStore.getState().usdcBridgedBalance ?? useWalletStore.getState().usdcBalance
+    const bankroll = useWalletStore.getState().balance
     const kellyFraction = useSettingsStore.getState().kellyFraction
     const adaptiveProb = edgeTracker.getAdaptiveModelProb('micro', modelProb)
     const fStar = KellySizer.polymarketKelly(adaptiveProb, marketPrice)

@@ -264,47 +264,9 @@ export async function enrichWithPriceTrend(
     }
   }
 
-  try {
-    const { clobClient } = await import('@/services/api')
-    const history = await clobClient.getPricesHistory(tokenId, { interval: '1h' })
-
-    if (history.length < 2) return ctx
-
-    // Use first and last points to compute momentum
-    const oldest = history[0].p
-    const newest = history[history.length - 1].p
-
-    if (oldest === 0) return ctx
-
-    const momentum = ((newest - oldest) / oldest) * 100
-    const trend: 'rising' | 'falling' | 'stable' =
-      momentum > 1.0 ? 'rising'
-      : momentum < -1.0 ? 'falling'
-      : 'stable'
-
-    // Compute volatility, support, resistance from same data
-    const prices = history.map(h => h.p)
-    const mean = prices.reduce((s, p) => s + p, 0) / prices.length
-    const variance = prices.reduce((s, p) => s + (p - mean) ** 2, 0) / prices.length
-    const stddev = Math.sqrt(variance)
-    const volatility = mean > 0 ? (stddev / mean) * 100 : 0
-    const support = Math.min(...prices)
-    const resistance = Math.max(...prices)
-
-    // Cache result
-    trendCache.set(tokenId, { trend, momentum, volatility, support, resistance, fetchedAt: Date.now() })
-
-    return {
-      ...ctx,
-      priceTrend: trend,
-      priceMomentum: momentum,
-      priceVolatility: volatility,
-      priceSupport: support,
-      priceResistance: resistance,
-    }
-  } catch {
-    return ctx // Fail silently
-  }
+  // US API does not expose a price history endpoint.
+  // Price trend enrichment is unavailable — return context unchanged.
+  return ctx
 }
 
 // ─── Crypto Context Enrichment ──────────────────────────────

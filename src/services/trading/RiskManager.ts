@@ -206,11 +206,8 @@ export class RiskManager {
       }
     }
 
-    // 5. Read wallet balances — used by drawdown, concentration, and balance checks below.
-    //    USDC.e (bridged) is what Polymarket actually pulls from.
-    //    Native USDC in wallet is NOT usable on the exchange.
-    const { usdcBridgedBalance, usdcNativeBalance, balance: maticBalance } = useWalletStore.getState()
-    const currentBalance = usdcBridgedBalance ?? 0
+    // 5. Read wallet balance — used by drawdown, concentration, and balance checks below.
+    const { balance: currentBalance } = useWalletStore.getState()
     const reserved = this.capitalReservationFns.reduce((sum, fn) => sum + (fn() ?? 0), 0)
     const tradeable = currentBalance - reserved
 
@@ -264,22 +261,10 @@ export class RiskManager {
       const reservedNote = reserved > 0
         ? ` ($${reserved.toFixed(2)} reserved in pending GTD orders)`
         : ''
-      const nativeNote = usdcNativeBalance > 0
-        ? ` (you have $${usdcNativeBalance.toFixed(2)} in native USDC which Polymarket cannot use — swap to USDC.e)`
-        : ''
       return {
         allowed: false,
-        reason: `Insufficient tradeable USDC.e: $${tradeable.toFixed(2)} (need $${tradeAmountUSDC.toFixed(2)}, min $${this.config.minBalanceForTrade})${reservedNote}${nativeNote}`,
+        reason: `Insufficient balance: $${tradeable.toFixed(2)} (need $${tradeAmountUSDC.toFixed(2)}, min $${this.config.minBalanceForTrade})${reservedNote}`,
         riskCode: 'INSUFFICIENT_BALANCE',
-      }
-    }
-
-    // 7. Gas (MATIC) check — trades require on-chain txns that cost gas
-    if (maticBalance < this.config.minMaticForGas) {
-      return {
-        allowed: false,
-        reason: `Insufficient MATIC for gas: ${maticBalance.toFixed(6)} (min ${this.config.minMaticForGas})`,
-        riskCode: 'INSUFFICIENT_GAS',
       }
     }
 

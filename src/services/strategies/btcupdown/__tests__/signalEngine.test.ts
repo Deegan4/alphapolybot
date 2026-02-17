@@ -3,6 +3,9 @@ import {
   computeSignal,
   computeVolatility,
   classifyRegime,
+  classifyRegimeWithEfficiency,
+  regimeMultiplier,
+  computeBlendedEfficiency,
   computeRSI,
   linearRegressionSlope,
   computeOrderbookImbalance,
@@ -139,6 +142,69 @@ describe('computeSignal', () => {
     expect(withRegime.confidence).toBeGreaterThanOrEqual(noRegime.confidence)
   })
 
+  it('regime filter dampens confidence in choppy regime (graduated, not blocked)', () => {
+    // Oscillating prices → choppy regime
+    const prices: Array<{ price: number; timestamp: number }> = []
+    for (let i = 0; i < 30; i++) {
+      prices.push({ price: 65000 + (i % 2 === 0 ? 30 : -30), timestamp: i * 1000 })
+    }
+    const input = makeInput({
+      currentPrice: 65030,
+      windowOpenPrice: 65000,
+      recentPriceHistory: prices,
+    })
+    const noRegime = computeSignal(input, { ...defaultConfig, regimeFilterEnabled: false })
+    const withRegime = computeSignal(input, { ...defaultConfig, regimeFilterEnabled: true })
+    // Graduated: choppy reduces confidence but doesn't zero it
+    expect(withRegime.confidence).toBeLessThan(noRegime.confidence)
+    expect(withRegime.confidence).toBeGreaterThan(0)
+  })
+
+  it('signal includes regimeEfficiency and regimeEfficiencyLongTerm in factors', () => {
+    const signal = computeSignal(makeInput(), defaultConfig)
+    expect(signal.factors!.regimeEfficiency).toBeGreaterThanOrEqual(0)
+    expect(signal.factors!.regimeEfficiency).toBeLessThanOrEqual(1)
+    expect(signal.factors!.regimeEfficiencyLongTerm).toBeGreaterThanOrEqual(0)
+    expect(signal.factors!.regimeEfficiencyLongTerm).toBeLessThanOrEqual(1)
+  })
+
+  it('dual-timeframe: choppy ST + trending LT boosts confidence vs choppy-only', () => {
+    // Short-term: oscillating (choppy)
+    const choppyPrices: Array<{ price: number; timestamp: number }> = []
+    for (let i = 0; i < 30; i++) {
+      choppyPrices.push({ price: 65000 + (i % 2 === 0 ? 30 : -30), timestamp: i * 1000 })
+    }
+    // Long-term: steady uptrend (trending)
+    const trendingLT: Array<{ price: number; timestamp: number }> = []
+    for (let i = 0; i < 15; i++) {
+      trendingLT.push({ price: 64000 + i * 100, timestamp: i * 60_000 })
+    }
+    const inputSingleTF = makeInput({
+      currentPrice: 65030,
+      windowOpenPrice: 65000,
+      recentPriceHistory: choppyPrices,
+    })
+    const inputDualTF = makeInput({
+      currentPrice: 65030,
+      windowOpenPrice: 65000,
+      recentPriceHistory: choppyPrices,
+      recentPriceHistoryLongTerm: trendingLT,
+    })
+    const config = { ...defaultConfig, regimeFilterEnabled: true }
+    const singleTF = computeSignal(inputSingleTF, config)
+    const dualTF = computeSignal(inputDualTF, config)
+    // Dual-timeframe should rescue the choppy short-term with trending long-term context
+    expect(dualTF.confidence).toBeGreaterThan(singleTF.confidence)
+  })
+
+  it('dual-timeframe: without LT data behaves identically to single-timeframe', () => {
+    const input = makeInput()
+    const config = { ...defaultConfig, regimeFilterEnabled: true }
+    const withoutLT = computeSignal(input, config)
+    const withUndefinedLT = computeSignal({ ...input, recentPriceHistoryLongTerm: undefined }, config)
+    expect(withoutLT.confidence).toBe(withUndefinedLT.confidence)
+  })
+
   it('RSI filter penalizes overbought up signal', () => {
     // 20+ prices all rising to produce RSI > 75
     const prices: Array<{ price: number; timestamp: number }> = []
@@ -259,6 +325,118 @@ describe('classifyRegime', () => {
   it('classifies flat prices as neutral (zero path)', () => {
     const prices = makePriceHistory(100, 15, 'flat')
     expect(classifyRegime(prices)).toBe('neutral')
+  })
+})
+
+// ==========================================
+// classifyRegimeWithEfficiency
+// ==========================================
+
+describe('classifyRegimeWithEfficiency', () => {
+  it('returns regime and efficiency together', () => {
+    const prices = makePriceHistory(100, 15, 'up')
+    const result = classifyRegimeWithEfficiency(prices)
+    expect(result).toHaveProperty('regime')
+    expect(result).toHaveProperty('efficiency')
+    expect(result.regime).toBe('trending')
+    expect(result.efficiency).toBeGreaterThan(0.40)
+  })
+
+  it('returns default 0.25 efficiency for insufficient data', () => {
+    const result = classifyRegimeWithEfficiency(makePriceHistory(100, 5))
+    expect(result.regime).toBe('neutral')
+    expect(result.efficiency).toBe(0.25)
+  })
+
+  it('choppy has low efficiency', () => {
+    const prices: Array<{ price: number; timestamp: number }> = []
+    for (let i = 0; i < 20; i++) {
+      prices.push({ price: 100 + (i % 2 === 0 ? 3 : -3), timestamp: i * 1000 })
+    }
+    const result = classifyRegimeWithEfficiency(prices)
+    expect(result.regime).toBe('choppy')
+    expect(result.efficiency).toBeLessThan(0.15)
+  })
+})
+
+// ==========================================
+// regimeMultiplier
+// ==========================================
+
+describe('regimeMultiplier', () => {
+  it('returns 0.60 for efficiency 0 (extreme chop)', () => {
+    expect(regimeMultiplier(0)).toBe(0.60)
+  })
+
+  it('returns 1.00 at efficiency 0.30 (neutral)', () => {
+    expect(regimeMultiplier(0.30)).toBeCloseTo(1.00, 5)
+  })
+
+  it('returns 1.15 for high efficiency (strong trend)', () => {
+    expect(regimeMultiplier(0.70)).toBeCloseTo(1.15, 5)
+    expect(regimeMultiplier(0.90)).toBeCloseTo(1.15, 5)
+  })
+
+  it('is monotonically increasing', () => {
+    const points = [0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70]
+    for (let i = 1; i < points.length; i++) {
+      expect(regimeMultiplier(points[i])).toBeGreaterThanOrEqual(regimeMultiplier(points[i - 1]))
+    }
+  })
+
+  it('returns ~0.85 at old choppy threshold (0.15)', () => {
+    // At the old binary gate threshold, signals now get 85% confidence instead of 0%
+    const mult = regimeMultiplier(0.15)
+    expect(mult).toBeGreaterThan(0.75)
+    expect(mult).toBeLessThan(0.95)
+  })
+})
+
+// ==========================================
+// computeBlendedEfficiency
+// ==========================================
+
+describe('computeBlendedEfficiency', () => {
+  it('pullback: choppy ST + trending LT → 40/60 blend (rescues choppy)', () => {
+    const result = computeBlendedEfficiency(0.10, 0.60)
+    // 0.40 * 0.10 + 0.60 * 0.60 = 0.04 + 0.36 = 0.40
+    expect(result).toBeCloseTo(0.40, 2)
+    // Must be significantly above short-term alone
+    expect(result).toBeGreaterThan(0.10)
+  })
+
+  it('confirmed trend: trending ST + trending LT → max of both', () => {
+    expect(computeBlendedEfficiency(0.50, 0.60)).toBe(0.60)
+    expect(computeBlendedEfficiency(0.70, 0.45)).toBe(0.70)
+  })
+
+  it('sustained chop: choppy ST + choppy LT → min of both (max penalty)', () => {
+    expect(computeBlendedEfficiency(0.10, 0.12)).toBe(0.10)
+    expect(computeBlendedEfficiency(0.05, 0.02)).toBe(0.02)
+  })
+
+  it('breakout: trending ST + choppy LT → 60/40 blend (cautious)', () => {
+    const result = computeBlendedEfficiency(0.50, 0.12)
+    // 0.60 * 0.50 + 0.40 * 0.12 = 0.30 + 0.048 = 0.348
+    expect(result).toBeCloseTo(0.348, 2)
+  })
+
+  it('neutral/mixed → simple average', () => {
+    // Both neutral (between 0.15 and 0.40)
+    expect(computeBlendedEfficiency(0.25, 0.35)).toBeCloseTo(0.30, 5)
+    // One choppy, one neutral
+    expect(computeBlendedEfficiency(0.10, 0.25)).toBeCloseTo(0.175, 5)
+  })
+
+  it('pullback blend feeds into regimeMultiplier above neutral', () => {
+    // Choppy ST alone would get multiplier ~0.73
+    const choppyMult = regimeMultiplier(0.10)
+    // Pullback blend (choppy ST + trending LT) rescues to ~0.40 efficiency
+    const blended = computeBlendedEfficiency(0.10, 0.60)
+    const blendedMult = regimeMultiplier(blended)
+    expect(blendedMult).toBeGreaterThan(choppyMult)
+    // Blended should be near or above 1.0 (neutral+)
+    expect(blendedMult).toBeGreaterThanOrEqual(0.95)
   })
 })
 

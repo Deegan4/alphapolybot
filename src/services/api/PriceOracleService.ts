@@ -77,7 +77,8 @@ export class PriceOracleService {
 
   private async fetchBinance(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
     const pair = BINANCE_PAIRS[symbol]
-    const binanceBase = import.meta.env.VITE_BINANCE_API_URL || 'https://api.binance.com/api/v3'
+    const binanceBase = import.meta.env.VITE_BINANCE_API_URL
+      || (import.meta.env.DEV ? '/api/binance/api/v3' : 'https://api.binance.us/api/v3')
     const res = await fetch(
       `${binanceBase}/ticker/price?symbol=${pair}`,
       { signal: AbortSignal.timeout(5000) },
@@ -89,7 +90,8 @@ export class PriceOracleService {
 
   private async fetchCoinGecko(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
     const id = COINGECKO_IDS[symbol]
-    const coingeckoBase = import.meta.env.VITE_COINGECKO_API_URL || 'https://api.coingecko.com/api/v3'
+    const coingeckoBase = import.meta.env.VITE_COINGECKO_API_URL
+      || (import.meta.env.DEV ? '/api/coingecko/api/v3' : 'https://api.coingecko.com/api/v3')
     const res = await fetch(
       `${coingeckoBase}/simple/price?ids=${id}&vs_currencies=usd`,
       { signal: AbortSignal.timeout(5000) },

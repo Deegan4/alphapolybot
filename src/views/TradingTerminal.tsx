@@ -23,7 +23,7 @@ const itemVariants = {
  * Per spec: "Three-column layout: Market Discovery | Analysis | Activity Feed"
  */
 export const TradingTerminal: React.FC = () => {
-  const { isConnected, usdcBalance } = useWalletStore()
+  const { isConnected, balance: usdcBalance } = useWalletStore()
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [activities, setActivities] = useState<ActivityItem[]>([])
 

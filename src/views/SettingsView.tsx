@@ -5,8 +5,8 @@ import { useWalletStore, useSettingsStore } from '@/stores'
 import { strategyManager } from '@/services/strategies'
 import { tradingService, riskManager } from '@/services/trading'
 import { openRouterService } from '@/services/llm'
-import { clobClient } from '@/services/api/CLOBClient'
-import type { AppSettings, LLMPredictionConfig, DipArbConfig, ProjectFWConfig } from '@/types'
+import { notificationService } from '@/services/notifications/NotificationService'
+import type { AppSettings, LLMPredictionConfig, DipArbConfig, ProjectFWConfig, WalletEntry } from '@/types'
 import type { RiskManagerStatus } from '@/services/trading'
 import { cn } from '@/utils/cn'
 
@@ -20,7 +20,7 @@ const tabContentVariants = {
  * SettingsView - Application settings and configuration
  */
 export const SettingsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'api'>('trading')
+  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'alerts' | 'api'>('trading')
 
   const tabs = [
     { id: 'trading', label: 'Trading Mode' },
@@ -33,6 +33,7 @@ export const SettingsView: React.FC = () => {
     { id: 'micro', label: 'Micro Momentum' },
     { id: 'meanrev', label: 'Mean Reversion' },
     { id: 'copytrading', label: 'Copy Trading' },
+    { id: 'alerts', label: 'Alerts' },
     { id: 'api', label: 'API Keys' },
   ]
 
@@ -97,7 +98,7 @@ export const SettingsView: React.FC = () => {
           >
             {activeTab === 'trading' && <TradingModeSettings />}
             {activeTab === 'risk' && <RiskManagementSettings />}
-            {activeTab === 'wallet' && <WalletSettings />}
+            {activeTab === 'wallet' && <><WalletSettings /><WalletRegistryPanel /></>}
             {activeTab === 'llm' && <LLMSettings />}
             {activeTab === 'dip' && <DipSettings />}
             {activeTab === 'projectfw' && <ProjectFWSettings />}
@@ -105,6 +106,7 @@ export const SettingsView: React.FC = () => {
             {activeTab === 'micro' && <MicroMomentumSettings />}
             {activeTab === 'meanrev' && <MeanReversionSettings />}
             {activeTab === 'copytrading' && <CopyTradingSettings />}
+            {activeTab === 'alerts' && <AlertSettings />}
             {activeTab === 'api' && <APISettings />}
           </motion.div>
         </AnimatePresence>
@@ -233,7 +235,7 @@ const TradingModeSettings: React.FC = () => {
               <MatrixBadge variant="info" size="sm">DRY RUN</MatrixBadge>
               <ul className="text-agent-text-muted text-xs font-sans space-y-1">
                 <li>Orders are logged but not sent to Polymarket</li>
-                <li>Token approvals are simulated</li>
+                <li>API calls are simulated</li>
                 <li>Strategy logic runs normally for testing</li>
                 <li>Activity log shows simulated trades</li>
               </ul>
@@ -242,9 +244,9 @@ const TradingModeSettings: React.FC = () => {
             <div className="flex items-start gap-3">
               <MatrixBadge variant="danger" size="sm">LIVE</MatrixBadge>
               <ul className="text-agent-text-muted text-xs font-sans space-y-1">
-                <li>Real orders executed on Polygon mainnet</li>
-                <li>Real USDC spent on trades</li>
-                <li>Token approvals submitted as transactions</li>
+                <li>Real orders executed on Polymarket US</li>
+                <li>Real USD spent on trades</li>
+                <li>Orders placed via API</li>
                 <li>Profits and losses are real</li>
               </ul>
             </div>
@@ -360,17 +362,20 @@ const TradingModeSettings: React.FC = () => {
  * Wallet Settings Panel
  */
 const WalletSettings: React.FC = () => {
-  const { isConnected, address, proxyAddress, usdcBalance, usdcBridgedBalance, usdcNativeBalance, balance, approvals, connect, disconnect, setProxyAddress } = useWalletStore()
-  const [seedPhrase, setSeedPhrase] = useState('')
-  const [proxyInput, setProxyInput] = useState(proxyAddress || '')
+  const { isConnected, keyId, balance, buyingPower, lastSync, connect, disconnect } = useWalletStore()
+  const { pmUsKeyId, pmUsSecretKey, setPmUsKeyId, setPmUsSecretKey } = useSettingsStore()
+  const [keyIdInput, setKeyIdInput] = useState(pmUsKeyId || '')
+  const [secretInput, setSecretInput] = useState(pmUsSecretKey || '')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'pass' | 'fail'>('idle')
   const [testError, setTestError] = useState('')
 
   const handleConnect = async () => {
-    if (!seedPhrase.trim()) {
-      setError('Please enter your seed phrase or private key')
+    const trimKey = keyIdInput.trim()
+    const trimSecret = secretInput.trim()
+    if (!trimKey || !trimSecret) {
+      setError('Both Key ID and Secret Key are required')
       return
     }
 
@@ -378,13 +383,16 @@ const WalletSettings: React.FC = () => {
     setError('')
 
     try {
-      const success = await connect(seedPhrase)
+      // Save to settings store first
+      setPmUsKeyId(trimKey)
+      setPmUsSecretKey(trimSecret)
+
+      const success = await connect(trimKey, trimSecret)
       if (success) {
-        setSeedPhrase('') // Clear sensitive data
+        setSecretInput('') // Clear sensitive data from local state
       } else {
-        // Pull error from store — walletService sets it on failure
         const storeError = useWalletStore.getState().error
-        setError(storeError || 'Failed to connect wallet')
+        setError(storeError || 'Failed to connect — check your credentials')
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to connect')
@@ -393,32 +401,16 @@ const WalletSettings: React.FC = () => {
     }
   }
 
-  const handleDisconnect = async () => {
+  const handleDisconnect = () => {
     disconnect()
-  }
-
-  const handleApprove = async () => {
-    setLoading(true)
-    setError('')
-    try {
-      // Call walletService directly to get detailed error info
-      const { walletService } = await import('@/services/wallet')
-      const result = await walletService.ensureApprovals()
-      // Sync approval state to store
-      const state = walletService.getState()
-      useWalletStore.setState({ approvals: state.approvals })
-      if (!result.success) {
-        setError(result.error ?? 'Token approval failed')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Approval failed')
-    } finally {
-      setLoading(false)
-    }
+    setPmUsKeyId('')
+    setPmUsSecretKey('')
+    setKeyIdInput('')
+    setSecretInput('')
   }
 
   return (
-    <MatrixCard title="WALLET CONNECTION" subtitle="Connect your Polygon wallet to trade" variant="glass">
+    <MatrixCard title="POLYMARKET US CONNECTION" subtitle="Connect with your PM US API credentials" variant="glass">
       <div className="space-y-6">
         {isConnected ? (
           <>
@@ -434,79 +426,36 @@ const WalletSettings: React.FC = () => {
 
             <div className="bg-agent-bg/60 rounded-lg p-4 space-y-3">
               <div>
-                <span className="text-agent-text-muted text-sm font-sans">Signer (EOA):</span>
-                <p className="text-agent-green font-mono text-sm mt-1">{address}</p>
+                <span className="text-agent-text-muted text-sm font-sans">Key ID:</span>
+                <p className="text-agent-green font-mono text-sm mt-1">{keyId?.slice(0, 12)}...</p>
               </div>
-              {proxyAddress && (
-                <div>
-                  <span className="text-agent-text-muted text-sm font-sans">Polymarket Proxy (Funder):</span>
-                  <p className="text-agent-orange font-mono text-sm mt-1">{proxyAddress}</p>
-                </div>
-              )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <span className="text-agent-text-muted text-sm font-sans">USDC Balance:</span>
+                  <span className="text-agent-text-muted text-sm font-sans">Balance:</span>
                   <p className="text-agent-green font-mono text-lg">
-                    <AnimatedCounter value={usdcBalance} prefix="$" precision={2} />
+                    <AnimatedCounter value={balance} prefix="$" precision={2} />
                   </p>
                 </div>
                 <div>
-                  <span className="text-agent-text-muted text-sm font-sans">MATIC Balance:</span>
+                  <span className="text-agent-text-muted text-sm font-sans">Buying Power:</span>
                   <p className="text-agent-green font-mono text-lg">
-                    <AnimatedCounter value={balance} precision={4} />
+                    <AnimatedCounter value={buyingPower} prefix="$" precision={2} />
                   </p>
                 </div>
               </div>
-              {(usdcNativeBalance ?? 0) > 0 && (usdcBridgedBalance ?? 0) < 1 && (
-                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-3">
-                  <p className="text-yellow-400 text-sm font-sans">
-                    ⚠ <strong>${(usdcNativeBalance ?? 0).toFixed(2)} in native USDC</strong> — Polymarket can't use this.
-                    Swap native USDC → USDC.e on Uniswap or 1inch (Polygon network) to trade.
-                  </p>
-                </div>
+              {lastSync && (
+                <p className="text-agent-text-muted text-xs font-sans">
+                  Last synced: {new Date(lastSync).toLocaleTimeString()}
+                </p>
               )}
             </div>
 
-            {/* Low-MATIC gas warning */}
-            {balance < 0.05 && balance > 0 && (
-              <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
-                <p className="text-yellow-400 text-sm font-mono">
-                  Low MATIC: {balance.toFixed(4)} — approvals and trades need ~0.01-0.05 MATIC for gas
-                </p>
-              </div>
-            )}
-            {balance === 0 && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
-                <p className="text-red-400 text-sm font-mono">
-                  No MATIC for gas — send POL/MATIC to your wallet before approving or trading
-                </p>
-              </div>
-            )}
-
-            {/* Approvals */}
-            <div className="space-y-3">
-              <h4 className="text-agent-text-muted text-sm font-sans">Token Approvals</h4>
-              <div className="flex items-center gap-4">
-                <MatrixBadge variant={approvals.usdc ? 'success' : 'warning'}>
-                  USDC: {approvals.usdc ? 'Approved' : 'Not Approved'}
-                </MatrixBadge>
-                <MatrixBadge variant={approvals.ctf ? 'success' : 'warning'}>
-                  CTF: {approvals.ctf ? 'Approved' : 'Not Approved'}
-                </MatrixBadge>
-              </div>
-              {(!approvals.usdc || !approvals.ctf) && (
-                <MatrixButton onClick={handleApprove} loading={loading} size="sm">
-                  Approve Tokens
-                </MatrixButton>
-              )}
-            </div>
-
-            {/* Test Connection — verify order signing pipeline */}
+            {/* Test Connection */}
             <div className="bg-agent-bg/60 rounded-lg p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
                   <h4 className="text-agent-text text-sm font-bold">Test Connection</h4>
-                  <p className="text-agent-text-muted text-xs">Places and cancels a $1 GTC order to verify signing works</p>
+                  <p className="text-agent-text-muted text-xs">Validates API credentials by fetching account balance</p>
                 </div>
                 <MatrixButton
                   size="sm"
@@ -515,12 +464,10 @@ const WalletSettings: React.FC = () => {
                     setTestStatus('testing')
                     setTestError('')
                     try {
-                      const { clobClient } = await import('@/services/api')
-                      const result = await clobClient.testOrderCycle()
-                      if (result.success) {
+                      const { polymarketUSClient } = await import('@/services/api')
+                      const result = await polymarketUSClient.validateCredentials()
+                      if (result.valid) {
                         setTestStatus('pass')
-                        const { readinessChecker } = await import('@/services/trading/ReadinessChecker')
-                        readinessChecker.setTestOrderResult(result)
                       } else {
                         setTestStatus('fail')
                         setTestError(result.error ?? 'Unknown error')
@@ -535,14 +482,13 @@ const WalletSettings: React.FC = () => {
                 </MatrixButton>
               </div>
               {testStatus === 'pass' && (
-                <div className="text-green-400 text-xs font-mono">Order signed, placed, and cancelled successfully</div>
+                <div className="text-green-400 text-xs font-mono">API credentials validated successfully</div>
               )}
               {testStatus === 'fail' && testError && (
                 <div className="text-red-400 text-xs font-mono">{testError}</div>
               )}
             </div>
 
-            {/* Error display for connected state (approve failures, etc.) */}
             {error && (
               <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
                 <p className="text-red-400 text-sm font-mono">{error}</p>
@@ -550,7 +496,7 @@ const WalletSettings: React.FC = () => {
             )}
 
             <MatrixButton variant="danger" onClick={handleDisconnect}>
-              Disconnect Wallet
+              Disconnect
             </MatrixButton>
           </>
         ) : (
@@ -558,43 +504,182 @@ const WalletSettings: React.FC = () => {
             {/* Disconnected State */}
             <div className="bg-agent-bg/60 rounded-lg p-4 space-y-4">
               <p className="text-agent-text-muted text-sm font-sans">
-                Enter your seed phrase or private key to connect. Credentials stay local and are never sent to any server.
+                Enter your Polymarket US API credentials. Get them from{' '}
+                <a href="https://polymarket.us/developer" target="_blank" rel="noopener noreferrer"
+                   className="text-agent-cyan underline">polymarket.us/developer</a>.
+                Credentials stay local and are never sent to any external server.
               </p>
               <MatrixInput
-                label="Seed Phrase or Private Key"
-                type="password"
-                value={seedPhrase}
-                onChange={(e) => setSeedPhrase(e.target.value)}
-                placeholder="12/24 words or hex private key"
-                error={error}
+                label="Key ID"
+                type="text"
+                value={keyIdInput}
+                onChange={(e) => setKeyIdInput(e.target.value)}
+                placeholder="e.g. abc123-def456-..."
+                hint="UUID from the developer portal"
               />
               <MatrixInput
-                label="Polymarket Proxy Address (auto-computed)"
-                value={proxyInput}
-                onChange={(e) => {
-                  setProxyInput(e.target.value)
-                  // Manual override — only use if auto-compute is wrong
-                  const val = e.target.value.trim()
-                  setProxyAddress(/^0x[0-9a-fA-F]{40}$/.test(val) ? val : null)
-                }}
-                placeholder="Auto-computed on connect (leave blank)"
-                hint="Auto-computed from your signer via CREATE2. Leave blank unless you need a manual override."
+                label="Secret Key"
+                type="password"
+                value={secretInput}
+                onChange={(e) => setSecretInput(e.target.value)}
+                placeholder="Base64-encoded Ed25519 secret"
+                error={error}
+                hint="Ed25519 private key — stored locally only"
               />
             </div>
 
             <div className="bg-agent-orange/10 border border-agent-orange/30 rounded-lg p-4">
-              <h4 className="text-agent-orange text-sm font-bold mb-2">Security Warning</h4>
+              <h4 className="text-agent-orange text-sm font-bold mb-2">Security Notice</h4>
               <ul className="text-agent-text-muted text-xs font-sans space-y-1">
-                <li>Never share your seed phrase with anyone</li>
-                <li>Only use a dedicated trading wallet</li>
-                <li>This bot has full access to your wallet funds</li>
+                <li>Never share your secret key with anyone</li>
+                <li>Only use a dedicated trading API key</li>
+                <li>This bot can place and cancel orders on your behalf</li>
               </ul>
             </div>
 
             <MatrixButton onClick={handleConnect} loading={loading} className="w-full">
-              Connect Wallet
+              Connect
             </MatrixButton>
           </>
+        )}
+      </div>
+    </MatrixCard>
+  )
+}
+
+/**
+ * Wallet Registry — manage multiple PM US wallets
+ */
+const WalletRegistryPanel: React.FC = () => {
+  const { wallets, activeWalletId, addWallet, removeWallet, setActiveWallet, renameWallet } = useSettingsStore()
+  const { connect, disconnect } = useWalletStore()
+  const [showAdd, setShowAdd] = useState(false)
+  const [newLabel, setNewLabel] = useState('')
+  const [newKeyId, setNewKeyId] = useState('')
+  const [newSecret, setNewSecret] = useState('')
+  const [addError, setAddError] = useState('')
+  const [switching, setSwitching] = useState(false)
+
+  const handleAdd = async () => {
+    const label = newLabel.trim() || `Wallet ${wallets.length + 1}`
+    const keyId = newKeyId.trim()
+    const secret = newSecret.trim()
+    if (!keyId || !secret) {
+      setAddError('Key ID and Secret Key are required')
+      return
+    }
+    setAddError('')
+
+    const id = crypto.randomUUID()
+    const entry: WalletEntry = { id, label, keyId }
+
+    // Store secret in secureStorage (encrypted)
+    try {
+      const { secureStorage } = await import('@/utils/secureStorage')
+      await secureStorage.set(`wallet-secret-${id}`, secret, { encrypt: true })
+    } catch {
+      setAddError('Failed to store credentials securely')
+      return
+    }
+
+    addWallet(entry)
+    setNewLabel('')
+    setNewKeyId('')
+    setNewSecret('')
+    setShowAdd(false)
+  }
+
+  const handleSwitch = async (wallet: WalletEntry) => {
+    if (wallet.id === activeWalletId) return
+    setSwitching(true)
+    try {
+      const { walletService } = await import('@/services/wallet')
+      const success = await walletService.switchWallet(wallet)
+      if (success) {
+        setActiveWallet(wallet.id)
+      }
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  const handleRemove = (walletId: string) => {
+    if (walletId === activeWalletId) {
+      disconnect()
+    }
+    removeWallet(walletId)
+  }
+
+  if (wallets.length === 0 && !showAdd) {
+    return (
+      <MatrixCard title="WALLET REGISTRY" subtitle="Manage multiple PM US wallets" variant="glass">
+        <div className="text-center py-6">
+          <p className="text-agent-text-muted text-sm font-sans mb-4">
+            Save multiple wallets to switch between them quickly. Credentials are encrypted locally.
+          </p>
+          <MatrixButton onClick={() => setShowAdd(true)} size="sm">
+            Add Wallet
+          </MatrixButton>
+        </div>
+      </MatrixCard>
+    )
+  }
+
+  return (
+    <MatrixCard title="WALLET REGISTRY" subtitle="Manage multiple PM US wallets" variant="glass">
+      <div className="space-y-3">
+        {wallets.map(w => (
+          <div
+            key={w.id}
+            className={`flex items-center justify-between gap-3 rounded-lg p-3 border transition-colors ${
+              w.id === activeWalletId
+                ? 'bg-agent-green/10 border-agent-green/30'
+                : 'bg-agent-bg/40 border-agent-border/50 hover:border-agent-green/20'
+            }`}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${w.id === activeWalletId ? 'bg-agent-green animate-pulse' : 'bg-agent-text-label'}`} />
+                <span className="text-sm font-mono text-agent-text truncate">{w.label}</span>
+                {w.id === activeWalletId && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-agent-green/20 text-agent-green">ACTIVE</span>
+                )}
+              </div>
+              <span className="text-xs font-mono text-agent-text-muted ml-4">{w.keyId.slice(0, 12)}...</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {w.id !== activeWalletId && (
+                <MatrixButton size="sm" onClick={() => handleSwitch(w)} loading={switching}>
+                  Switch
+                </MatrixButton>
+              )}
+              <button
+                onClick={() => handleRemove(w.id)}
+                className="text-agent-text-muted hover:text-red-400 transition-colors p-1"
+                title="Remove wallet"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        ))}
+
+        {showAdd ? (
+          <div className="bg-agent-bg/60 rounded-lg p-4 border border-agent-cyan/30 space-y-3">
+            <MatrixInput label="Label" type="text" value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="e.g. Trading Bot #2" />
+            <MatrixInput label="Key ID" type="text" value={newKeyId} onChange={e => setNewKeyId(e.target.value)} placeholder="UUID from polymarket.us/developer" />
+            <MatrixInput label="Secret Key" type="password" value={newSecret} onChange={e => setNewSecret(e.target.value)} placeholder="Base64 Ed25519 secret" error={addError} />
+            <div className="flex gap-2">
+              <MatrixButton onClick={handleAdd} size="sm" variant="primary">Save Wallet</MatrixButton>
+              <MatrixButton onClick={() => { setShowAdd(false); setAddError('') }} size="sm" variant="ghost">Cancel</MatrixButton>
+            </div>
+          </div>
+        ) : (
+          <MatrixButton onClick={() => setShowAdd(true)} size="sm" variant="ghost" className="w-full">
+            + Add Another Wallet
+          </MatrixButton>
         )}
       </div>
     </MatrixCard>
@@ -1553,8 +1638,12 @@ const BtcUpDownSettings: React.FC = () => {
     btcRegimeFilterEnabled, setBtcRegimeFilterEnabled,
     btcRsiFilterEnabled, setBtcRsiFilterEnabled,
     btcUseLLMConfirmation, setBtcUseLLMConfirmation,
+    btcLLMModel, setBtcLLMModel,
     openRouterApiKey,
   } = useSettingsStore()
+
+  // OpenRouter key may live in store, localStorage, or env var
+  const hasOpenRouterKey = !!(openRouterApiKey || localStorage.getItem('OPENROUTER_API_KEY') || import.meta.env.VITE_OPENROUTER_API_KEY)
 
   const [diagnosing, setDiagnosing] = useState(false)
   const [diagResult, setDiagResult] = useState<string | null>(null)
@@ -1699,17 +1788,32 @@ const BtcUpDownSettings: React.FC = () => {
               <div>
                 <span className="text-agent-text font-sans text-sm">LLM Confirmation</span>
                 <p className="text-agent-text-muted text-xs font-sans">
-                  {openRouterApiKey
+                  {hasOpenRouterKey
                     ? 'AI verifies every signal before trading (~$0.002/call)'
-                    : 'Requires OpenRouter API key (set above)'}
+                    : 'Requires OpenRouter API key (set in API Keys tab)'}
                 </p>
               </div>
               <MatrixToggle
                 enabled={btcUseLLMConfirmation}
                 onChange={setBtcUseLLMConfirmation}
-                disabled={!openRouterApiKey}
+                disabled={!hasOpenRouterKey}
               />
             </div>
+            {btcUseLLMConfirmation && (
+              <MatrixSelect
+                label="LLM Model"
+                value={btcLLMModel}
+                onChange={(e) => setBtcLLMModel(e.target.value)}
+                options={[
+                  { value: 'deepseek/deepseek-r1', label: 'DeepSeek R1 (Recommended — reasoning, ~$0.003/call)' },
+                  { value: 'google/gemini-flash-1.5', label: 'Gemini 1.5 Flash (~$0.0002/call)' },
+                  { value: 'meta-llama/llama-3.1-70b-instruct', label: 'Llama 3.1 70B (~$0.0003/call)' },
+                  { value: 'openai/gpt-4o-mini', label: 'GPT-4o Mini (~$0.0004/call)' },
+                  { value: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet (~$0.006/call)' },
+                ]}
+                hint="Reasoning models (DeepSeek R1) work best for signal confirmation"
+              />
+            )}
           </div>
         </div>
 
@@ -1750,7 +1854,7 @@ const BtcUpDownSettings: React.FC = () => {
               setDiagnosing(true)
               setDiagResult(null)
               try {
-                const { gammaClient } = await import('@/services/api/GammaClient')
+                const { polymarketUSClient } = await import('@/services/api')
                 // Use the same slug-based discovery the actual strategy uses
                 const nowSec = Math.floor(Date.now() / 1000)
                 const window15m = Math.floor(nowSec / 900) * 900
@@ -1763,11 +1867,12 @@ const BtcUpDownSettings: React.FC = () => {
                 const results: string[] = []
                 for (const { asset, slug, dur } of slugs) {
                   try {
-                    const event = await gammaClient.getEventBySlug(slug)
-                    const active = event?.markets?.filter((m: { active: boolean; closed: boolean }) => m.active && !m.closed) || []
-                    if (active.length > 0) {
-                      const prices = active[0].outcomePrices || []
-                      results.push(`${asset} ${dur}: ${active.length} mkt (${prices.map((p: string) => `${(parseFloat(p) * 100).toFixed(0)}c`).join('/')})`)
+                    const event = await polymarketUSClient.getEventBySlug(slug)
+                    const activeMarkets = event?.markets?.filter((m: { active: boolean; closed: boolean }) => m.active && !m.closed) || []
+                    if (activeMarkets.length > 0) {
+                      // US API: each market in event is a single outcome with its own price
+                      const prices = activeMarkets.map((m: any) => m.lastTradePrice || m.outcomePrices?.[0] || 0)
+                      results.push(`${asset} ${dur}: ${activeMarkets.length} mkt (${prices.map((p: number) => `${(Number(p) * 100).toFixed(0)}c`).join('/')})`)
                     }
                   } catch { /* skip failed lookups */ }
                 }
@@ -2137,27 +2242,146 @@ const CopyTradingSettings: React.FC = () => {
 }
 
 /**
+ * Alert Settings — Telegram & Discord
+ */
+const AlertSettings: React.FC = () => {
+  const {
+    telegramBotToken, setTelegramBotToken,
+    telegramChatId, setTelegramChatId,
+    discordWebhookUrl, setDiscordWebhookUrl,
+    alertOnTrade, setAlertOnTrade,
+    alertOnError, setAlertOnError,
+  } = useSettingsStore()
+
+  const [tgToken, setTgToken] = useState(telegramBotToken)
+  const [tgChatId, setTgChatId] = useState(telegramChatId)
+  const [dcWebhook, setDcWebhook] = useState(discordWebhookUrl)
+  const [testResult, setTestResult] = useState<string | null>(null)
+
+  const handleSave = () => {
+    setTelegramBotToken(tgToken.trim())
+    setTelegramChatId(tgChatId.trim())
+    setDiscordWebhookUrl(dcWebhook.trim())
+    setTestResult('Saved')
+    setTimeout(() => setTestResult(null), 2000)
+  }
+
+  const handleTestTelegram = async () => {
+    if (!tgToken || !tgChatId) { setTestResult('Enter token + chat ID first'); return }
+    setTestResult('Sending...')
+    const ok = await notificationService.sendTelegram(tgToken.trim(), tgChatId.trim(), 'AlphaPolyBot test alert')
+    setTestResult(ok ? 'Telegram OK' : 'Telegram failed — check token/chat ID')
+    setTimeout(() => setTestResult(null), 4000)
+  }
+
+  const handleTestDiscord = async () => {
+    if (!dcWebhook) { setTestResult('Enter webhook URL first'); return }
+    setTestResult('Sending...')
+    const ok = await notificationService.sendDiscord(dcWebhook.trim(), '**AlphaPolyBot** — test alert')
+    setTestResult(ok ? 'Discord OK' : 'Discord failed — check webhook URL')
+    setTimeout(() => setTestResult(null), 4000)
+  }
+
+  return (
+    <MatrixCard title="ALERTS" subtitle="Telegram & Discord push notifications for trades and errors" variant="glass">
+      <div className="space-y-6">
+        {/* Event toggles */}
+        <div className="bg-agent-bg/40 rounded-lg p-4 border border-agent-border/50">
+          <h4 className="text-agent-green text-sm font-mono mb-3">Alert Events</h4>
+          <div className="space-y-3">
+            <MatrixToggle
+              label="Trades & Sells"
+              enabled={alertOnTrade}
+              onChange={setAlertOnTrade}
+              description="Push when a trade is placed or position closed"
+            />
+            <MatrixToggle
+              label="Errors & Warnings"
+              enabled={alertOnError}
+              onChange={setAlertOnError}
+              description="Push on strategy errors and risk warnings"
+            />
+          </div>
+        </div>
+
+        {/* Telegram */}
+        <div className="bg-agent-bg/40 rounded-lg p-4 border border-agent-border/50">
+          <h4 className="text-agent-green text-sm font-mono mb-3">Telegram</h4>
+          <div className="space-y-3">
+            <MatrixInput
+              label="Bot Token"
+              type="password"
+              value={tgToken}
+              onChange={(e) => setTgToken(e.target.value)}
+              placeholder="123456:ABC..."
+              hint="Create via @BotFather on Telegram"
+            />
+            <MatrixInput
+              label="Chat ID"
+              value={tgChatId}
+              onChange={(e) => setTgChatId(e.target.value)}
+              placeholder="-100..."
+              hint="Your user/group/channel ID"
+            />
+            <MatrixButton size="sm" variant="secondary" onClick={handleTestTelegram}>
+              Test Telegram
+            </MatrixButton>
+          </div>
+        </div>
+
+        {/* Discord */}
+        <div className="bg-agent-bg/40 rounded-lg p-4 border border-agent-border/50">
+          <h4 className="text-agent-green text-sm font-mono mb-3">Discord</h4>
+          <div className="space-y-3">
+            <MatrixInput
+              label="Webhook URL"
+              type="password"
+              value={dcWebhook}
+              onChange={(e) => setDcWebhook(e.target.value)}
+              placeholder="https://discord.com/api/webhooks/..."
+              hint="Server Settings → Integrations → Webhooks"
+            />
+            <MatrixButton size="sm" variant="secondary" onClick={handleTestDiscord}>
+              Test Discord
+            </MatrixButton>
+          </div>
+        </div>
+
+        {/* Save + status */}
+        <div className="flex items-center gap-4">
+          <MatrixButton onClick={handleSave}>Save Alert Settings</MatrixButton>
+          <AnimatePresence>
+            {testResult && (
+              <motion.span
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0 }}
+                className={`text-sm font-mono ${testResult.includes('OK') || testResult === 'Saved' ? 'text-agent-green' : testResult.includes('failed') ? 'text-agent-red' : 'text-agent-text-muted'}`}
+              >
+                {testResult}
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </MatrixCard>
+  )
+}
+
+/**
  * API Settings
  */
 const APISettings: React.FC = () => {
   const {
     openRouterApiKey, setOpenRouterApiKey,
-    clobApiKey, setClobApiKey,
-    clobSecret, setClobSecret,
-    clobPassphrase, setClobPassphrase,
+    pmUsKeyId, pmUsSecretKey,
+    polyBacktestApiKey, setPolyBacktestApiKey,
   } = useSettingsStore()
   const [openRouterKey, setOpenRouterKey] = useState(openRouterApiKey || localStorage.getItem('OPENROUTER_API_KEY') || '')
   const [llmModel, setLlmModel] = useState(localStorage.getItem('OPENROUTER_MODEL') || 'meta-llama/llama-3.1-70b-instruct')
   const [tavilyKey, setTavilyKey] = useState(localStorage.getItem('TAVILY_API_KEY') || '')
-  const [clobKey, setClobKey] = useState(clobApiKey || '')
-  const [clobSec, setClobSec] = useState(clobSecret || '')
-  const [clobPass, setClobPass] = useState(clobPassphrase || '')
+  const [polyBacktestKey, setPolyBacktestKey] = useState(polyBacktestApiKey || '')
   const [saved, setSaved] = useState(false)
-  const [credTestStatus, setCredTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle')
-  const [credTestMsg, setCredTestMsg] = useState('')
-  const [deriving, setDeriving] = useState(false)
-
-  const { isConnected, syncBalances } = useWalletStore()
 
   const handleSave = () => {
     // Save to localStorage (legacy support)
@@ -2166,9 +2390,7 @@ const APISettings: React.FC = () => {
 
     // Save to settings store (primary storage)
     setOpenRouterApiKey(openRouterKey)
-    setClobApiKey(clobKey.trim())
-    setClobSecret(clobSec.trim())
-    setClobPassphrase(clobPass.trim())
+    setPolyBacktestApiKey(polyBacktestKey.trim())
 
     // Apply model selection
     localStorage.setItem('OPENROUTER_MODEL', llmModel)
@@ -2177,20 +2399,6 @@ const APISettings: React.FC = () => {
     // Refresh the OpenRouter service with the new API key
     openRouterService.refreshApiKey()
 
-    // Hot-load CLOB creds into the live client if wallet is already connected
-    const trimKey = clobKey.trim()
-    const trimSec = clobSec.trim()
-    const trimPass = clobPass.trim()
-    if (trimKey && trimSec && trimPass) {
-      clobClient.setCredentials({ key: trimKey, secret: trimSec, passphrase: trimPass })
-      console.log('[Settings] CLOB API credentials applied to live client')
-
-      // Refresh balances so the sidebar updates immediately
-      if (isConnected) {
-        syncBalances()
-      }
-    }
-
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
   }
@@ -2198,7 +2406,8 @@ const APISettings: React.FC = () => {
   // Check if API key is configured
   const isOpenRouterConfigured = !!(openRouterKey && openRouterKey.length > 10)
   const isTavilyConfigured = !!(tavilyKey && tavilyKey.length > 5)
-  const isClobConfigured = !!(clobKey && clobSec && clobPass)
+  const isPolyBacktestConfigured = !!(polyBacktestKey && polyBacktestKey.length > 5)
+  const isPmUsConfigured = !!(pmUsKeyId && pmUsSecretKey)
 
   return (
     <MatrixCard title="API KEYS" subtitle="Configure external service API keys" variant="glass">
@@ -2226,121 +2435,26 @@ const APISettings: React.FC = () => {
               </MatrixBadge>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-agent-text-muted text-sm font-sans">Polymarket CLOB</span>
-              <MatrixBadge variant={isClobConfigured ? 'success' : 'warning'} size="sm">
-                {isClobConfigured ? 'Configured' : 'Not Set'}
+              <span className="text-agent-text-muted text-sm font-sans">PolyBacktest (Optional)</span>
+              <MatrixBadge variant={isPolyBacktestConfigured ? 'success' : 'default'} size="sm">
+                {isPolyBacktestConfigured ? 'Configured' : 'Not Set'}
+              </MatrixBadge>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-agent-text-muted text-sm font-sans">Polymarket US</span>
+              <MatrixBadge variant={isPmUsConfigured ? 'success' : 'warning'} size="sm">
+                {isPmUsConfigured ? 'Configured' : 'Not Set'}
               </MatrixBadge>
             </div>
           </div>
         </div>
 
-        {/* Polymarket CLOB API Credentials */}
+        {/* Polymarket US Credentials — managed in Wallet Connection panel */}
         <div className="bg-agent-bg/40 rounded-lg p-4 border border-agent-border/50">
-          <h4 className="text-agent-green text-sm font-mono mb-2">Polymarket CLOB API (Builder Codes)</h4>
-          <p className="text-agent-text-muted text-xs font-sans mb-4">
-            Get these from polymarket.com/settings → Builder Codes → Create New.
-            Required for live trading. Reconnect wallet after saving.
+          <h4 className="text-agent-green text-sm font-mono mb-2">Polymarket US API</h4>
+          <p className="text-agent-text-muted text-xs font-sans">
+            PM US credentials (Key ID + Secret Key) are configured in the <strong>Wallet Connection</strong> panel above.
           </p>
-          <div className="space-y-4">
-            <MatrixInput
-              label="API Key"
-              type="password"
-              value={clobKey}
-              onChange={(e) => setClobKey(e.target.value)}
-              placeholder="019c3fd9-4855-..."
-              hint="UUID format from Builder Codes"
-            />
-            <MatrixInput
-              label="Secret"
-              type="password"
-              value={clobSec}
-              onChange={(e) => setClobSec(e.target.value)}
-              placeholder="WHubhrw7rQ00..."
-              hint="Base64-encoded HMAC secret"
-            />
-            <MatrixInput
-              label="Passphrase"
-              type="password"
-              value={clobPass}
-              onChange={(e) => setClobPass(e.target.value)}
-              placeholder="6c430cc17b04..."
-              hint="Hex string passphrase"
-            />
-          </div>
-          <div className="flex gap-2 mt-3">
-            <MatrixButton
-              variant="secondary"
-              size="sm"
-              disabled={!isConnected || deriving}
-              onClick={async () => {
-                setDeriving(true)
-                try {
-                  const { clobClient } = await import('@/services/api')
-                  const creds = await clobClient.deriveApiKey()
-                  if (creds) {
-                    setClobKey(creds.key)
-                    setClobSec(creds.secret)
-                    setClobPass(creds.passphrase)
-                    setClobApiKey(creds.key)
-                    setClobSecret(creds.secret)
-                    setClobPassphrase(creds.passphrase)
-                    setCredTestStatus('success')
-                    setCredTestMsg('Credentials derived and saved')
-                  } else {
-                    setCredTestStatus('fail')
-                    setCredTestMsg('Derive failed — this wallet may not be registered with Polymarket')
-                  }
-                } catch (err) {
-                  setCredTestStatus('fail')
-                  setCredTestMsg(err instanceof Error ? err.message : 'Derive failed')
-                } finally {
-                  setDeriving(false)
-                }
-              }}
-            >
-              {deriving ? 'Deriving...' : 'Derive from Wallet'}
-            </MatrixButton>
-            <MatrixButton
-              variant="secondary"
-              size="sm"
-              disabled={!isConnected || !clobKey || !clobSec || !clobPass || credTestStatus === 'testing'}
-              onClick={async () => {
-                setCredTestStatus('testing')
-                try {
-                  const { clobClient } = await import('@/services/api')
-                  const trimKey = clobKey.trim()
-                  const trimSec = clobSec.trim()
-                  const trimPass = clobPass.trim()
-                  if (trimKey && trimSec && trimPass) {
-                    clobClient.setCredentials({ key: trimKey, secret: trimSec, passphrase: trimPass })
-                  }
-                  const result = await clobClient.validateCredentials()
-                  if (result.valid) {
-                    setCredTestStatus('success')
-                    setCredTestMsg('Credentials are valid')
-                  } else {
-                    setCredTestStatus('fail')
-                    setCredTestMsg(result.error || 'Validation failed')
-                  }
-                } catch (err) {
-                  setCredTestStatus('fail')
-                  setCredTestMsg(err instanceof Error ? err.message : 'Test failed')
-                }
-              }}
-            >
-              {credTestStatus === 'testing' ? 'Testing...' : 'Test Credentials'}
-            </MatrixButton>
-          </div>
-          {credTestStatus !== 'idle' && credTestStatus !== 'testing' && (
-            <p className={`text-xs font-sans mt-2 ${credTestStatus === 'success' ? 'text-agent-green' : 'text-agent-red'}`}>
-              {credTestMsg}
-            </p>
-          )}
-          {!isConnected && (
-            <p className="text-agent-text-muted text-xs font-sans mt-2">
-              Connect wallet first to derive or test credentials.
-            </p>
-          )}
         </div>
 
         <MatrixInput
@@ -2372,6 +2486,15 @@ const APISettings: React.FC = () => {
           onChange={(e) => setTavilyKey(e.target.value)}
           placeholder="tvly-..."
           hint="For web search augmentation"
+        />
+
+        <MatrixInput
+          label="PolyBacktest API Key (Optional)"
+          type="password"
+          value={polyBacktestKey}
+          onChange={(e) => setPolyBacktestKey(e.target.value)}
+          placeholder="pb-..."
+          hint="For BTC Up/Down backtesting and historical enrichment"
         />
 
         <div className="flex items-center gap-4">
@@ -2407,7 +2530,6 @@ const RiskManagementSettings: React.FC = () => {
     maxTradesPerHour, setMaxTradesPerHour,
     consecutiveFailureLimit, setConsecutiveFailureLimit,
     minBalanceForTrade, setMinBalanceForTrade,
-    minMaticForGas, setMinMaticForGas,
     aggressiveMode, setAggressiveMode,
   } = useSettingsStore()
 
@@ -2631,16 +2753,6 @@ const RiskManagementSettings: React.FC = () => {
               step={1}
               disabled={!riskManagementEnabled}
               hint="Below this, trades are blocked"
-            />
-            <MatrixNumberInput
-              label="Min MATIC for Gas"
-              value={minMaticForGas}
-              onChange={(v) => v !== undefined && setMinMaticForGas(v)}
-              min={0.001}
-              max={1}
-              step={0.005}
-              disabled={!riskManagementEnabled}
-              hint="MATIC needed for on-chain gas fees"
             />
           </div>
         </div>

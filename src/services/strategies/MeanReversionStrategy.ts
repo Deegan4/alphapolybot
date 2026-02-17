@@ -58,6 +58,8 @@ export class MeanReversionStrategy extends BaseStrategy {
   private mrConfig: MeanRevConfig = DEFAULT_CONFIG
   private scanInterval: number | null = null
   private unsubBinance: (() => void) | null = null
+  private restPollInterval: number | null = null
+  private binanceConnected = false
 
   // Rolling price buffers — keyed by symbol
   private priceBuffers = new Map<MrSymbol, number[]>()
@@ -103,19 +105,30 @@ export class MeanReversionStrategy extends BaseStrategy {
     this.log('Starting Mean Reversion Strategy')
     this.setStatus('running')
 
+    // Ensure Coinbase credentials are hydrated before we need them.
+    // App.tsx hydration is fire-and-forget, so re-push here as a safety net.
+    await this.ensureCoinbaseCredentials()
+
     // Bootstrap price buffers from Coinbase candles
     await this.bootstrapBuffers()
 
     // Subscribe to BinanceWS for live price updates
     try {
       const { binanceWSService } = await import('@/services/realtime/BinanceWSService')
-      await binanceWSService.connect()
-      this.unsubBinance = binanceWSService.onPriceUpdate((update) => {
-        this.handlePriceUpdate(update)
-      })
-      this.log('Subscribed to BinanceWS price feed')
+      const connected = await binanceWSService.connect()
+      if (connected) {
+        this.binanceConnected = true
+        this.unsubBinance = binanceWSService.onPriceUpdate((update) => {
+          this.handlePriceUpdate(update)
+        })
+        this.log('Subscribed to BinanceWS price feed')
+      } else {
+        this.log('BinanceWS connection failed — falling back to Coinbase REST polling')
+        this.startRestPollFallback()
+      }
     } catch (error) {
-      this.logError('Failed to subscribe to BinanceWS', error)
+      this.logError('BinanceWS unavailable — falling back to Coinbase REST polling', error)
+      this.startRestPollFallback()
     }
 
     // Start scan interval
@@ -136,11 +149,17 @@ export class MeanReversionStrategy extends BaseStrategy {
       this.scanInterval = null
     }
 
+    if (this.restPollInterval) {
+      clearInterval(this.restPollInterval)
+      this.restPollInterval = null
+    }
+
     if (this.unsubBinance) {
       this.unsubBinance()
       this.unsubBinance = null
     }
 
+    this.binanceConnected = false
     this.priceBuffers.clear()
     this.lastTradeTimes.clear()
     this._lastSignals.clear()
@@ -210,6 +229,83 @@ export class MeanReversionStrategy extends BaseStrategy {
   }
 
   // ==========================================
+  // CREDENTIAL HYDRATION
+  // ==========================================
+
+  /**
+   * Ensure CoinbaseClient has credentials before the strategy needs them.
+   * App.tsx hydration is fire-and-forget, so if the strategy starts quickly
+   * after page load, credentials may not be there yet.
+   */
+  private async ensureCoinbaseCredentials(): Promise<void> {
+    try {
+      const { coinbaseApiKey, coinbaseSecret } = useSettingsStore.getState()
+      if (!coinbaseApiKey || !coinbaseSecret) {
+        this.log('WARNING: Coinbase API credentials are empty — orders will fail. Check Settings.')
+        return
+      }
+      const { coinbaseClient } = await import('@/services/api/CoinbaseClient')
+      if (!coinbaseClient.hasCredentials()) {
+        coinbaseClient.setCredentials(coinbaseApiKey, coinbaseSecret)
+        this.log('Coinbase credentials hydrated from settings store')
+      }
+    } catch (error) {
+      this.logError('Failed to hydrate Coinbase credentials', error)
+    }
+  }
+
+  // ==========================================
+  // REST POLL FALLBACK (when BinanceWS unavailable)
+  // ==========================================
+
+  /**
+   * Fall back to polling Coinbase REST candles when BinanceWS is blocked.
+   * Polls every 10 seconds for the latest 1-minute candle close price.
+   * Slower than WS (~10s vs ~1s) but works everywhere.
+   */
+  private startRestPollFallback(): void {
+    if (this.restPollInterval) return
+
+    this.log('Starting Coinbase REST price polling (10s interval)')
+    activityLogger.logSystem('Mean Rev: Using Coinbase REST fallback (BinanceWS unavailable)')
+
+    const poll = async () => {
+      if (!this._enabled || this._status !== 'running') return
+
+      try {
+        const { coinbaseClient, CoinbaseClient } = await import('@/services/api/CoinbaseClient')
+        if (!coinbaseClient.hasCredentials()) return
+
+        const symbols = this.getEnabledSymbols()
+        for (const symbol of symbols) {
+          try {
+            const productId = CoinbaseClient.productId(symbol)
+            const price = await coinbaseClient.getTickerPrice(productId)
+            if (price && price > 0) {
+              this.handlePriceUpdate({
+                symbol,
+                priceUSD: price,
+                priceChange24hPct: 0,
+                volume24hUSD: 0,
+                high24h: price,
+                low24h: price,
+                timestamp: Date.now(),
+                source: 'binance-ws' as const, // same type for buffer compat
+              })
+            }
+          } catch { /* individual symbol failure — continue */ }
+        }
+      } catch (error) {
+        this.logError('REST poll failed', error)
+      }
+    }
+
+    // Immediate first poll
+    poll()
+    this.restPollInterval = window.setInterval(poll, 10_000)
+  }
+
+  // ==========================================
   // SCAN LOOP
   // ==========================================
 
@@ -218,8 +314,20 @@ export class MeanReversionStrategy extends BaseStrategy {
 
     try {
       const symbols = this.getEnabledSymbols()
+      if (symbols.length === 0) {
+        this.log('Scan skipped: no symbols enabled (enable BTC/ETH/SOL in Settings)')
+        return
+      }
+
       for (const symbol of symbols) {
         if (!this._enabled) break
+
+        const buffer = this.priceBuffers.get(symbol)
+        if (!buffer || buffer.length < 5) {
+          this.log(`${symbol}: buffer too small (${buffer?.length ?? 0}/${this.mrConfig.lookbackPeriod}) — waiting for price data`)
+          continue
+        }
+
         await this.analyzeSymbol(symbol)
       }
     } catch (error) {
@@ -413,10 +521,10 @@ export class MeanReversionStrategy extends BaseStrategy {
         modelProbability: signal.confidence,
       })
 
-      // Record with RiskManager
+      // Record trade execution (no realized PnL on BUY — only on SELL)
       try {
         const { riskManager } = await import('@/services/trading/RiskManager')
-        riskManager.recordTradeResult(true, this.mrConfig.tradeSize)
+        riskManager.recordTradeResult(true, 0)
       } catch { /* best effort */ }
 
       this.emit('tradePlaced', { symbol, side: 'BUY', signal, result })

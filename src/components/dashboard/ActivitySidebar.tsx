@@ -33,7 +33,7 @@ const formatTime = (ts: Date | number) => {
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 }
 
-export const ActivitySidebar: React.FC = () => {
+export const ActivitySidebar: React.FC<{ collapsed?: boolean; onToggle?: () => void }> = ({ collapsed = false, onToggle }) => {
   const [activities, setActivities] = useState<ActivityItem[]>(
     activityLogger.getActivities({ limit: 100 })
   )
@@ -43,10 +43,22 @@ export const ActivitySidebar: React.FC = () => {
   const [showJumpBtn, setShowJumpBtn] = useState(false)
   const prevCountRef = useRef(0)
 
+  // Debounce activity updates — strategies can log bursts of 5-10 events in quick
+  // succession (e.g., scan → analysis → trade). Debouncing at 500ms batches those
+  // into a single re-render instead of 5-10 separate ones, each allocating a new array.
   useEffect(() => {
-    return activityLogger.subscribe(() => {
-      setActivities(activityLogger.getActivities({ limit: 100 }))
+    let debounceId: ReturnType<typeof setTimeout> | null = null
+    const unsub = activityLogger.subscribe(() => {
+      if (debounceId) return
+      debounceId = setTimeout(() => {
+        debounceId = null
+        setActivities(activityLogger.getActivities({ limit: 100 }))
+      }, 500)
     })
+    return () => {
+      unsub()
+      if (debounceId) clearTimeout(debounceId)
+    }
   }, [])
 
   const handleScroll = () => {
@@ -88,10 +100,34 @@ export const ActivitySidebar: React.FC = () => {
     }
   }, [filtered])
 
+  // Collapsed rail — just a vertical toggle strip
+  if (collapsed) {
+    const errorCount = activities.filter(a => a.type === 'error' || a.type === 'warning').length
+    return (
+      <button
+        onClick={onToggle}
+        className="card-base flex flex-col items-center py-3 px-1.5 gap-2 h-full hover:border-agent-green/20 transition-colors group"
+        title="Expand activity log"
+      >
+        <span className="text-sm">&#9889;</span>
+        <span className="text-[9px] font-mono text-agent-text-muted group-hover:text-agent-green [writing-mode:vertical-lr] tracking-widest uppercase">
+          Activity
+        </span>
+        <span className="text-[10px] font-mono text-agent-text-label tabular-nums">{filtered.length}</span>
+        {errorCount > 0 && (
+          <span className="text-[9px] font-mono text-agent-red bg-agent-red/10 rounded-full w-5 h-5 flex items-center justify-center">
+            {errorCount}
+          </span>
+        )}
+        <span className="text-agent-text-muted group-hover:text-agent-green text-xs mt-auto">&#9664;</span>
+      </button>
+    )
+  }
+
   return (
-    <div className="bg-agent-card border border-agent-border rounded-lg flex flex-col min-h-0 h-full">
+    <div className="card-base flex flex-col min-h-0 h-full">
       {/* Header */}
-      <div className="px-4 pt-3.5 pb-2.5 border-b border-agent-border">
+      <div className="px-3 pt-3 pb-2 border-b border-agent-border">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-sm">&#9889;</span>
           <span className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium">
@@ -100,15 +136,24 @@ export const ActivitySidebar: React.FC = () => {
           <span className="text-[10px] font-mono text-agent-text-label ml-auto tabular-nums">
             {filtered.length}
           </span>
+          {onToggle && (
+            <button
+              onClick={onToggle}
+              className="text-agent-text-muted hover:text-agent-green text-xs transition-colors ml-1"
+              title="Collapse activity log"
+            >
+              &#9654;
+            </button>
+          )}
         </div>
 
         {/* Filter tabs */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1 flex-wrap">
           {FILTERS.map((f) => (
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`text-[10px] font-sans font-semibold px-2.5 py-1 rounded-full transition-colors ${
+              className={`text-[10px] font-sans font-semibold px-2 py-0.5 rounded-full transition-colors ${
                 filter === f
                   ? 'bg-agent-green/15 text-agent-green border border-agent-green/30'
                   : 'text-agent-text-muted hover:text-agent-text'
@@ -125,7 +170,7 @@ export const ActivitySidebar: React.FC = () => {
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="h-full overflow-y-auto px-4 py-2"
+          className="h-full overflow-y-auto px-3 py-2"
         >
           {filtered.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center gap-2">
@@ -133,18 +178,18 @@ export const ActivitySidebar: React.FC = () => {
               <span className="text-sm font-sans text-agent-text-label">No activity</span>
             </div>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-0.5">
               {filtered.map((a) => (
                 <div
                   key={a.id}
-                  className="flex gap-2 py-1 leading-tight border-b border-agent-border/20 last:border-b-0 animate-fade-in"
+                  className="flex gap-1.5 py-0.5 leading-tight border-b border-agent-border/10 last:border-b-0 animate-fade-in"
                 >
-                  <span className="text-[11px] font-mono text-agent-text-label shrink-0 tabular-nums">
+                  <span className="text-[10px] font-mono text-agent-text-label shrink-0 tabular-nums">
                     {formatTime(a.timestamp)}
                   </span>
-                  <span className="text-[11px] shrink-0">{typeEmoji[a.type] || ''}</span>
+                  <span className="text-[10px] shrink-0">{typeEmoji[a.type] || ''}</span>
                   <span
-                    className={`text-[11px] font-mono ${typeColor[a.type] || 'text-agent-text-muted'} break-all leading-relaxed`}
+                    className={`text-[10px] font-mono ${typeColor[a.type] || 'text-agent-text-muted'} break-all leading-snug`}
                   >
                     {a.message}
                   </span>
@@ -154,7 +199,7 @@ export const ActivitySidebar: React.FC = () => {
           )}
         </div>
 
-        {/* Jump-to-latest button — appears when user scrolls away from bottom */}
+        {/* Jump-to-latest button */}
         {showJumpBtn && filtered.length > 0 && (
           <button
             onClick={() => {

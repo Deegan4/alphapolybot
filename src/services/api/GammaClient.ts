@@ -50,7 +50,7 @@ function normalizeMarket(raw: any): Market {
  */
 export class GammaClient extends BaseApiClient {
   constructor() {
-    super(import.meta.env.VITE_GAMMA_API_URL || 'https://gamma-api.polymarket.com', {
+    super(import.meta.env.VITE_GAMMA_API_URL || (import.meta.env.DEV ? '/api/gamma' : 'https://gamma-api.polymarket.com'), {
       maxRequestsPerMinute: 100,
       maxRetries: 3,
       timeout: 15000,

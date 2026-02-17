@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Hide scrollbar but keep scrolling */
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
+
 /* Agent Theme Variables */
 :root {
   --agent-text: #f0f6fc;
@@ -135,7 +141,7 @@ body {
 }
 
 .card-hover:hover {
-  @apply border-agent-green/30;
+  @apply border-agent-green/20 bg-agent-card/60 shadow-elevation-2;
 }
 
 /* Terminal text effect */
@@ -145,7 +151,7 @@ body {
 
 /* Glass effect */
 .glass {
-  @apply bg-agent-card/80 backdrop-blur-sm;
+  @apply bg-agent-card/50 backdrop-blur-lg;
 }
 
 /* Number formatting */
@@ -214,7 +220,7 @@ body {
 
 /* Glassmorphism card */
 .glass-card {
-  @apply bg-agent-card/60 backdrop-blur-md border border-agent-border/50;
+  @apply bg-agent-card/50 backdrop-blur-lg border border-agent-green/[0.07] rounded-xl shadow-glass;
 }
 
 /* Gradient border (green-to-cyan pseudo-element) */
@@ -232,11 +238,11 @@ body {
   -webkit-mask-composite: xor;
   mask-composite: exclude;
   pointer-events: none;
-  opacity: 0.3;
+  opacity: 0.15;
   transition: opacity 0.3s;
 }
 .gradient-border:hover::before {
-  opacity: 0.6;
+  opacity: 0.4;
 }
 
 /* Shimmer skeleton */
@@ -252,7 +258,7 @@ body {
 
 /* Dashboard utility classes */
 .card-base {
-  @apply bg-agent-card border border-agent-border rounded-lg;
+  @apply bg-agent-card/50 backdrop-blur-lg border border-agent-green/[0.07] rounded-xl shadow-glass;
 }
 
 .section-label {
@@ -274,6 +280,17 @@ body {
 }
 .animate-fade-in {
   animation: fade-in 0.25s ease-out;
+}
+
+/* Dashboard frosted background — gives glass cards something to blur */
+.dashboard-bg {
+  background-color: var(--agent-bg);
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(34, 197, 94, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(34, 211, 238, 0.02) 0%, transparent 50%),
+    linear-gradient(rgba(34, 197, 94, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 197, 94, 0.02) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 24px 24px, 24px 24px;
 }
 
 /* Scrollbar with cyan accent */

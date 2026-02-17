@@ -62,11 +62,11 @@ vi.mock('@/stores', () => ({
   },
 }))
 
-// Mock CLOB client (PLM places resting exit orders via dynamic import)
-const mockClobPlaceOrder = vi.fn()
+// Mock US client (PLM fetches positions/markets via dynamic import)
 vi.mock('@/services/api', () => ({
-  clobClient: {
-    placeOrder: (...args: unknown[]) => mockClobPlaceOrder(...args),
+  polymarketUSClient: {
+    getPositions: vi.fn().mockResolvedValue([]),
+    getMarketBySlug: vi.fn().mockResolvedValue(null),
   },
 }))
 
@@ -94,9 +94,7 @@ vi.mock('../TradeLogger', () => ({
 
 function makePosition(overrides: Partial<TrackedPosition> = {}): TrackedPosition {
   return {
-    tokenId: 'token-abc-123',
-    marketId: 'market-1',
-    conditionId: 'cond-1',
+    marketSlug: 'will-btc-exceed-100k',
     outcome: 'yes',
     question: 'Will BTC exceed $100k by end of month?',
     entryPrice: 0.50,
@@ -147,20 +145,20 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(pos)
 
       expect(plm.count).toBe(1)
-      expect(mockSubscribeMarket).toHaveBeenCalledWith('token-abc-123')
+      expect(mockSubscribeMarket).toHaveBeenCalledWith('will-btc-exceed-100k')
     })
 
     it('tracks multiple positions', () => {
-      plm.trackPosition(makePosition({ tokenId: 'a' }))
-      plm.trackPosition(makePosition({ tokenId: 'b' }))
-      plm.trackPosition(makePosition({ tokenId: 'c' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-b' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-c' }))
 
       expect(plm.count).toBe(3)
     })
 
-    it('overwrites position with same tokenId', () => {
-      plm.trackPosition(makePosition({ tokenId: 'a', entryPrice: 0.40 }))
-      plm.trackPosition(makePosition({ tokenId: 'a', entryPrice: 0.60 }))
+    it('overwrites position with same marketSlug', () => {
+      plm.trackPosition(makePosition({ marketSlug: 'market-a', entryPrice: 0.40 }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a', entryPrice: 0.60 }))
 
       expect(plm.count).toBe(1)
       const positions = plm.getPositions()
@@ -173,12 +171,12 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition())
       expect(plm.count).toBe(1)
 
-      plm.removePosition('token-abc-123')
+      plm.removePosition('will-btc-exceed-100k')
       expect(plm.count).toBe(0)
-      expect(mockUnsubscribeMarket).toHaveBeenCalledWith('token-abc-123')
+      expect(mockUnsubscribeMarket).toHaveBeenCalledWith('will-btc-exceed-100k')
     })
 
-    it('does nothing for unknown tokenId', () => {
+    it('does nothing for unknown marketSlug', () => {
       plm.removePosition('nonexistent')
       expect(plm.count).toBe(0)
     })
@@ -237,13 +235,13 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Simulate price update: 0.50 → 0.40 = -20% (exceeds -15% stop-loss)
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       // Give async sell time to complete
-      // placeSell(tokenId, size, price?, negRisk?, orderType?) — GTC for exit sells
+      // placeSell(slug, outcome, size, price?, orderType?) — GTC for exit sells
       await vi.waitFor(() => {
-        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined, 'GTC')
+        expect(mockPlaceSell).toHaveBeenCalledWith('will-btc-exceed-100k', 'yes', 10, undefined, 'GTC')
       })
     })
 
@@ -255,8 +253,8 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Simulate price update: 0.50 → 0.45 = -10% (within -15% threshold)
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.45, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.45, timestamp: new Date() })
 
       expect(mockPlaceSell).not.toHaveBeenCalled()
     })
@@ -275,11 +273,11 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Simulate price update: 0.50 → 0.70 = +40% (exceeds +30% take-profit)
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.70, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.70, timestamp: new Date() })
 
       await vi.waitFor(() => {
-        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined, 'GTC')
+        expect(mockPlaceSell).toHaveBeenCalledWith('will-btc-exceed-100k', 'yes', 10, undefined, 'GTC')
       })
     })
   })
@@ -298,8 +296,8 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition({ entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
 
       // Trigger stop-loss
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       // Wait for first (failed) sell
       await vi.advanceTimersByTimeAsync(100)
@@ -324,11 +322,11 @@ describe('PositionLifecycleManager', () => {
       plm.initialize()
       plm.trackPosition(makePosition({ entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
 
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
 
       // Rapid-fire two price updates that both breach stop-loss
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
-      priceCallback('token-abc-123', { mid: 0.38, timestamp: new Date() })
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
+      priceCallback('will-btc-exceed-100k', { mid: 0.38, timestamp: new Date() })
 
       // Only ONE sell call should have been made
       await vi.waitFor(() => {
@@ -345,12 +343,12 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition())
       expect(plm.count).toBe(1)
 
-      const result = await plm.forceClosePosition('token-abc-123')
+      const result = await plm.forceClosePosition('will-btc-exceed-100k')
       expect(result).toBe(true)
       expect(plm.count).toBe(0)
     })
 
-    it('returns false for unknown tokenId', async () => {
+    it('returns false for unknown marketSlug', async () => {
       const result = await plm.forceClosePosition('nonexistent')
       expect(result).toBe(false)
     })
@@ -361,9 +359,9 @@ describe('PositionLifecycleManager', () => {
       mockPlaceSell.mockResolvedValue({ success: true, orderId: 'sell' })
       mockGetPrice.mockReturnValue({ mid: 0.55, timestamp: new Date() })
 
-      plm.trackPosition(makePosition({ tokenId: 'a' }))
-      plm.trackPosition(makePosition({ tokenId: 'b' }))
-      plm.trackPosition(makePosition({ tokenId: 'c' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-b' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-c' }))
       expect(plm.count).toBe(3)
 
       const result = await plm.forceCloseAll()
@@ -378,8 +376,8 @@ describe('PositionLifecycleManager', () => {
         .mockResolvedValueOnce({ success: false, error: 'failed' })
       mockGetPrice.mockReturnValue({ mid: 0.55, timestamp: new Date() })
 
-      plm.trackPosition(makePosition({ tokenId: 'a' }))
-      plm.trackPosition(makePosition({ tokenId: 'b' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-b' }))
 
       const result = await plm.forceCloseAll()
       expect(result.closed).toBe(1)
@@ -394,7 +392,7 @@ describe('PositionLifecycleManager', () => {
 
       plm.trackPosition(makePosition())
       expect(callback).toHaveBeenCalledTimes(1)
-      expect(callback).toHaveBeenCalledWith([expect.objectContaining({ tokenId: 'token-abc-123' })])
+      expect(callback).toHaveBeenCalledWith([expect.objectContaining({ marketSlug: 'will-btc-exceed-100k' })])
     })
 
     it('fires when position is removed', () => {
@@ -404,7 +402,7 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition())
       plm.onChange(callback)
 
-      plm.removePosition('token-abc-123')
+      plm.removePosition('will-btc-exceed-100k')
       expect(callback).toHaveBeenCalledWith([])
     })
 
@@ -431,8 +429,8 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Trigger stop-loss: 0.50 → 0.40 = -20%
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       await vi.waitFor(() => {
         // pnlUsd = (0.40 - 0.50) * 10 = -1.0
@@ -452,8 +450,8 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Trigger take-profit: 0.50 → 0.70 = +40%
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.70, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.70, timestamp: new Date() })
 
       await vi.waitFor(() => {
         // pnlUsd = (0.70 - 0.50) * 10 = 2.0
@@ -471,8 +469,8 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition({ entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
 
       // Trigger stop-loss
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       // Advance through all 3 retries (attempt 1 + backoff 2s + attempt 2 + backoff 4s + attempt 3)
       await vi.advanceTimersByTimeAsync(100)   // attempt 1 resolves
@@ -485,122 +483,4 @@ describe('PositionLifecycleManager', () => {
     })
   })
 
-  describe('resting exit orders (TP-only GTC limit sells)', () => {
-    it('places TP resting order on first attempt when tokens are settled', async () => {
-      mockClobPlaceOrder.mockResolvedValue({ success: true, orderId: 'resting-1' })
-
-      plm.trackPosition(makePosition({
-        entryPrice: 0.50,
-        stopLossPercent: 0.15,
-        takeProfitPercent: 0.30, // TP price = 0.50 * 1.32 = 0.66 (includes 2% default fee)
-        size: 10,
-      }))
-
-      // Wait for fire-and-forget async to resolve
-      await vi.waitFor(() => {
-        expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1)
-      })
-
-      // TP order only — no SL resting order (GTC SELL at SL price fills immediately at market)
-      expect(mockClobPlaceOrder).toHaveBeenCalledWith(
-        expect.objectContaining({
-          side: 'SELL',
-          price: 0.66,
-          size: 10,
-          type: 'GTC',
-        })
-      )
-    })
-
-    it('retries on balance error when tokens are not yet settled', async () => {
-      vi.useFakeTimers()
-
-      // First call (TP) fails with balance error; next one succeeds
-      mockClobPlaceOrder
-        .mockResolvedValueOnce({ success: false, error: 'not enough balance / allowance' })
-        .mockResolvedValueOnce({ success: true, orderId: 'tp-retry' })
-
-      plm.trackPosition(makePosition({
-        entryPrice: 0.50,
-        stopLossPercent: 0.15,
-        takeProfitPercent: 0.30,
-        size: 10,
-      }))
-
-      // First attempt fires immediately
-      await vi.advanceTimersByTimeAsync(100)
-      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // TP failed
-
-      // Advance past first retry delay (5s)
-      await vi.advanceTimersByTimeAsync(5100)
-      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(2) // Retry TP succeeds
-
-      vi.useRealTimers()
-    })
-
-    it('does NOT retry on non-balance errors', async () => {
-      vi.useFakeTimers()
-
-      mockClobPlaceOrder.mockResolvedValue({ success: false, error: 'invalid signature' })
-
-      plm.trackPosition(makePosition({
-        entryPrice: 0.50,
-        stopLossPercent: 0.15,
-        takeProfitPercent: 0.30,
-        size: 10,
-      }))
-
-      // Let first attempt resolve
-      await vi.advanceTimersByTimeAsync(100)
-      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // TP only
-
-      // Advance way past any retry delay — should NOT retry
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // Still just 1
-
-      vi.useRealTimers()
-    })
-
-    it('abandons retry if position was removed during wait', async () => {
-      vi.useFakeTimers()
-
-      mockClobPlaceOrder.mockResolvedValue({ success: false, error: 'not enough balance' })
-
-      plm.trackPosition(makePosition({
-        entryPrice: 0.50,
-        stopLossPercent: 0.15,
-        takeProfitPercent: 0.30,
-        size: 10,
-      }))
-
-      // Let first attempt fail
-      await vi.advanceTimersByTimeAsync(100)
-      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1) // TP only
-
-      // Remove position before retry fires
-      plm.removePosition('token-abc-123')
-
-      // Advance past retry delay — should NOT make more calls
-      await vi.advanceTimersByTimeAsync(5_000)
-      expect(mockClobPlaceOrder).toHaveBeenCalledTimes(1)
-
-      vi.useRealTimers()
-    })
-
-    it('skips resting orders in dry-run mode', async () => {
-      mockDryRun.value = true
-
-      plm.trackPosition(makePosition({
-        entryPrice: 0.50,
-        stopLossPercent: 0.15,
-        takeProfitPercent: 0.30,
-        size: 10,
-      }))
-
-      // Give fire-and-forget time to resolve (if it were going to)
-      await new Promise(r => setTimeout(r, 50))
-
-      expect(mockClobPlaceOrder).not.toHaveBeenCalled()
-    })
-  })
 })

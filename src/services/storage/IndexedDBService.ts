@@ -8,7 +8,7 @@ import type { TradeRecord } from '@/services/trading/TradeLogger'
 // ==========================================
 
 const DB_NAME = 'alphapolybot'
-const DB_VERSION = 4
+const DB_VERSION = 5
 
 interface AlphaPolyBotDB {
   activities: {
@@ -19,7 +19,7 @@ interface AlphaPolyBotDB {
   positions: {
     key: string
     value: StoredPosition
-    indexes: { 'by-marketId': string; 'by-strategy': string }
+    indexes: { 'by-strategy': string }
   }
   arbRounds: {
     key: string
@@ -98,7 +98,7 @@ export class IndexedDBService {
   private async openDatabase(): Promise<void> {
     try {
       this.db = await openDB<AlphaPolyBotDB>(DB_NAME, DB_VERSION, {
-        upgrade(db) {
+        upgrade(db, oldVersion) {
           // Activities store
           if (!db.objectStoreNames.contains('activities')) {
             const activityStore = db.createObjectStore('activities', { keyPath: 'id' })
@@ -106,10 +106,13 @@ export class IndexedDBService {
             activityStore.createIndex('by-timestamp', 'timestamp')
           }
 
-          // Positions store (tracked positions for crash recovery)
+          // Positions store — v5 migrates keyPath from tokenId to marketSlug
+          if (oldVersion < 5 && db.objectStoreNames.contains('positions')) {
+            // Can't alter keyPath — must delete and recreate
+            db.deleteObjectStore('positions')
+          }
           if (!db.objectStoreNames.contains('positions')) {
-            const positionStore = db.createObjectStore('positions', { keyPath: 'tokenId' })
-            positionStore.createIndex('by-marketId', 'marketId')
+            const positionStore = db.createObjectStore('positions', { keyPath: 'marketSlug' })
             positionStore.createIndex('by-strategy', 'strategy')
           }
 
@@ -236,11 +239,11 @@ export class IndexedDBService {
   /**
    * Remove a position from storage (after sell/close)
    */
-  async removePosition(tokenId: string): Promise<void> {
+  async removePosition(slug: string): Promise<void> {
     if (!this.db) return
 
     try {
-      await this.db.delete('positions', tokenId)
+      await this.db.delete('positions', slug)
     } catch (error) {
       console.warn('[IndexedDB] Failed to remove position:', error)
     }

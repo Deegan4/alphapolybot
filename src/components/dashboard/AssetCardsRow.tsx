@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { AssetCard } from './AssetCard'
 import { usePolymarketPrices } from '@/hooks/usePolymarketPrices'
+import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { btcUpDownStrategy } from '@/services/strategies/BtcUpDownStrategy'
 import { tradeLogger, positionLifecycleManager } from '@/services/trading'
 import type { TradeRecord } from '@/services/trading/TradeLogger'
@@ -29,6 +30,7 @@ const emptyStats: AssetStats = {
 
 export const AssetCardsRow: React.FC = () => {
   const polyPrices = usePolymarketPrices()
+  const cryptoPrices = useCryptoPrices()
   const [stats, setStats] = useState<Record<AssetKey, AssetStats>>({
     BTC: { ...emptyStats },
     ETH: { ...emptyStats },
@@ -118,6 +120,9 @@ export const AssetCardsRow: React.FC = () => {
           windowDuration={polyPrices[asset].windowDuration}
           marketFound={polyPrices[asset].marketFound}
           direction={stats[asset].direction}
+          spotPrice={cryptoPrices[asset].price}
+          spotPriceChange={cryptoPrices[asset].priceChange}
+          spotSparkline={cryptoPrices[asset].sparklineHistory}
           sparklineData={polyPrices[asset].sparklineHistory}
           edgeStrength={stats[asset].edgeStrength}
           wins={stats[asset].wins}

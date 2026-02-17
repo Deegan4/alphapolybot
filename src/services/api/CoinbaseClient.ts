@@ -284,19 +284,12 @@ export class CoinbaseClient {
     const granularitySeconds = this.granularityToSeconds(granularity)
     const start = now - (granularitySeconds * limit)
 
-    const params = {
-      start: start.toString(),
-      end: now.toString(),
-      granularity,
-    }
-
     try {
-      const resp = await this.signedRequest(
-        'GET',
-        `${BROKERAGE}/products/${productId}/candles`,
-        undefined,
-        params,
-      )
+      const resp = await this.signedRequest('GET', `${BROKERAGE}/products/${productId}/candles`, undefined, {
+        start: start.toString(),
+        end: now.toString(),
+        granularity,
+      })
       if (!resp.ok) return []
 
       const data = await resp.json()
@@ -358,14 +351,18 @@ export class CoinbaseClient {
     body?: unknown,
     queryParams?: Record<string, string>,
   ): Promise<Response> {
-    // Build the URL with query params
+    if (!this.hasCredentials()) {
+      return new Response(null, { status: 401, statusText: 'Coinbase credentials not configured' })
+    }
+
+    // Build the URL with query params (but sign ONLY the path, no query params)
+    // Coinbase HMAC prehash: timestamp + METHOD + requestPath + body
+    // requestPath must NOT include query parameters per Coinbase docs.
     let url = `${BASE_PATH}${path}`
-    let apiPath = path
 
     if (queryParams && Object.keys(queryParams).length > 0) {
       const qs = new URLSearchParams(queryParams).toString()
       url += `?${qs}`
-      apiPath += `?${qs}`
     }
 
     const timestamp = Math.floor(Date.now() / 1000).toString()
@@ -375,7 +372,7 @@ export class CoinbaseClient {
       this.secret,
       timestamp,
       method.toUpperCase(),
-      apiPath,
+      path, // sign path only, no query params
       bodyStr,
     )
 

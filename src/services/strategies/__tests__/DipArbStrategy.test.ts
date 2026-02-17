@@ -29,7 +29,7 @@ vi.mock('@/services/wallet', () => ({
 
 // Mock gammaClient
 const mockGetMarket = vi.fn()
-vi.mock('@/services/api', () => ({
+vi.mock('@/services/api/GammaClient', () => ({
   gammaClient: {
     getCryptoMarkets: vi.fn().mockResolvedValue([]),
     getMarket: (...args: unknown[]) => mockGetMarket(...args),
@@ -64,8 +64,8 @@ vi.mock('@/services/trading/ActivityLogger', () => ({
 vi.mock('@/stores/walletStore', () => ({
   useWalletStore: {
     getState: vi.fn(() => ({
-      usdcBridgedBalance: 100,
-      usdcBalance: 100,
+      balance: 100,
+      buyingPower: 100,
     })),
     setState: vi.fn(),
     subscribe: vi.fn(),

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { WalletEntry } from '@/types'
 
 export interface AppSettingsState {
   // Trading Mode
@@ -9,10 +10,9 @@ export interface AppSettingsState {
   // API Keys (stored encrypted via secureStorage in production)
   openRouterApiKey: string
 
-  // Polymarket CLOB API credentials (from Builder Codes)
-  clobApiKey: string
-  clobSecret: string
-  clobPassphrase: string
+  // Polymarket US Ed25519 API credentials (from polymarket.us/developer)
+  pmUsKeyId: string
+  pmUsSecretKey: string
 
   // Notifications
   enableNotifications: boolean
@@ -24,7 +24,6 @@ export interface AppSettingsState {
   maxTradesPerHour: number
   consecutiveFailureLimit: number
   minBalanceForTrade: number
-  minMaticForGas: number
   riskManagementEnabled: boolean
 
   // GTD Fallback
@@ -62,6 +61,7 @@ export interface AppSettingsState {
   btcRegimeFilterEnabled: boolean // Skip choppy markets
   btcRsiFilterEnabled: boolean    // RSI overbought/oversold filter
   btcUseLLMConfirmation: boolean  // LLM confirmation gate on hourly+ windows
+  btcLLMModel: string             // Model for BTC LLM confirmation (empty = default)
 
   // Aggressive Mode (meta-toggle — relaxes conservative defaults)
   aggressiveMode: boolean
@@ -100,6 +100,17 @@ export interface AppSettingsState {
   // PolyBacktest — Historical BTC Up/Down Data
   polyBacktestApiKey: string
 
+  // Alerting — Telegram & Discord
+  telegramBotToken: string
+  telegramChatId: string
+  discordWebhookUrl: string
+  alertOnTrade: boolean
+  alertOnError: boolean
+
+  // Multi-Wallet Registry
+  wallets: WalletEntry[]
+  activeWalletId: string
+
   // Coinbase Spot — Mean Reversion Strategy
   coinbaseApiKey: string
   coinbaseSecret: string
@@ -120,9 +131,8 @@ interface SettingsStore extends AppSettingsState {
   // Actions
   setDryRun: (enabled: boolean) => void
   setOpenRouterApiKey: (key: string) => void
-  setClobApiKey: (key: string) => void
-  setClobSecret: (secret: string) => void
-  setClobPassphrase: (passphrase: string) => void
+  setPmUsKeyId: (keyId: string) => void
+  setPmUsSecretKey: (secretKey: string) => void
   setNotifications: (enabled: boolean) => void
   setSoundAlerts: (enabled: boolean) => void
   setDailyLossLimit: (limit: number) => void
@@ -130,7 +140,6 @@ interface SettingsStore extends AppSettingsState {
   setMaxTradesPerHour: (limit: number) => void
   setConsecutiveFailureLimit: (limit: number) => void
   setMinBalanceForTrade: (amount: number) => void
-  setMinMaticForGas: (amount: number) => void
   setRiskManagementEnabled: (enabled: boolean) => void
   setGtcFallbackEnabled: (enabled: boolean) => void
   setGtcExpiryMinutes: (minutes: number) => void
@@ -159,6 +168,7 @@ interface SettingsStore extends AppSettingsState {
   setBtcRegimeFilterEnabled: (enabled: boolean) => void
   setBtcRsiFilterEnabled: (enabled: boolean) => void
   setBtcUseLLMConfirmation: (enabled: boolean) => void
+  setBtcLLMModel: (model: string) => void
   setLlmWebSearchEnabled: (enabled: boolean) => void
   setMicroMinCompositeSignal: (value: number) => void
   setMicroMinSignalConfidence: (value: number) => void
@@ -195,6 +205,15 @@ interface SettingsStore extends AppSettingsState {
   setCryptoModel: (model: string) => void
   setCryptoScanIntervalMs: (ms: number) => void
   setCryptoMinConfidence: (confidence: number) => void
+  setTelegramBotToken: (token: string) => void
+  setTelegramChatId: (chatId: string) => void
+  setDiscordWebhookUrl: (url: string) => void
+  setAlertOnTrade: (enabled: boolean) => void
+  setAlertOnError: (enabled: boolean) => void
+  addWallet: (wallet: WalletEntry) => void
+  removeWallet: (walletId: string) => void
+  setActiveWallet: (walletId: string) => void
+  renameWallet: (walletId: string, label: string) => void
   resetSettings: () => void
 }
 
@@ -202,9 +221,8 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   dryRun: true, // SAFE DEFAULT: Always start in dry run mode
   pennyTraderMode: true,
   openRouterApiKey: '',
-  clobApiKey: '',
-  clobSecret: '',
-  clobPassphrase: '',
+  pmUsKeyId: '',
+  pmUsSecretKey: '',
   enableNotifications: true,
   enableSoundAlerts: false,
   dailyLossLimit: 3,
@@ -212,7 +230,6 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   maxTradesPerHour: 20,
   consecutiveFailureLimit: 5,
   minBalanceForTrade: 1.00,
-  minMaticForGas: 0.01,
   riskManagementEnabled: true,
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
@@ -242,6 +259,7 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   btcRegimeFilterEnabled: true,   // Skip choppy/mean-reverting markets
   btcRsiFilterEnabled: true,      // Reduce confidence on overbought/oversold
   btcUseLLMConfirmation: false,   // LLM confirmation gate (opt-in)
+  btcLLMModel: 'deepseek/deepseek-r1',
   aggressiveMode: false,
   llmWebSearchEnabled: false,
   microMinCompositeSignal: 0.4,
@@ -265,6 +283,13 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   cryptoScanIntervalMs: 30_000,
   cryptoMinConfidence: 0.55,
   polyBacktestApiKey: '',
+  telegramBotToken: '',
+  telegramChatId: '',
+  discordWebhookUrl: '',
+  alertOnTrade: true,
+  alertOnError: true,
+  wallets: [],
+  activeWalletId: '',
   coinbaseApiKey: '',
   coinbaseSecret: '',
   mrEnableBtc: false,
@@ -294,14 +319,11 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ openRouterApiKey: key })
       },
 
-      setClobApiKey: (key: string) => {
-        set({ clobApiKey: key })
+      setPmUsKeyId: (keyId: string) => {
+        set({ pmUsKeyId: keyId })
       },
-      setClobSecret: (secret: string) => {
-        set({ clobSecret: secret })
-      },
-      setClobPassphrase: (passphrase: string) => {
-        set({ clobPassphrase: passphrase })
+      setPmUsSecretKey: (secretKey: string) => {
+        set({ pmUsSecretKey: secretKey })
       },
 
       setNotifications: (enabled: boolean) => {
@@ -335,11 +357,6 @@ export const useSettingsStore = create<SettingsStore>()(
       setMinBalanceForTrade: (amount: number) => {
         set({ minBalanceForTrade: amount })
         import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({ minBalanceForTrade: amount }))
-      },
-
-      setMinMaticForGas: (amount: number) => {
-        set({ minMaticForGas: amount })
-        import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({ minMaticForGas: amount }))
       },
 
       setRiskManagementEnabled: (enabled: boolean) => {
@@ -470,6 +487,9 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ btcUseLLMConfirmation: enabled })
         import('@/services/strategies/BtcUpDownStrategy').then(m => m.btcUpDownStrategy.setBtcConfig({ useLLMConfirmation: enabled }))
       },
+      setBtcLLMModel: (model: string) => {
+        set({ btcLLMModel: model })
+      },
 
       setLlmWebSearchEnabled: (enabled: boolean) => {
         set({ llmWebSearchEnabled: enabled })
@@ -598,6 +618,44 @@ export const useSettingsStore = create<SettingsStore>()(
         import('@/services/strategies/LLMPredictionStrategy').then(m => m.llmPredictionStrategy.setLLMConfig?.({ cryptoMinConfidence: confidence })).catch(() => {})
       },
 
+      setTelegramBotToken: (token: string) => set({ telegramBotToken: token }),
+      setTelegramChatId: (chatId: string) => set({ telegramChatId: chatId }),
+      setDiscordWebhookUrl: (url: string) => set({ discordWebhookUrl: url }),
+      setAlertOnTrade: (enabled: boolean) => set({ alertOnTrade: enabled }),
+      setAlertOnError: (enabled: boolean) => set({ alertOnError: enabled }),
+
+      addWallet: (wallet: WalletEntry) => {
+        set((state) => ({
+          wallets: [...state.wallets, wallet],
+          // Auto-activate if it's the first wallet
+          activeWalletId: state.wallets.length === 0 ? wallet.id : state.activeWalletId,
+        }))
+      },
+
+      removeWallet: (walletId: string) => {
+        set((state) => {
+          const remaining = state.wallets.filter(w => w.id !== walletId)
+          // If removing the active wallet, switch to next available or clear
+          const activeStillExists = remaining.some(w => w.id === state.activeWalletId)
+          return {
+            wallets: remaining,
+            activeWalletId: activeStillExists ? state.activeWalletId : (remaining[0]?.id ?? ''),
+          }
+        })
+        // Clean up secret key from secureStorage (fire-and-forget)
+        import('@/utils/secureStorage').then(m => m.secureStorage.remove(`wallet-secret-${walletId}`)).catch(() => {})
+      },
+
+      setActiveWallet: (walletId: string) => {
+        set({ activeWalletId: walletId })
+      },
+
+      renameWallet: (walletId: string, label: string) => {
+        set((state) => ({
+          wallets: state.wallets.map(w => w.id === walletId ? { ...w, label } : w),
+        }))
+      },
+
       setAggressiveMode: (enabled: boolean) => {
         console.log(`[Settings] Aggressive mode ${enabled ? 'ENABLED' : 'DISABLED'}`)
         set({ aggressiveMode: enabled })
@@ -671,7 +729,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'alphapolybot-settings',
-      version: 27, // Bump when defaults change — triggers migrate()
+      version: 31, // Bump when defaults change — triggers migrate()
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
         if (version < 1) {
@@ -882,6 +940,26 @@ export const useSettingsStore = create<SettingsStore>()(
           // v26→v27: Add PolyBacktest API key for historical market data.
           if (state.polyBacktestApiKey === undefined) state.polyBacktestApiKey = ''
         }
+        if (version < 28) {
+          // v27→v28: Add BTC LLM model setting (DeepSeek R1 default).
+          if (state.btcLLMModel === undefined) state.btcLLMModel = 'deepseek/deepseek-r1'
+        }
+        if (version < 29) {
+          // v28→v29: Migrate from international CLOB to Polymarket US.
+          // Replace CLOB API credentials with PM US Ed25519 credentials.
+          if (state.pmUsKeyId === undefined) state.pmUsKeyId = ''
+          if (state.pmUsSecretKey === undefined) state.pmUsSecretKey = ''
+          // Clear old CLOB fields (they no longer exist in state type)
+          delete state.clobApiKey
+          delete state.clobSecret
+          delete state.clobPassphrase
+          delete state.minMaticForGas
+        }
+        if (version < 31) {
+          // v30→v31: Multi-wallet registry
+          if (state.wallets === undefined) state.wallets = []
+          if (state.activeWalletId === undefined) state.activeWalletId = ''
+        }
         if (version < 26) {
           // v25→v26: Align FW arb + risk limits for $10-25 wallet balance.
           // fwTradeSize 3→5 (CLOB minimum is 5 shares — orders below this get rejected).
@@ -902,9 +980,8 @@ export const useSettingsStore = create<SettingsStore>()(
       partialize: (state) => ({
         dryRun: state.dryRun,
         openRouterApiKey: state.openRouterApiKey,
-        clobApiKey: state.clobApiKey,
-        clobSecret: state.clobSecret,
-        clobPassphrase: state.clobPassphrase,
+        pmUsKeyId: state.pmUsKeyId,
+        pmUsSecretKey: state.pmUsSecretKey,
         enableNotifications: state.enableNotifications,
         enableSoundAlerts: state.enableSoundAlerts,
         dailyLossLimit: state.dailyLossLimit,
@@ -912,7 +989,6 @@ export const useSettingsStore = create<SettingsStore>()(
         maxTradesPerHour: state.maxTradesPerHour,
         consecutiveFailureLimit: state.consecutiveFailureLimit,
         minBalanceForTrade: state.minBalanceForTrade,
-        minMaticForGas: state.minMaticForGas,
         riskManagementEnabled: state.riskManagementEnabled,
         gtcFallbackEnabled: state.gtcFallbackEnabled,
         gtcExpiryMinutes: state.gtcExpiryMinutes,
@@ -943,6 +1019,7 @@ export const useSettingsStore = create<SettingsStore>()(
         btcRegimeFilterEnabled: state.btcRegimeFilterEnabled,
         btcRsiFilterEnabled: state.btcRsiFilterEnabled,
         btcUseLLMConfirmation: state.btcUseLLMConfirmation,
+        btcLLMModel: state.btcLLMModel,
         aggressiveMode: state.aggressiveMode,
         llmWebSearchEnabled: state.llmWebSearchEnabled,
         microMinCompositeSignal: state.microMinCompositeSignal,
@@ -966,6 +1043,8 @@ export const useSettingsStore = create<SettingsStore>()(
         cryptoScanIntervalMs: state.cryptoScanIntervalMs,
         cryptoMinConfidence: state.cryptoMinConfidence,
         polyBacktestApiKey: state.polyBacktestApiKey,
+        wallets: state.wallets,
+        activeWalletId: state.activeWalletId,
         coinbaseApiKey: state.coinbaseApiKey,
         coinbaseSecret: state.coinbaseSecret,
         mrEnableBtc: state.mrEnableBtc,

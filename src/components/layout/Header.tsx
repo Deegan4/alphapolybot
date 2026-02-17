@@ -40,7 +40,8 @@ HeaderClock.displayName = 'HeaderClock'
  */
 export const Header: React.FC = () => {
   const { isConnected, startPolling, stopPolling } = useWalletStore()
-  const { dryRun, pennyTraderMode } = useSettingsStore()
+  const dryRun = useSettingsStore((s) => s.dryRun)
+  const pennyTraderMode = useSettingsStore((s) => s.pennyTraderMode)
   const [strategies, setStrategies] = useState(strategyManager.getStates())
 
   // Subscribe to strategy updates

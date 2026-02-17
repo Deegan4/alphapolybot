@@ -45,7 +45,7 @@ vi.mock('@/services/trading', () => ({
   },
 }))
 
-vi.mock('@/services/api', () => ({
+vi.mock('@/services/api/GammaClient', () => ({
   gammaClient: {
     getMarket: mockGetMarket,
   },

@@ -20,12 +20,28 @@ export interface SignalInput {
   timeIntoWindowMs: number   // Elapsed ms since window start
   windowDurationMs: number   // 15 * 60 * 1000 or longer for 9PM events
   recentPriceHistory: Array<{ price: number; timestamp: number }>
+  /** Optional long-term price history for dual-timeframe regime detection */
+  recentPriceHistoryLongTerm?: Array<{ price: number; timestamp: number }>
   market: Market
+}
+
+export interface SignalFactors {
+  momentum: number   // -1 to 1
+  velocity: number   // -1 to 1
+  timeDecay: number  // 0 to 1
+  valueBet: number   // 0 to 1
+  orderFlow: number  // -1 to 1
+  regime: 'choppy' | 'trending' | 'neutral'
+  regimeEfficiency: number // 0-1 short-term efficiency ratio
+  regimeEfficiencyLongTerm: number // 0-1 long-term efficiency (same as ST if no LT data)
+  rsi: number        // 0-100
+  volatility: number // stddev of returns
 }
 
 export interface Signal {
   direction: 'up' | 'down'
   confidence: number // 0-1
+  factors?: SignalFactors
 }
 
 export interface SignalEngineConfig {
@@ -123,17 +139,22 @@ export function computeSignal(
   const noiseDampener = 0.85 + 0.15 * noiseScale
   let confidence = Math.max(0, Math.min(1, Math.abs(amplifiedScore) * noiseDampener))
 
-  // === REGIME BOOST ===
+  // === REGIME SCALING (dual-timeframe graduated) ===
+  const { regime, efficiency: regimeEfficiency } = classifyRegimeWithEfficiency(recentPriceHistory)
+  let regimeEfficiencyLongTerm = regimeEfficiency // fallback: same as short-term
+  if (input.recentPriceHistoryLongTerm && input.recentPriceHistoryLongTerm.length >= 10) {
+    regimeEfficiencyLongTerm = classifyRegimeWithEfficiency(input.recentPriceHistoryLongTerm).efficiency
+  }
+  const blendedEfficiency = input.recentPriceHistoryLongTerm
+    ? computeBlendedEfficiency(regimeEfficiency, regimeEfficiencyLongTerm)
+    : regimeEfficiency // single-timeframe: identical to before
   if (config.regimeFilterEnabled) {
-    const regime = classifyRegime(recentPriceHistory)
-    if (regime === 'trending') {
-      confidence = Math.min(1, confidence * 1.10)
-    }
+    confidence *= regimeMultiplier(blendedEfficiency)
   }
 
   // === RSI FILTER ===
+  const rsi = recentPriceHistory.length >= 20 ? computeRSI(recentPriceHistory, 14) : 50
   if (config.rsiFilterEnabled && recentPriceHistory.length >= 20) {
-    const rsi = computeRSI(recentPriceHistory, 14)
     if ((rsi > 75 && direction === 'up') || (rsi < 25 && direction === 'down')) {
       confidence *= 0.85
     }
@@ -146,7 +167,22 @@ export function computeSignal(
     confidence *= earlyPenalty
   }
 
-  return { direction, confidence }
+  return {
+    direction,
+    confidence,
+    factors: {
+      momentum: momentumScore,
+      velocity: velocityScore,
+      timeDecay: timeDecayBoost,
+      valueBet: cheapness,
+      orderFlow: imbalanceScore,
+      regime,
+      regimeEfficiency,
+      regimeEfficiencyLongTerm,
+      rsi,
+      volatility: sigma,
+    },
+  }
 }
 
 // ==========================================
@@ -172,26 +208,106 @@ export function computeVolatility(prices: Array<{ price: number; timestamp: numb
 }
 
 /**
- * Classify market regime using efficiency ratio.
+ * Classify market regime using efficiency ratio, returning both label and raw value.
  * Efficiency = |net displacement| / total path length.
- *   < 0.15 → choppy (mean-reverting, skip trading)
- *   > 0.40 → trending (boost confidence)
+ *   < 0.15 → choppy (mean-reverting)
+ *   > 0.40 → trending (directional)
  *   else   → neutral
  */
-export function classifyRegime(
+export function classifyRegimeWithEfficiency(
   prices: Array<{ price: number; timestamp: number }>,
-): 'choppy' | 'trending' | 'neutral' {
-  if (prices.length < 10) return 'neutral'
+): { regime: 'choppy' | 'trending' | 'neutral'; efficiency: number } {
+  if (prices.length < 10) return { regime: 'neutral', efficiency: 0.25 }
   const netDisplacement = Math.abs(prices[prices.length - 1].price - prices[0].price)
   let totalPath = 0
   for (let i = 1; i < prices.length; i++) {
     totalPath += Math.abs(prices[i].price - prices[i - 1].price)
   }
-  if (totalPath === 0) return 'neutral'
+  if (totalPath === 0) return { regime: 'neutral', efficiency: 0.25 }
   const efficiency = netDisplacement / totalPath
-  if (efficiency < 0.15) return 'choppy'
-  if (efficiency > 0.40) return 'trending'
-  return 'neutral'
+  const regime = efficiency < 0.15 ? 'choppy' : efficiency > 0.40 ? 'trending' : 'neutral'
+  return { regime, efficiency }
+}
+
+/**
+ * Backward-compatible wrapper — returns just the regime label.
+ */
+export function classifyRegime(
+  prices: Array<{ price: number; timestamp: number }>,
+): 'choppy' | 'trending' | 'neutral' {
+  return classifyRegimeWithEfficiency(prices).regime
+}
+
+/**
+ * Graduated confidence multiplier based on efficiency ratio.
+ *
+ * Maps efficiency to a continuous multiplier via clamped linear interpolation:
+ *   efficiency 0.00 → 0.60  (heavy penalty for pure chop, but not a block)
+ *   efficiency 0.15 → 0.85  (old choppy threshold — moderate penalty)
+ *   efficiency 0.30 → 1.00  (neutral — no adjustment)
+ *   efficiency 0.50 → 1.10  (trending — modest boost)
+ *   efficiency 0.70+ → 1.15 (strong trend — capped boost)
+ *
+ * Key difference from the old binary gate: choppy markets still trade
+ * but with reduced confidence, so strong signals can still execute.
+ */
+export function regimeMultiplier(efficiency: number): number {
+  // Piecewise linear: (0, 0.60) → (0.30, 1.00) → (0.70, 1.15)
+  if (efficiency <= 0) return 0.60
+  if (efficiency <= 0.30) {
+    // 0.60 → 1.00 over [0, 0.30]
+    return 0.60 + (efficiency / 0.30) * 0.40
+  }
+  if (efficiency >= 0.70) return 1.15
+  // 1.00 → 1.15 over [0.30, 0.70]
+  return 1.00 + ((efficiency - 0.30) / 0.40) * 0.15
+}
+
+/**
+ * Blend short-term and long-term efficiency ratios with scenario awareness.
+ *
+ * The key insight: a choppy 5-minute window inside a trending macro context
+ * is a *pullback entry* — the best risk/reward setup. Single-timeframe
+ * regime can't distinguish this from sustained chop.
+ *
+ * | Short-term | Long-term | Blend              | Rationale                    |
+ * |-----------|----------|--------------------|------------------------------|
+ * | choppy    | trending | 40% ST + 60% LT    | Pullback in trend — rescue   |
+ * | trending  | trending | max(ST, LT)         | Confirmed trend — full boost |
+ * | choppy    | choppy   | min(ST, LT)         | Sustained chop — max penalty |
+ * | trending  | choppy   | 60% ST + 40% LT    | Breakout attempt — cautious  |
+ * | other     | other    | 50/50 average       | Default blend                |
+ */
+export function computeBlendedEfficiency(
+  efficiencyShort: number,
+  efficiencyLong: number,
+): number {
+  const CHOPPY = 0.15
+  const TRENDING = 0.40
+
+  const stChoppy = efficiencyShort < CHOPPY
+  const stTrending = efficiencyShort > TRENDING
+  const ltChoppy = efficiencyLong < CHOPPY
+  const ltTrending = efficiencyLong > TRENDING
+
+  // Pullback in trend — the money scenario
+  if (stChoppy && ltTrending) {
+    return 0.40 * efficiencyShort + 0.60 * efficiencyLong
+  }
+  // Confirmed trend — take the stronger signal
+  if (stTrending && ltTrending) {
+    return Math.max(efficiencyShort, efficiencyLong)
+  }
+  // Sustained chop — maximum penalty
+  if (stChoppy && ltChoppy) {
+    return Math.min(efficiencyShort, efficiencyLong)
+  }
+  // Breakout attempt — cautious boost
+  if (stTrending && ltChoppy) {
+    return 0.60 * efficiencyShort + 0.40 * efficiencyLong
+  }
+  // Neutral / mixed — simple average
+  return (efficiencyShort + efficiencyLong) / 2
 }
 
 /**

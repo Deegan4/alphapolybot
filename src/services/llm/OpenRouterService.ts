@@ -291,9 +291,9 @@ export class OpenRouterService {
    * Analyze a crypto signal for the BTC Up/Down strategy.
    * Takes a pre-built prompt (strategy builds it with signal context).
    * Returns confirmation/adjustment or null on any failure (fail-open).
-   * Uses prediction budget bucket (~$0.002/call at Llama 3.1 70B rates).
+   * Uses prediction budget bucket. Accepts optional model override (e.g. deepseek/deepseek-r1).
    */
-  async analyzeCryptoSignal(prompt: string): Promise<{
+  async analyzeCryptoSignal(prompt: string, model?: string): Promise<{
     confirm: boolean
     adjustment: number  // -20 to +20 confidence adjustment
     reasoning: string
@@ -303,47 +303,30 @@ export class OpenRouterService {
     // Budget check (prediction bucket)
     this.maybeResetBucket('prediction')
     const predBudget = this.budgets.prediction
-    if (predBudget.spent >= predBudget.limit) return null
+    if (predBudget.spent >= predBudget.limit) {
+      console.warn('[analyzeCryptoSignal] Budget exhausted')
+      return null
+    }
+
+    const modelOverride = model || undefined
 
     try {
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`,
-          'HTTP-Referer': window.location.origin,
-          'X-Title': 'AlphaPolyBot - Crypto Signal Confirmation',
-        },
-        body: JSON.stringify({
-          model: this.config.model,
-          messages: [
-            { role: 'system', content: 'Crypto signal analyst. Confirm or reject trading signals. JSON only.' },
-            { role: 'user', content: prompt },
-          ],
-          temperature: 0.2,
-          max_tokens: 200,
-        }),
+      const response = await this.callOpenRouter(prompt, modelOverride, {
+        systemPrompt: 'Crypto signal analyst. Confirm or reject trading signals. JSON only.',
+        temperature: 0.2,
+        title: 'AlphaPolyBot - Crypto Signal Confirmation',
       })
+      this.recordCost(response.cost, 'prediction')
 
-      if (!response.ok) return null
-
-      const data = await response.json()
-      if (!data.choices?.[0]?.message?.content) return null
-
-      // Record cost
-      let cost = 0
-      if (data.usage?.total_cost != null) {
-        cost = data.usage.total_cost
-      } else if (data.usage) {
-        cost = (data.usage.prompt_tokens ?? 0) / 1000 * 0.00059 +
-               (data.usage.completion_tokens ?? 0) / 1000 * 0.00079
-      }
-      this.recordCost(cost, 'prediction')
-
-      // Parse response — expect {"confirm": true/false, "confidence_adjustment": -20 to +20, "reasoning": "..."}
-      const content = data.choices[0].message.content
+      // Strip <think>...</think> blocks from reasoning models (e.g. DeepSeek R1)
+      // then extract JSON: {"confirm": true/false, "confidence_adjustment": -20 to +20, "reasoning": "..."}
+      let content = response.message.content
+      content = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
       const jsonMatch = content.match(/\{[\s\S]*\}/)
-      if (!jsonMatch) return null
+      if (!jsonMatch) {
+        console.warn('[analyzeCryptoSignal] No JSON in response:', content.slice(0, 200))
+        return null
+      }
 
       const parsed = JSON.parse(jsonMatch[0])
       return {
@@ -351,7 +334,8 @@ export class OpenRouterService {
         adjustment: Math.max(-20, Math.min(20, Number(parsed.confidence_adjustment) || 0)),
         reasoning: String(parsed.reasoning || '').slice(0, 200),
       }
-    } catch {
+    } catch (error) {
+      console.warn('[analyzeCryptoSignal] Failed:', error instanceof Error ? error.message : error)
       return null // Fail-open: any error means proceed with mechanical signal
     }
   }
@@ -459,31 +443,40 @@ Respond ONLY with JSON:
    * Call OpenRouter API
    * Returns the message content and cost info for budget tracking.
    */
-  private async callOpenRouter(prompt: string, modelOverride?: string): Promise<{ message: { content: string; annotations?: Array<{ type: string; url?: string; title?: string }> }; cost: number }> {
+  private async callOpenRouter(prompt: string, modelOverride?: string, opts?: {
+    systemPrompt?: string
+    temperature?: number
+    maxTokens?: number
+    title?: string
+  }): Promise<{ message: { content: string; annotations?: Array<{ type: string; url?: string; title?: string }> }; cost: number }> {
     // When web search is enabled, append :online to model slug and add plugins config
     const baseModel = modelOverride || this.config.model
     const model = this.config.webSearchEnabled
       ? `${baseModel}:online`
       : baseModel
 
+    // Reasoning models (e.g. DeepSeek R1) need much larger output budgets for <think> blocks
+    const isReasoningModel = model.includes('deepseek-r1') || model.includes('o1') || model.includes('o3')
+    const defaultMaxTokens = this.config.webSearchEnabled ? 600
+      : modelOverride ? 600  // Premium models get larger output budget
+      : this.config.maxTokens
+
     const body: Record<string, unknown> = {
       model,
       messages: [
         {
           role: 'system',
-          content: this.config.webSearchEnabled
+          content: opts?.systemPrompt ?? (this.config.webSearchEnabled
             ? 'Market analyst with web research. Use search results to make informed predictions. JSON only.'
-            : 'Market analyst. JSON only.',
+            : 'Market analyst. JSON only.'),
         },
         {
           role: 'user',
           content: prompt,
         },
       ],
-      temperature: this.config.temperature,
-      max_tokens: this.config.webSearchEnabled ? 600
-        : modelOverride ? 600  // Premium models get larger output budget
-        : this.config.maxTokens,
+      temperature: opts?.temperature ?? this.config.temperature,
+      max_tokens: isReasoningModel ? 4000 : (opts?.maxTokens ?? defaultMaxTokens),
     }
 
     // Add web search plugin config for result count control
@@ -497,7 +490,7 @@ Respond ONLY with JSON:
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
         'HTTP-Referer': window.location.origin,
-        'X-Title': 'AlphaPolyBot - Polymarket LLM Trading',
+        'X-Title': opts?.title ?? 'AlphaPolyBot - Polymarket LLM Trading',
       },
       body: JSON.stringify(body),
     })

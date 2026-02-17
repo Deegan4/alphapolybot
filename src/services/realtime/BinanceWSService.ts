@@ -39,8 +39,15 @@ interface MiniTickerEvent {
 }
 
 const STREAMS = ['btcusdt@miniTicker', 'ethusdt@miniTicker', 'solusdt@miniTicker', 'xrpusdt@miniTicker']
-const BINANCE_WS_BASE = import.meta.env.VITE_BINANCE_WS_URL || 'wss://stream.binance.com:9443'
-const WS_URL = `${BINANCE_WS_BASE}/stream?streams=${STREAMS.join('/')}`
+const STREAM_PATH = `/stream?streams=${STREAMS.join('/')}`
+
+// In dev, route through Vite's WebSocket proxy to avoid browser Origin-header rejections.
+// In production (Netlify etc.), connect directly to Binance.
+const BINANCE_WS_BASE = import.meta.env.VITE_BINANCE_WS_URL
+  || (import.meta.env.DEV
+    ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/binance`
+    : 'wss://stream.binance.us:9443')
+const WS_URL = `${BINANCE_WS_BASE}${STREAM_PATH}`
 
 const PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL' | 'XRP'> = {
   BTCUSDT: 'BTC',
@@ -55,6 +62,8 @@ export class BinanceWSService {
   private maxReconnectAttempts = 10
   private reconnectDelay = 1000
   private reconnectTimeout: number | null = null
+  private stableResetTimeout: number | null = null
+  private lastConnectTime = 0
 
   private prices = new Map<string, BinancePriceUpdate>()
   private priceCallbacks = new Set<PriceCallback>()
@@ -88,7 +97,13 @@ export class BinanceWSService {
 
         this.ws.onopen = () => {
           console.log('[BinanceWS] Connected — streaming BTC/ETH/SOL mini tickers')
-          this.reconnectAttempts = 0
+          this.lastConnectTime = Date.now()
+          // Only reset attempts after connection stays up for 5s
+          // This prevents rapid connect/disconnect loops from resetting the backoff
+          if (this.stableResetTimeout) clearTimeout(this.stableResetTimeout)
+          this.stableResetTimeout = window.setTimeout(() => {
+            this.reconnectAttempts = 0
+          }, 5_000)
           this.notifyConnection('connected')
           resolve(true)
         }
@@ -98,7 +113,17 @@ export class BinanceWSService {
         }
 
         this.ws.onclose = () => {
-          console.log('[BinanceWS] Disconnected')
+          // Cancel stable-reset if connection dropped before 5s
+          if (this.stableResetTimeout) {
+            clearTimeout(this.stableResetTimeout)
+            this.stableResetTimeout = null
+          }
+          const uptime = Date.now() - this.lastConnectTime
+          if (uptime < 3_000) {
+            console.log(`[BinanceWS] Disconnected after ${uptime}ms (unstable)`)
+          } else {
+            console.log('[BinanceWS] Disconnected')
+          }
           this.notifyConnection('disconnected')
           this.attemptReconnect()
         }
@@ -119,6 +144,10 @@ export class BinanceWSService {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
+    }
+    if (this.stableResetTimeout) {
+      clearTimeout(this.stableResetTimeout)
+      this.stableResetTimeout = null
     }
     if (this.ws) {
       this.ws.onclose = null // Prevent reconnect on intentional close

@@ -14,7 +14,7 @@ import { activityLogger, tradeLogger } from '@/services/trading'
  * Call from DashboardView.
  */
 export function useBalanceHistory() {
-  const balance = useWalletStore((s) => s.usdcBalance)
+  const balance = useWalletStore((s) => s.balance)
   const dryRun = useSettingsStore((s) => s.dryRun)
   const {
     addSnapshot,
@@ -38,12 +38,15 @@ export function useBalanceHistory() {
     }
   }, [startTime, setStartTime])
 
-  // Set initial balance when wallet first connects
+  // Set initial balance when wallet first connects (or seed $5,000 in dry-run)
   useEffect(() => {
-    if (balance > 0 && initialBalance === 0) {
+    if (initialBalance !== 0) return // already seeded
+    if (balance > 0) {
       setInitialBalance(balance)
+    } else if (dryRun) {
+      setInitialBalance(5_000)
     }
-  }, [balance, initialBalance, setInitialBalance])
+  }, [balance, dryRun, initialBalance, setInitialBalance])
 
   // In live mode, sync simulated balance to real wallet balance
   useEffect(() => {
@@ -125,7 +128,7 @@ export function useBalanceHistory() {
         const sim = useBalanceHistoryStore.getState().simulatedBalance
         if (sim > 0) addSnapshot(sim)
       } else {
-        const currentBalance = useWalletStore.getState().usdcBalance
+        const currentBalance = useWalletStore.getState().balance
         if (currentBalance > 0) addSnapshot(currentBalance)
       }
     }, 60_000)

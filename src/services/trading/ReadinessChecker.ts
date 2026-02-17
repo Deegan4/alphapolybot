@@ -1,7 +1,7 @@
 /**
  * ReadinessChecker — Pre-flight validation for live trading.
  *
- * Checks wallet, balance, credentials, strategies, and connectivity.
+ * Checks credentials, balance, strategies, and connectivity.
  * Used by ReadinessPanel to show an actionable setup checklist.
  *
  * Uses top-level imports for stores/services. This is safe because
@@ -10,7 +10,7 @@
 
 import { useWalletStore } from '@/stores/walletStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { clobClient } from '@/services/api'
+import { polymarketUSClient } from '@/services/api'
 import { strategyManager } from '@/services/strategies'
 import { realtimeService } from '@/services/realtime'
 
@@ -49,66 +49,64 @@ class ReadinessCheckerService {
   getReport(): ReadinessReport {
     const checks: ReadinessCheck[] = []
 
-    // 1. Wallet connected
+    // 1. PM US credentials connected
     try {
       const walletState = useWalletStore.getState()
       checks.push({
-        id: 'wallet',
-        label: 'Wallet connected',
+        id: 'credentials',
+        label: 'PM US credentials',
         severity: 'critical',
         status: walletState.isConnected ? 'pass' : 'fail',
         detail: walletState.isConnected
-          ? `${walletState.address?.slice(0, 6)}...${walletState.address?.slice(-4)}`
-          : 'No wallet connected',
+          ? `Key ID: ${walletState.keyId?.slice(0, 8)}...`
+          : 'No credentials configured',
         action: walletState.isConnected ? undefined : { label: 'Connect', route: '/settings' },
       })
 
-      // 2. USDC.e balance
-      const usdcBal = walletState.usdcBridgedBalance ?? 0
+      // 2. USD balance
+      const balance = walletState.balance ?? 0
       checks.push({
-        id: 'usdc_balance',
-        label: 'USDC.e balance',
+        id: 'usd_balance',
+        label: 'USD balance',
         severity: 'critical',
-        status: usdcBal > 0 ? 'pass' : 'fail',
-        detail: usdcBal > 0 ? `$${usdcBal.toFixed(2)}` : 'No USDC.e — fund wallet with bridged USDC',
-        action: usdcBal > 0 ? undefined : { label: 'Check wallet', route: '/settings' },
+        status: balance > 0 ? 'pass' : 'fail',
+        detail: balance > 0 ? `$${balance.toFixed(2)}` : 'No USD balance — deposit funds on polymarket.us',
+        action: balance > 0 ? undefined : { label: 'Check balance', route: '/settings' },
       })
 
-      // 3. MATIC for gas
-      const maticBal = walletState.balance ?? 0
-      checks.push({
-        id: 'matic_balance',
-        label: 'MATIC for gas',
-        severity: 'critical',
-        status: maticBal > 0.01 ? 'pass' : 'fail',
-        detail: maticBal > 0.01 ? `${maticBal.toFixed(4)} MATIC` : 'Need >0.01 MATIC for gas fees',
-        action: maticBal > 0.01 ? undefined : { label: 'Check wallet', route: '/settings' },
-      })
+      // 3. Buying power
+      const buyingPower = walletState.buyingPower ?? 0
+      if (walletState.isConnected) {
+        checks.push({
+          id: 'buying_power',
+          label: 'Buying power',
+          severity: 'warn',
+          status: buyingPower > 1 ? 'pass' : 'warn',
+          detail: buyingPower > 1 ? `$${buyingPower.toFixed(2)} available` : 'Low buying power — close positions or deposit',
+        })
+      }
     } catch {
       checks.push({
-        id: 'wallet',
-        label: 'Wallet connected',
+        id: 'credentials',
+        label: 'PM US credentials',
         severity: 'critical',
         status: 'fail',
         detail: 'Wallet store unavailable',
       })
     }
 
-    // 4. CLOB credentials
+    // 4. API credentials configured
     {
-      const creds = clobClient.getCredentials()
-      const walletConnected = useWalletStore.getState().isConnected
+      const hasCreds = polymarketUSClient.hasCredentials()
       checks.push({
-        id: 'clob_creds',
-        label: 'CLOB credentials',
+        id: 'api_creds',
+        label: 'API credentials',
         severity: 'critical',
-        status: creds ? 'pass' : 'fail',
-        detail: creds
-          ? 'API key derived'
-          : walletConnected
-            ? 'Wallet connected — API keys pending'
-            : 'Connect wallet to derive CLOB credentials',
-        action: creds ? undefined : { label: 'Connect wallet', route: '/settings' },
+        status: hasCreds ? 'pass' : 'fail',
+        detail: hasCreds
+          ? 'Ed25519 key configured'
+          : 'Enter PM US Key ID + Secret in Settings',
+        action: hasCreds ? undefined : { label: 'Add credentials', route: '/settings' },
       })
     }
 

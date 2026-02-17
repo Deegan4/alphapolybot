@@ -108,7 +108,7 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
   return (
     <div
       ref={ref}
-      className="absolute top-full right-0 mt-2 w-64 bg-agent-card border border-agent-border rounded-md shadow-xl z-50"
+      className="absolute top-full right-0 mt-2 w-64 bg-agent-card/60 backdrop-blur-xl border border-agent-green/10 rounded-xl shadow-xl z-50"
     >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-agent-border">

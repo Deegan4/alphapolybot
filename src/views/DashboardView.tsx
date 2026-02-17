@@ -7,6 +7,7 @@ import { RecentTradesGrid } from '@/components/dashboard/RecentTradesGrid'
 import { ActivitySidebar } from '@/components/dashboard/ActivitySidebar'
 import { DiagnosticsBanner } from '@/components/dashboard/DiagnosticsBanner'
 import { useBalanceHistory } from '@/hooks/useBalanceHistory'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import { positionLifecycleManager, activityLogger } from '@/services/trading'
 
@@ -16,6 +17,8 @@ const HistoryView = React.lazy(() => import('@/components/dashboard/HistoryView'
 const SpotCryptoView = React.lazy(() => import('@/components/dashboard/SpotCryptoView').then(m => ({ default: m.SpotCryptoView })))
 const FollowTraderPanel = React.lazy(() => import('@/components/dashboard/FollowTraderPanel').then(m => ({ default: m.FollowTraderPanel })))
 const PerformancePanel = React.lazy(() => import('@/components/dashboard/PerformancePanel').then(m => ({ default: m.PerformancePanel })))
+const BacktestView = React.lazy(() => import('@/components/dashboard/BacktestView').then(m => ({ default: m.BacktestView })))
+const AnalyticsView = React.lazy(() => import('@/components/dashboard/AnalyticsView').then(m => ({ default: m.AnalyticsView })))
 
 const LazyFallback: React.FC = () => (
   <div className="flex items-center justify-center p-4">
@@ -26,9 +29,23 @@ const LazyFallback: React.FC = () => (
 /**
  * DashboardView — 3-column trading dashboard with Live/History/Spot Crypto tabs.
  */
+const SIDEBAR_KEY = 'apb:activity-sidebar'
+
 const DashboardView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'live' | 'history' | 'spotcrypto'>('live')
+  const dryRun = useSettingsStore((s) => s.dryRun)
+  const [activeTab, setActiveTab] = useState<'live' | 'history' | 'spotcrypto' | 'backtest' | 'analytics'>('live')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem(SIDEBAR_KEY) === '1' } catch { return false }
+  })
   useBalanceHistory() // drives balance snapshot pipeline
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem(SIDEBAR_KEY, next ? '1' : '0') } catch {}
+      return next
+    })
+  }, [])
 
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
 
@@ -66,43 +83,64 @@ const DashboardView: React.FC = () => {
   }, [])
 
   return (
-    <div className="h-screen flex flex-col bg-agent-bg">
+    <div className="h-screen flex flex-col dashboard-bg">
       {/* Top bar with tab switching */}
       <SniperTopBar activeTab={activeTab} onTabChange={setActiveTab} />
 
+      {/* Mode banner */}
+      <div className={`px-4 py-1 text-center text-[10px] font-mono font-bold tracking-widest ${
+        dryRun
+          ? 'bg-agent-cyan/10 text-agent-cyan border-b border-agent-cyan/20'
+          : 'bg-red-950/30 text-red-400 border-b border-red-500/20'
+      }`}>
+        {dryRun ? 'PAPER TRADING — NO REAL ORDERS' : 'LIVE TRADING'}
+      </div>
+
       {activeTab === 'live' ? (
-        /* ====== LIVE TRADING — 3 column layout ====== */
+        /* ====== LIVE TRADING — 2 column + collapsible sidebar ====== */
         <>
         <DiagnosticsBanner />
-        <div className="flex-1 flex gap-4 p-5 min-h-0">
-          {/* Left column — Readiness + Portfolio + Performance */}
-          <div className="w-[290px] shrink-0 flex flex-col gap-3 min-h-0 overflow-y-auto">
-            <Suspense fallback={<LazyFallback />}><FollowTraderPanel /></Suspense>
-            <PortfolioPanel />
-            <Suspense fallback={<LazyFallback />}><PerformancePanel /></Suspense>
-          </div>
+        <div className="flex-1 flex flex-col lg:flex-row gap-3 p-3 sm:p-4 min-h-0 overflow-y-auto lg:overflow-hidden">
 
-          {/* Center column — Asset cards + positions/trades */}
-          <div className="flex-1 flex flex-col gap-4 min-h-0">
-            <AssetCardsRow />
-            <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
-              <ActivePositionsCard />
-              <RecentTradesGrid />
+          {/* Main content — Left col (portfolio+follow) + Center col (assets+positions) */}
+          <div className="flex-1 flex flex-col lg:flex-row gap-3 min-h-0 min-w-0">
+            {/* Left column — Follow Trader + Portfolio + Performance */}
+            <div className="lg:w-[280px] shrink-0 flex flex-col gap-3 min-h-0 lg:overflow-y-auto">
+              <Suspense fallback={<LazyFallback />}><FollowTraderPanel /></Suspense>
+              <PortfolioPanel />
+              <Suspense fallback={<LazyFallback />}><PerformancePanel /></Suspense>
+            </div>
+
+            {/* Center column — Asset cards + positions/trades */}
+            <div className="flex-1 flex flex-col gap-3 min-h-0 min-w-0">
+              <AssetCardsRow />
+              <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3 min-h-0">
+                <ActivePositionsCard />
+                <RecentTradesGrid />
+              </div>
             </div>
           </div>
 
-          {/* Right column — Activity */}
-          <div className="w-[350px] shrink-0 flex flex-col min-h-0">
-            <ActivitySidebar />
+          {/* Right column — Activity (collapsible) */}
+          <div className={`shrink-0 flex flex-col min-h-0 transition-all duration-200 ${
+            sidebarCollapsed ? 'lg:w-10' : 'lg:w-[300px]'
+          }`}>
+            <ActivitySidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
           </div>
         </div>
         </>
       ) : activeTab === 'history' ? (
         /* ====== HISTORY TAB ====== */
         <Suspense fallback={<LazyFallback />}><HistoryView /></Suspense>
-      ) : (
+      ) : activeTab === 'spotcrypto' ? (
         /* ====== SPOT CRYPTO TAB ====== */
         <Suspense fallback={<LazyFallback />}><SpotCryptoView /></Suspense>
+      ) : activeTab === 'backtest' ? (
+        /* ====== BACKTEST TAB ====== */
+        <Suspense fallback={<LazyFallback />}><BacktestView /></Suspense>
+      ) : (
+        /* ====== ANALYTICS TAB ====== */
+        <Suspense fallback={<LazyFallback />}><AnalyticsView /></Suspense>
       )}
 
       {/* Floating emergency stop — fixed bottom-left */}

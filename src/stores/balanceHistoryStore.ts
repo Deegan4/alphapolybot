@@ -37,6 +37,13 @@ export const useBalanceHistoryStore = create<BalanceHistoryState>()(
 
       addSnapshot: (balance: number) => {
         if (balance <= 0) return
+        // Deduplicate rapid-fire snapshots (e.g., recordBuy then recordSell in same second).
+        // Each set() copies the array + triggers persist middleware → localStorage serialization.
+        const { snapshots } = get()
+        const last = snapshots[snapshots.length - 1]
+        if (last && Date.now() - last.timestamp < 2000 && Math.abs(last.balance - balance) < 0.01) {
+          return
+        }
         set((state) => {
           const next = [...state.snapshots, { timestamp: Date.now(), balance }]
           if (next.length > MAX_SNAPSHOTS) {

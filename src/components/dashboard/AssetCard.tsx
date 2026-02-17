@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react'
-import { MatrixGauge } from '@/components/charts/MatrixGauge'
 import { MatrixSparkline } from '@/components/charts/MatrixSparkline'
 
 export interface AssetCardProps {
@@ -14,6 +13,10 @@ export interface AssetCardProps {
   windowEnd: number            // Unix ms when market resolves
   windowDuration: '5m' | '15m' | '9pm' | null
   marketFound: boolean
+  // Binance spot price fallback (shown when Polymarket unavailable)
+  spotPrice?: number           // Live Binance/RTDS spot price
+  spotPriceChange?: number     // % change since session start
+  spotSparkline?: number[]     // Sparkline from Binance WS
   // Strategy & trade data (unchanged)
   direction: 'UP' | 'DOWN' | null
   sparklineData: number[]
@@ -60,6 +63,9 @@ export const AssetCard: React.FC<AssetCardProps> = ({
   windowDuration,
   marketFound,
   direction,
+  spotPrice,
+  spotPriceChange,
+  spotSparkline,
   sparklineData,
   edgeStrength,
   wins,
@@ -79,11 +85,11 @@ export const AssetCard: React.FC<AssetCardProps> = ({
 
   return (
     <div
-      className="bg-agent-card border border-agent-border rounded-lg flex flex-col overflow-hidden"
+      className="card-base flex flex-col overflow-hidden"
       style={{ borderTopColor: borderColor, borderTopWidth: 3 }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 pt-3.5 pb-1.5">
+      <div className="flex items-center justify-between px-3 pt-2.5 pb-1">
         <div className="flex items-center gap-2">
           <span
             className="w-2.5 h-2.5 rounded-full"
@@ -112,7 +118,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
       </div>
 
       {/* Polymarket Outcome Prices */}
-      <div className="px-4 pb-1">
+      <div className="px-3 pb-0.5">
         {marketFound && (upPrice > 0 || downPrice > 0) ? (
           <>
             {/* Up / Down prices side by side */}
@@ -141,11 +147,11 @@ export const AssetCard: React.FC<AssetCardProps> = ({
                 {upPriceChange >= 0 ? '+' : ''}
                 {upPriceChange.toFixed(1)}%
               </span>
-              {referencePrice > 0 && (
+              {(referencePrice > 0 || (spotPrice && spotPrice > 0)) && (
                 <>
                   <span className="text-agent-text-label text-[10px]">·</span>
                   <span className="text-[10px] font-mono text-agent-text-muted">
-                    ref {formatRefPrice(referencePrice)}
+                    ref {formatRefPrice(referencePrice > 0 ? referencePrice : (spotPrice ?? 0))}
                   </span>
                 </>
               )}
@@ -167,6 +173,33 @@ export const AssetCard: React.FC<AssetCardProps> = ({
               )}
             </div>
           </>
+        ) : spotPrice && spotPrice > 0 ? (
+          /* Spot price fallback when Polymarket market not found */
+          <>
+            <div className="flex items-baseline gap-2">
+              <span className="text-xl font-mono font-bold text-agent-text leading-tight">
+                {formatRefPrice(spotPrice)}
+              </span>
+              <span className="text-[9px] font-mono font-semibold px-1 py-0.5 rounded bg-agent-cyan/10 text-agent-cyan border border-agent-cyan/20">
+                SPOT
+              </span>
+            </div>
+            <div className="flex items-center gap-2 mt-0.5">
+              {spotPriceChange != null && (
+                <span
+                  className={`text-xs font-mono ${
+                    spotPriceChange >= 0 ? 'text-agent-green' : 'text-agent-red'
+                  }`}
+                >
+                  {spotPriceChange >= 0 ? '+' : ''}
+                  {spotPriceChange.toFixed(2)}%
+                </span>
+              )}
+              <span className="text-[10px] font-mono text-agent-text-label">
+                no PM market
+              </span>
+            </div>
+          </>
         ) : (
           <div className="py-2">
             <span className="text-sm font-mono text-agent-text-label">No active market</span>
@@ -174,67 +207,46 @@ export const AssetCard: React.FC<AssetCardProps> = ({
         )}
       </div>
 
-      {/* Gauge + Sparkline row */}
-      <div className="flex items-center gap-3 px-4 py-2">
-        <MatrixGauge
-          value={edgeStrength * 100}
-          min={-10}
-          max={10}
-          size="sm"
-          colorByValue
-          label="EDGE"
-          valueLabel={`${edgeStrength >= 0 ? '+' : ''}${(edgeStrength * 100).toFixed(1)}%`}
-          className="shrink-0"
-        />
+      {/* Sparkline + Edge — compact row */}
+      <div className="flex items-center gap-2 px-3 py-1.5">
         <div className="flex-1" style={{ minWidth: 40 }}>
-          {sparklineData.length > 1 ? (
+          {(sparklineData.length > 1 || (spotSparkline && spotSparkline.length > 1)) ? (
             <MatrixSparkline
-              data={sparklineData}
-              height={48}
+              data={sparklineData.length > 1 ? sparklineData : spotSparkline!}
+              height={32}
               color={dotColor}
               colorByTrend={false}
               strokeWidth={1.5}
             />
           ) : (
-            <div className="h-[48px] flex items-center justify-center text-agent-text-label text-[11px] font-mono">
+            <div className="h-[32px] flex items-center justify-center text-agent-text-label text-[10px] font-mono">
               ...
             </div>
           )}
         </div>
+        <div className="text-right shrink-0">
+          <div className="text-[9px] font-sans text-agent-text-muted uppercase">Edge</div>
+          <div className={`text-[11px] font-mono font-bold tabular-nums ${
+            edgeStrength > 0 ? 'text-agent-green' : edgeStrength < 0 ? 'text-agent-red' : 'text-agent-text-muted'
+          }`}>
+            {edgeStrength !== 0 ? `${edgeStrength >= 0 ? '+' : ''}${(edgeStrength * 100).toFixed(1)}%` : '--'}
+          </div>
+        </div>
       </div>
 
-      {/* W/L + P&L */}
-      <div className="flex items-center justify-between px-4 py-2 border-t border-agent-border/60">
-        <span className="text-xs font-sans text-agent-text-muted">
-          W: <span className="text-agent-green">{wins}</span> / L:{' '}
-          <span className="text-agent-red">{losses}</span>
+      {/* W/L + P&L — tight footer */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-t border-agent-border/40">
+        <span className="text-[10px] font-sans text-agent-text-muted">
+          W:<span className="text-agent-green">{wins}</span> L:<span className="text-agent-red">{losses}</span>
         </span>
         <span
-          className={`text-sm font-mono font-semibold ${
+          className={`text-xs font-mono font-semibold ${
             pnl >= 0 ? 'text-agent-green' : 'text-agent-red'
           }`}
         >
           {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
         </span>
       </div>
-
-      {/* Recent trade pills */}
-      {recentTradePnls.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 px-4 pb-3">
-          {recentTradePnls.slice(-6).map((p, i) => (
-            <span
-              key={i}
-              className={`text-[11px] font-mono px-1.5 py-0.5 rounded-full ${
-                p >= 0
-                  ? 'bg-agent-green/10 text-agent-green'
-                  : 'bg-agent-red/10 text-agent-red'
-              }`}
-            >
-              {p >= 0 ? '+' : ''}${p.toFixed(2)}
-            </span>
-          ))}
-        </div>
-      )}
     </div>
   )
 }

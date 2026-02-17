@@ -1,14 +1,13 @@
 // ==========================================
-// MARKET & TRADING TYPES
+// POLYMARKET US — MARKET & TRADING TYPES
 // ==========================================
 
 export interface Market {
-  id: string
-  question: string
+  id: string            // numeric string (US API returns number, we normalize)
+  slug: string           // primary identifier for US API (e.g. "btc-100k-2025")
+  question: string       // mapped from title
   description?: string
-  outcomes: string[]
-  clobTokenIds: string[]
-  conditionId: string
+  outcomes: string[]     // derived from event's markets (e.g. ['Yes', 'No'])
   active: boolean
   closed: boolean
   endDate: string
@@ -22,14 +21,29 @@ export interface Market {
   resolutionSource?: string
   category?: string
   tags?: string[]
-  negRisk?: boolean
+  // US-specific
+  eventSlug?: string
+  outcomeSlugs?: string[]   // per-outcome SDK market slugs (for BBO lookups)
+  bestBid?: number
+  bestAsk?: number
+  spread?: number
+  orderPriceMinTickSize?: number
+  orderMinSize?: number
 }
 
 export interface OrderBook {
-  marketId: string
+  marketSlug: string
   bids: OrderBookEntry[]
   asks: OrderBookEntry[]
   lastUpdate: number
+  state?: string       // MARKET_STATE_OPEN etc.
+  stats?: {
+    lastTradePx?: number
+    sharesTraded?: number
+    openInterest?: number
+    highPx?: number
+    lowPx?: number
+  }
 }
 
 export interface OrderBookEntry {
@@ -49,7 +63,7 @@ export interface PriceData {
 }
 
 export interface PriceUpdate {
-  tokenId: string
+  marketSlug: string
   outcome: 'yes' | 'no'
   price: number
   timestamp: number
@@ -57,10 +71,10 @@ export interface PriceUpdate {
 
 export interface Order {
   id: string
-  tokenId: string
-  marketId: string
+  marketSlug: string
   side: 'BUY' | 'SELL'
-  type: 'FOK' | 'FAK' | 'GTC' | 'GTD'
+  type: 'FOK' | 'GTC' | 'GTD' | 'IOC'
+  intent: USOrderIntent
   price: number
   size: number
   filledSize?: number
@@ -68,33 +82,37 @@ export interface Order {
   status: 'pending' | 'open' | 'filled' | 'cancelled' | 'expired' | 'failed'
   createdAt: Date
   updatedAt?: Date
-  txHash?: string
   error?: string
+  avgPrice?: number
 }
 
 export interface OrderRequest {
-  tokenId: string
+  marketSlug: string
+  outcome: 'yes' | 'no'
   side: 'BUY' | 'SELL'
   price: number
   size: number
-  type?: 'FOK' | 'FAK' | 'GTC' | 'GTD'
-  expiration?: number  // Unix timestamp for GTD orders (0 = no expiry)
-  conditionId?: string
-  negRisk?: boolean
-  /** Defer execution — order is placed but not matched immediately (default: false) */
-  deferExec?: boolean
-  /** Post-only flag — only valid for GTC and GTD orders */
+  type?: 'FOK' | 'GTC' | 'GTD' | 'IOC'
+  expiration?: string   // ISO8601 for GTD goodTillTime
+  /** Post-only flag — participateDontInitiate in US API */
   postOnly?: boolean
+  /** Internal: marks retry — prevents infinite loops */
+  _retried?: boolean
 }
 
 export interface OrderResult {
   success: boolean
   orderId?: string
-  txHash?: string
   error?: string
   filledSize?: number
   avgPrice?: number
   pending?: boolean  // true if GTD order placed but not yet filled
+  executions?: Array<{
+    id: string
+    lastShares?: string
+    lastPx?: number
+    type: string
+  }>
 }
 
 /**
@@ -103,34 +121,29 @@ export interface OrderResult {
  */
 export interface PendingGtcOrder {
   orderId: string
-  tokenId: string
-  marketId: string
-  conditionId: string
+  marketSlug: string
   outcome: 'yes' | 'no'
   question: string
   side: 'BUY' | 'SELL'
   price: number
   size: number
-  costBasis: number           // USDC locked
+  costBasis: number           // USD locked
   strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
-  negRisk?: boolean
   stopLossPercent: number     // SL to apply when filled
   takeProfitPercent: number   // TP to apply when filled
   placedAt: number            // Date.now() at placement
-  expiresAt: number           // Unix timestamp (seconds) — matches EIP-712 expiration
+  expiresAt: number           // Unix timestamp (ms) — matches goodTillTime
   status: 'pending' | 'filled' | 'cancelled' | 'expired'
 }
 
 export interface Trade {
   id: string
-  marketId: string
-  tokenId: string
+  marketSlug: string
   side: 'BUY' | 'SELL'
   price: number
   size: number
   fee?: number
   timestamp: Date
-  txHash: string
 }
 
 // ==========================================
@@ -138,15 +151,14 @@ export interface Trade {
 // ==========================================
 
 export interface Position {
-  tokenId: string
-  marketId: string
-  conditionId: string
+  marketSlug: string
   marketQuestion: string
-  outcome: string
-  outcomeIndex: number
-  size: number
+  outcome: 'yes' | 'no'
+  size: number              // net position shares
   entryPrice: number
   currentPrice: number
+  cost: number              // total USD cost basis
+  realized: number          // realized P&L
   pnl: {
     dollar: number
     percent: number
@@ -261,7 +273,8 @@ export interface DipArbConfig {
 }
 
 export interface DipSignal {
-  tokenId: string
+  marketSlug: string
+  outcome: 'yes' | 'no'
   currentPrice: number
   previousPrice: number
   dropPercent: number
@@ -269,13 +282,13 @@ export interface DipSignal {
 }
 
 export interface ArbRound {
-  marketId: string
+  marketSlug: string
   leg1Executed: boolean
-  leg1TokenId?: string
+  leg1Outcome?: 'yes' | 'no'
   leg1Price?: number
   leg1Timestamp?: number
   leg2Executed: boolean
-  leg2TokenId?: string
+  leg2Outcome?: 'yes' | 'no'
   leg2Price?: number
   leg2Timestamp?: number
   profit?: number
@@ -317,21 +330,20 @@ export interface ProjectFWConfig {
 
 export interface FWArbRound {
   id: string
-  marketId: string
-  eventId?: string           // For multi-outcome arbs
+  marketSlug: string
+  eventSlug?: string         // For multi-outcome arbs
   timestamp: number
   legs: FWArbLeg[]
   totalCost: number
   guaranteedProfit: number   // D(mu||theta) - g(mu) minus fees
   fwGap: number              // g(mu) at convergence
   klDivergence: number       // D(mu||theta) measuring price incoherence
-  status: 'pending' | 'partial' | 'complete' | 'failed' | 'merged'
-  mergeResult?: { success: boolean; txHash?: string; error?: string }
+  status: 'pending' | 'partial' | 'complete' | 'failed'
 }
 
 export interface FWArbLeg {
-  tokenId: string
-  outcome: string            // 'Yes' | 'No' (or market-specific)
+  marketSlug: string
+  outcome: 'yes' | 'no'
   side: 'BUY' | 'SELL'
   shares: number
   price: number
@@ -422,67 +434,73 @@ export interface LLMPredictionConfig {
 }
 
 // ==========================================
-// API RESPONSE TYPES
+// POLYMARKET US — API RESPONSE TYPES
 // ==========================================
 
-export interface GammaEvent {
-  id: string
+export interface USEvent {
+  id: number
+  slug: string
   title: string
-  slug?: string
+  description?: string
+  startTime?: string
+  endTime?: string
   active: boolean
   closed: boolean
-  enableNegRisk?: boolean
-  markets: Market[]
+  archived?: boolean
+  featured?: boolean
+  liquidity?: number
+  volume?: number
+  markets?: USMarketDetail[]
+  tags?: Array<{ id: number; slug: string; label: string }>
 }
 
-export interface GammaEventsResponse {
-  events?: GammaEvent[]
-}
-
-export interface GammaMarketsResponse {
-  markets: Market[]
-  nextCursor?: string
-}
-
-export interface GammaMarketResponse {
-  market: Market
-}
-
-export interface CLOBOrderResponse {
-  success: boolean
-  orderId?: string
-  txHash?: string
-  error?: string
-}
-
-export interface DataPositionsResponse {
-  positions: ApiPosition[]
-}
-
-export interface ApiPosition {
-  asset: string
-  conditionId: string
+export interface USMarketDetail {
+  id: number
+  slug: string
   title: string
-  size: number
-  avgPrice: number
-  curPrice?: number
-  cashPnl: number
-  percentPnl: number
-  outcomeIndex: number
-  lastUpdated: string
+  outcome: string        // e.g. "Yes", "No"
+  description?: string
+  active: boolean
+  closed: boolean
+  liquidity?: number
+  volume?: number
+  eventSlug?: string
 }
 
-/** Raw trade from Polymarket Data API /trades endpoint */
-export interface ApiTrade {
-  id: string
-  market: string        // conditionId — maps to Trade.marketId
-  asset_id: string      // tokenId
-  side: 'BUY' | 'SELL'
-  price: string         // string numeric
-  size: string          // string numeric
-  fee: string           // string numeric
-  timestamp: string
-  transaction_hash: string
+// ==========================================
+// POLYMARKET US — ORDER INTENT TYPES
+// ==========================================
+
+export type USOrderIntent =
+  | 'ORDER_INTENT_BUY_LONG'    // Buy YES
+  | 'ORDER_INTENT_SELL_LONG'   // Sell YES
+  | 'ORDER_INTENT_BUY_SHORT'   // Buy NO
+  | 'ORDER_INTENT_SELL_SHORT'  // Sell NO
+
+export type USOrderType = 'ORDER_TYPE_LIMIT' | 'ORDER_TYPE_MARKET'
+export type USTimeInForce =
+  | 'TIME_IN_FORCE_GOOD_TILL_CANCEL'
+  | 'TIME_IN_FORCE_GOOD_TILL_DATE'
+  | 'TIME_IN_FORCE_IMMEDIATE_OR_CANCEL'
+  | 'TIME_IN_FORCE_FILL_OR_KILL'
+
+/**
+ * Maps (side, outcome) to a US API order intent.
+ * US API price is always YES-side. For NO orders, API price = 1.0 - desired price.
+ */
+export function resolveIntent(side: 'BUY' | 'SELL', outcome: 'yes' | 'no'): USOrderIntent {
+  if (side === 'BUY' && outcome === 'yes') return 'ORDER_INTENT_BUY_LONG'
+  if (side === 'SELL' && outcome === 'yes') return 'ORDER_INTENT_SELL_LONG'
+  if (side === 'BUY' && outcome === 'no') return 'ORDER_INTENT_BUY_SHORT'
+  return 'ORDER_INTENT_SELL_SHORT'
+}
+
+/**
+ * Convert a desired outcome price to the API YES-side price.
+ * US API always quotes in YES terms.
+ */
+export function toApiPrice(price: number, outcome: 'yes' | 'no'): number {
+  return outcome === 'yes' ? price : 1.0 - price
 }
 
 // ==========================================
@@ -589,33 +607,11 @@ export interface AdvancedSettings {
 }
 
 // ==========================================
-// CLOB PRICE HISTORY TYPES
-// ==========================================
-
-export type PriceHistoryInterval = '1m' | '1h' | '6h' | '1d' | '1w' | 'max'
-
-export interface PriceHistoryOptions {
-  interval: PriceHistoryInterval
-  startTs?: number   // Unix timestamp (seconds)
-  endTs?: number     // Unix timestamp (seconds)
-  fidelity?: number  // Data granularity in minutes
-}
-
-export interface PriceHistoryPoint {
-  t: number  // Unix timestamp
-  p: number  // Price
-}
-
-export interface PriceHistoryResponse {
-  history: PriceHistoryPoint[]
-}
-
-// ==========================================
-// CLOB SPREAD TYPES
+// SPREAD TYPES
 // ==========================================
 
 export interface SpreadData {
-  tokenId: string
+  marketSlug: string
   bid: number
   ask: number
   spread: number
@@ -623,57 +619,32 @@ export interface SpreadData {
 }
 
 // ==========================================
-// WEBSOCKET USER CHANNEL TYPES
+// WEBSOCKET PRIVATE CHANNEL TYPES (US API)
 // ==========================================
 
-export interface UserChannelAuth {
-  apiKey: string
-  secret: string
-  passphrase: string
-}
-
-export type UserTradeStatus = 'MINED' | 'CONFIRMED' | 'RETRYING' | 'FAILED'
-export type UserOrderEventType = 'PLACEMENT' | 'UPDATE' | 'CANCELLATION'
-
-export interface UserTradeMessage {
-  event_type: 'trade'
+/** US WebSocket order execution event */
+export interface USOrderExecution {
   id: string
-  status: UserTradeStatus
-  asset_id: string
-  market: string
-  side: 'BUY' | 'SELL'
-  size: string
-  price: string
-  fee: string
-  timestamp: string
-  maker_orders?: Array<{
-    order_id: string
-    asset_id: string
-    matched_amount: string
-    price: string
-  }>
-  transaction_hash?: string
+  orderId: string
+  marketSlug: string
+  side: string
+  intent: USOrderIntent
+  lastShares?: string
+  lastPx?: number
+  type: string         // ExecutionType
+  transactTime?: string
+  tradeId?: string
+  aggressor?: boolean
 }
 
-export interface UserOrderMessage {
-  event_type: UserOrderEventType
-  order_id: string
-  asset_id: string
-  market: string
-  side: 'BUY' | 'SELL'
-  original_size: string
-  size_matched: string
-  price: string
-  type: 'FOK' | 'FAK' | 'GTC' | 'GTD'
-  timestamp: string
-  associate_trades?: Array<{
-    id: string
-    size: string
-    price: string
-  }>
+/** US WebSocket position update */
+export interface USPositionUpdate {
+  marketSlug: string
+  netPosition: string
+  cost: number
+  realized: number
+  cashValue?: number
 }
-
-export type UserChannelMessage = UserTradeMessage | UserOrderMessage
 
 // ==========================================
 // RTDS (Real-Time Data Socket) TYPES
@@ -775,17 +746,16 @@ export interface CoinbaseCandle {
 }
 
 // ==========================================
-// DATA API ENRICHMENT TYPES
+// PORTFOLIO ACTIVITY TYPES
 // ==========================================
 
 export interface UserActivity {
   id: string
-  type: 'trade' | 'deposit' | 'withdrawal' | 'claim'
+  type: 'trade' | 'deposit' | 'withdrawal' | 'resolution' | 'referral' | 'transfer'
   amount: number
   timestamp: string
-  market?: string
+  marketSlug?: string
   side?: 'BUY' | 'SELL'
-  asset_id?: string
 }
 
 // ==========================================

@@ -9,7 +9,6 @@
  */
 import {
   computeSignal,
-  classifyRegime,
   computeOrderbookImbalance,
 } from './signalEngine'
 import type { SignalInput, SignalEngineConfig } from './signalEngine'
@@ -79,6 +78,7 @@ export interface BacktestOptions {
   feeRateBps?: number      // default 1000 (10% crypto)
   includeOrderbook?: boolean // default true — enables flow imbalance factor
   onProgress?: (current: number, total: number) => void
+  signal?: AbortSignal     // cancellation support
 }
 
 // ==========================================
@@ -95,16 +95,21 @@ export class BacktestRunner {
     const feeRateBps = options.feeRateBps ?? 1000
     const includeOrderbook = options.includeOrderbook ?? true
 
+    options.signal?.throwIfAborted()
+
     // Fetch market
     const market = options.marketId
       ? await polyBacktestClient.getMarket(options.marketId)
       : await polyBacktestClient.getMarketBySlug(options.slug!)
+
+    options.signal?.throwIfAborted()
 
     // Fetch all snapshots
     const snapshots = await polyBacktestClient.getAllSnapshots(
       market.market_id,
       includeOrderbook,
       options.onProgress,
+      options.signal,
     )
 
     if (snapshots.length === 0) {
@@ -116,24 +121,41 @@ export class BacktestRunner {
   }
 
   /**
-   * Run backtest across all resolved markets of a given type.
-   * Returns per-market results.
+   * Run backtest across resolved markets of a given type.
+   * @param maxMarkets — caps the number of markets to backtest (default 50)
+   * @param onDiscovery — progress callback during market fetch phase
    */
   async runBatch(
     marketType: PolyBacktestMarketType,
-    options?: Omit<BacktestOptions, 'marketId' | 'slug'>,
+    options?: Omit<BacktestOptions, 'marketId' | 'slug'> & {
+      maxMarkets?: number
+      onDiscovery?: (label: string) => void
+    },
   ): Promise<BacktestResult[]> {
-    const markets = await polyBacktestClient.getResolvedMarkets(marketType)
+    const signal = options?.signal
+    signal?.throwIfAborted()
+
+    options?.onDiscovery?.(`Discovering ${marketType} markets...`)
+    const allMarkets = await polyBacktestClient.getResolvedMarkets(marketType, signal)
+    signal?.throwIfAborted()
+
+    const maxMarkets = options?.maxMarkets ?? 50
+    const markets = allMarkets.slice(0, maxMarkets)
+    options?.onDiscovery?.(`Found ${allMarkets.length} markets, running ${markets.length}`)
+
     const results: BacktestResult[] = []
 
     for (let i = 0; i < markets.length; i++) {
+      signal?.throwIfAborted()
       try {
         const result = await this.run({
           ...options,
           marketId: markets[i].market_id,
+          signal,
         })
         results.push(result)
       } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') throw err
         console.warn(`Backtest failed for market ${markets[i].market_id}:`, err)
       }
       options?.onProgress?.(i + 1, markets.length)
@@ -204,11 +226,7 @@ export class BacktestRunner {
       // --- ENTRY GATE: min window remaining ---
       if (timeRemainingMs < scaledMinWindowRemaining) continue
 
-      // --- ENTRY GATE: regime filter (pre-signal, same as live) ---
-      if (config.regimeFilterEnabled) {
-        const regime = classifyRegime(priceHistory)
-        if (regime === 'choppy') continue
-      }
+      // Regime filter is now graduated inside computeSignal() — no hard block here.
 
       // --- COMPUTE SIGNAL ---
       // Compute orderbook flow imbalance if available

@@ -104,7 +104,7 @@ export const SpotCryptoView: React.FC = () => {
       {/* 1. Summary Stats Row — 6 cards */}
       <div className="grid grid-cols-6 gap-4">
         {/* Total Invested */}
-        <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
+        <div className="card-base p-3.5">
           <div className="text-xs uppercase tracking-wider text-agent-text-muted mb-1.5 font-sans">
             Total Invested
           </div>
@@ -114,7 +114,7 @@ export const SpotCryptoView: React.FC = () => {
         </div>
 
         {/* Unrealized P&L */}
-        <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
+        <div className="card-base p-3.5">
           <div className="text-xs uppercase tracking-wider text-agent-text-muted mb-1.5 font-sans">
             Unrealized P&L
           </div>
@@ -128,7 +128,7 @@ export const SpotCryptoView: React.FC = () => {
         </div>
 
         {/* Open Positions */}
-        <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
+        <div className="card-base p-3.5">
           <div className="text-xs uppercase tracking-wider text-agent-text-muted mb-1.5 font-sans">
             Open Positions
           </div>
@@ -138,7 +138,7 @@ export const SpotCryptoView: React.FC = () => {
         </div>
 
         {/* Avg P&L % */}
-        <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
+        <div className="card-base p-3.5">
           <div className="text-xs uppercase tracking-wider text-agent-text-muted mb-1.5 font-sans">
             Avg P&L %
           </div>
@@ -153,7 +153,7 @@ export const SpotCryptoView: React.FC = () => {
         </div>
 
         {/* Best Position */}
-        <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
+        <div className="card-base p-3.5">
           <div className="text-xs uppercase tracking-wider text-agent-text-muted mb-1.5 font-sans">
             Best Position
           </div>
@@ -168,7 +168,7 @@ export const SpotCryptoView: React.FC = () => {
         </div>
 
         {/* Worst Position */}
-        <div className="bg-agent-card border border-agent-border rounded-lg p-3.5">
+        <div className="card-base p-3.5">
           <div className="text-xs uppercase tracking-wider text-agent-text-muted mb-1.5 font-sans">
             Worst Position
           </div>
@@ -184,7 +184,7 @@ export const SpotCryptoView: React.FC = () => {
       </div>
 
       {/* 2. Positions Table */}
-      <div className="bg-agent-card border border-agent-border rounded-lg flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div className="card-base flex-1 flex flex-col min-h-0 overflow-hidden">
         {/* Table Header */}
         <div className="grid grid-cols-[80px_100px_100px_90px_90px_100px_80px_80px] gap-2 px-4 py-2.5 border-b border-agent-border bg-agent-elevated/30">
           {/* Symbol — sortable */}

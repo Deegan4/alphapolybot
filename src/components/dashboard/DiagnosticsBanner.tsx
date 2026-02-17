@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { useSettingsStore, useWalletStore } from '@/stores'
 import { riskManager, rejectionTracker, readinessChecker, positionLifecycleManager } from '@/services/trading'
+import { polymarketUSClient } from '@/services/api'
+import { realtimeService } from '@/services/realtime/RealtimeService'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import type { RejectionSummary } from '@/services/trading/RejectionTracker'
 
@@ -24,21 +26,23 @@ interface BannerState {
  * 6. No trades in >30 min despite running (yellow) — shows rejection summary
  */
 export const DiagnosticsBanner: React.FC = () => {
-  const { dryRun } = useSettingsStore()
+  const dryRun = useSettingsStore((s) => s.dryRun)
   const isConnected = useWalletStore((s) => s.isConnected)
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [rejections, setRejections] = useState<RejectionSummary>(rejectionTracker.getSummary())
   const [emergencyStopped, setEmergencyStopped] = useState(false)
+  const [wsConnected, setWsConnected] = useState(realtimeService.isConnected())
 
   useEffect(() => {
     return strategyManager.subscribe(setStrategies)
   }, [])
 
-  // Poll rejection summary + emergency stop state every 3s
+  // Poll rejection summary + emergency stop + WS state every 3s
   useEffect(() => {
     const tick = () => {
       setRejections(rejectionTracker.getSummary())
       setEmergencyStopped(riskManager.getStatus().emergencyStopped)
+      setWsConnected(realtimeService.isConnected())
     }
     tick()
     const id = setInterval(tick, 3000)
@@ -52,6 +56,8 @@ export const DiagnosticsBanner: React.FC = () => {
     strategies,
     dryRun,
     rejections,
+    pmCredentials: polymarketUSClient.hasCredentials(),
+    wsConnected,
   })
 
   if (!banner) return null
@@ -98,6 +104,8 @@ function computeBanner(ctx: {
   strategies: StrategyState[]
   dryRun: boolean
   rejections: RejectionSummary
+  pmCredentials: boolean
+  wsConnected: boolean
 }): BannerState | null {
   // 1. Emergency stop (most critical)
   if (ctx.emergencyStopped) {
@@ -167,7 +175,27 @@ function computeBanner(ctx: {
     }
   }
 
-  // 5. High rejection rate — show top blocker with actionable resolution
+  // 5. Polymarket WS not connected — showing spot prices only
+  if (!ctx.pmCredentials) {
+    return {
+      severity: 'cyan',
+      message: 'PM WS NOT CONFIGURED',
+      detail: 'Showing Binance spot prices. Add Polymarket US keys in Settings for live markets.',
+      action: {
+        label: 'Settings',
+        onClick: () => { window.location.hash = ''; window.location.pathname = '/settings' },
+      },
+    }
+  }
+  if (ctx.pmCredentials && !ctx.wsConnected) {
+    return {
+      severity: 'yellow',
+      message: 'PM WS DISCONNECTED',
+      detail: 'Polymarket WebSocket offline — showing Binance spot prices as fallback.',
+    }
+  }
+
+  // 6. High rejection rate — show top blocker with actionable resolution
   if (ctx.rejections.total > 10 && ctx.rejections.topBlocker) {
     const tb = ctx.rejections.topBlocker
     const countStr = Object.entries(ctx.rejections.counts)

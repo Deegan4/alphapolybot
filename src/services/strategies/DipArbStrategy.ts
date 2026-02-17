@@ -1,7 +1,7 @@
 import { BaseStrategy } from './BaseStrategy'
 import { DipDetector, type DipEvent } from './DipDetector'
 import type { DipArbConfig, ArbRound, Market, PriceData } from '@/types'
-import { gammaClient } from '@/services/api'
+import { gammaClient } from '@/services/api/GammaClient'
 import { clobClient } from '@/services/api/CLOBClient'
 import { realtimeService } from '@/services/realtime'
 import { tradingService } from '@/services/trading/TradingService'
@@ -521,7 +521,7 @@ export class DipArbStrategy extends BaseStrategy {
         const maxLegPrice = Math.max(event.currentPrice, complementPrice)
         tradeAmount = Math.max(1, 5 * maxLegPrice)
       } else {
-        const bankroll = useWalletStore.getState().usdcBridgedBalance ?? useWalletStore.getState().usdcBalance
+        const bankroll = useWalletStore.getState().balance
         const kellyFraction = useSettingsStore.getState().kellyFraction
         // Confirmed arb: arbKelly returns a fraction (profit-scaled), pipe through sizeBet
         const fStar = KellySizer.arbKelly(expectedProfit) // e.g., 0.03 → ~0.06 fraction

@@ -213,19 +213,27 @@ export class LLMPredictionStrategy extends BaseStrategy {
 
       // Check if we can open more positions (PLM is the source of truth)
       const { positionLifecycleManager } = await import('@/services/trading/PositionLifecycleManager')
-      const llmPositionCount = positionLifecycleManager.getPositions()
+      let llmPositionCount = positionLifecycleManager.getPositions()
         .filter(p => p.strategy === 'llm').length
       if (llmPositionCount >= this.llmConfig.maxOpenPositions) {
-        this.log(`Maximum open positions reached (${llmPositionCount}/${this.llmConfig.maxOpenPositions}), skipping analysis`)
-        activityLogger.logWarning(`LLM scan skipped: ${llmPositionCount}/${this.llmConfig.maxOpenPositions} positions open — close or remove stale positions to resume trading`)
-        rejectionTracker.record('position_limit', 'llm', `${llmPositionCount}/${this.llmConfig.maxOpenPositions} positions`)
-        return
+        // Auto-clean stale positions before giving up
+        const cleaned = positionLifecycleManager.cleanStalePositions()
+        if (cleaned > 0) {
+          llmPositionCount = positionLifecycleManager.getPositions()
+            .filter(p => p.strategy === 'llm').length
+        }
+        if (llmPositionCount >= this.llmConfig.maxOpenPositions) {
+          this.log(`Maximum open positions reached (${llmPositionCount}/${this.llmConfig.maxOpenPositions}), skipping analysis`)
+          activityLogger.logWarning(`LLM scan skipped: ${llmPositionCount}/${this.llmConfig.maxOpenPositions} positions open — close or remove stale positions to resume trading`)
+          rejectionTracker.record('position_limit', 'llm', `${llmPositionCount}/${this.llmConfig.maxOpenPositions} positions`)
+          return
+        }
       }
 
       // Cross-strategy capital guard: check total exposure across ALL strategies
       // Prevents LLM from spending money that BTC/other strategies already committed
       const walletState = useWalletStore.getState()
-      const totalBalance = walletState.usdcBridgedBalance ?? walletState.usdcBalance
+      const totalBalance = walletState.balance
       const allPositions = positionLifecycleManager.getPositions()
       const totalCommitted = allPositions.reduce((sum, p) => sum + (p.costBasis || 0), 0)
       const availableCapital = totalBalance - totalCommitted
@@ -269,12 +277,12 @@ export class LLMPredictionStrategy extends BaseStrategy {
 
       // Gather enrichment context from in-memory singletons (synchronous, no API calls)
       const outcomeIdx0 = 0
-      const tokenIdForContext = market.clobTokenIds[outcomeIdx0]
-      let context = gatherMarketContext(market, tokenIdForContext, 'llm')
+      const slugForContext = market.slug
+      let context = gatherMarketContext(market, slugForContext, 'llm')
 
       // Optionally enrich with price trend (async, rate-limited to top 5 per cycle)
       if (fetchTrend) {
-        context = await enrichWithPriceTrend(context, tokenIdForContext)
+        context = await enrichWithPriceTrend(context, slugForContext)
       }
 
       // Get LLM prediction with enriched context
@@ -350,12 +358,12 @@ export class LLMPredictionStrategy extends BaseStrategy {
 
       // Microstructure confirmation — penalize confidence if order book disagrees (soft gate)
       const outcomeIdx = prediction.predictedOutcome === 'yes' ? 0 : 1
-      const tokenId = market.clobTokenIds[outcomeIdx]
-      if (tokenId) {
+      const slugForMicro = market.slug
+      if (slugForMicro) {
         const isBullish = prediction.predictedOutcome === 'yes' ? outcomeIdx === 0 : outcomeIdx === 1
         const confirmed = isBullish
-          ? microstructureAnalyzer.confirmsBullish(tokenId)
-          : microstructureAnalyzer.confirmsBearish(tokenId)
+          ? microstructureAnalyzer.confirmsBullish(slugForMicro)
+          : microstructureAnalyzer.confirmsBearish(slugForMicro)
         if (!confirmed) {
           // Soft gate: reduce confidence by 15% instead of hard block
           const penalizedConfidence = finalConfidence * 0.85
@@ -405,16 +413,10 @@ export class LLMPredictionStrategy extends BaseStrategy {
 
           // Track position for stop-loss / take-profit enforcement
           const outcomeIndex = prediction.predictedOutcome === 'yes' ? 0 : 1
-          const entryPrice = market.outcomePrices[outcomeIndex]
-          const tokenIdForPlm = market.clobTokenIds[outcomeIndex]
-          Promise.all([
-            import('@/services/trading/PositionLifecycleManager'),
-            import('@/services/api').then(api => api.clobClient.getFeeRateBps(tokenIdForPlm)).catch(() => undefined),
-          ]).then(([m, feeRate]) => {
+          const entryPrice = result.avgPrice ?? market.outcomePrices[outcomeIndex]
+          import('@/services/trading/PositionLifecycleManager').then(m => {
             m.positionLifecycleManager.trackPosition({
-              tokenId: tokenIdForPlm,
-              marketId: market.id,
-              conditionId: market.conditionId,
+              marketSlug: market.slug,
               outcome: prediction.predictedOutcome,
               question: market.question,
               entryPrice,
@@ -424,17 +426,15 @@ export class LLMPredictionStrategy extends BaseStrategy {
               stopLossPercent: this.llmConfig.stopLossPercent,
               takeProfitPercent: this.llmConfig.takeProfitPercent,
               strategy: 'llm',
-              negRisk: market.negRisk,
               maxHoldMs: 4 * 60 * 60 * 1000, // 4 hour max hold for LLM positions
               partialCloseAt: this.llmConfig.takeProfitPercent * 0.6, // partial close at 60% of TP target
-              takerFeeBps: feeRate,
             })
           }).catch(err => console.warn('[LLM] Failed to track position:', err))
 
           // Log to backtest framework with full context
           tradeLogger.logEntry({
             marketId: market.id,
-            conditionId: market.conditionId,
+            slug: market.slug,
             question: market.question,
             outcomes: market.outcomes || [],
             strategy: 'llm',
@@ -477,7 +477,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
     if (useSettingsStore.getState().pennyTraderMode) return Math.max(1.0, 5 * marketPrice)
 
     const walletState = useWalletStore.getState()
-    const bankroll = walletState.usdcBridgedBalance ?? walletState.usdcBalance
+    const bankroll = walletState.balance
     const baseKellyFraction = useSettingsStore.getState().kellyFraction
 
     // Scale Kelly fraction by confidence bucket — bet bigger on stronger signals
@@ -594,8 +594,8 @@ export class LLMPredictionStrategy extends BaseStrategy {
 
         try {
           // Gather general + crypto-specific context
-          const tokenIdForContext = market.clobTokenIds[0]
-          let context = gatherMarketContext(market, tokenIdForContext, 'llm')
+          const slugForContext = market.slug
+          let context = gatherMarketContext(market, slugForContext, 'llm')
           context = gatherCryptoContext(context, market)
 
           // Use crypto-specific prompt via analyzeCryptoMarket
@@ -614,45 +614,77 @@ export class LLMPredictionStrategy extends BaseStrategy {
 
           // Execute trade using the same logic as general loop
           const outcomeIdx = prediction.predictedOutcome === 'yes' ? 0 : 1
-          const tokenId = market.clobTokenIds[outcomeIdx]
-          const outcome = market.outcomes[outcomeIdx]
+          const marketPrice = market.outcomePrices[outcomeIdx]
 
-          const tradeAmount = this.computePositionSize(market, prediction.confidence)
+          const tradeAmount = this.calculatePositionSize(prediction.confidence, marketPrice)
           if (tradeAmount <= 0) continue
 
-          this.log(`[Crypto] Placing ${prediction.predictedOutcome.toUpperCase()} trade: $${tradeAmount.toFixed(2)} on "${outcome}"`)
+          this.log(`[Crypto] Placing ${prediction.predictedOutcome.toUpperCase()} trade: $${tradeAmount.toFixed(2)}`)
           activityLogger.logTrade(
-            `Crypto LLM trade: ${prediction.predictedOutcome.toUpperCase()} $${tradeAmount.toFixed(2)} on "${outcome}"`,
+            `Crypto LLM trade: ${prediction.predictedOutcome.toUpperCase()} $${tradeAmount.toFixed(2)}`,
             { confidence: prediction.confidence, reasoning: prediction.reasoning.substring(0, 100) },
           )
 
-          await tradingService.executeTrade({
+          const result = await tradingService.placeBet(
             market,
-            tokenId,
-            outcome,
-            side: 'BUY',
-            amount: tradeAmount,
-            price: market.outcomePrices[outcomeIdx],
-            strategy: 'llm',
-          })
+            prediction.predictedOutcome,
+            tradeAmount,
+            {
+              stopLossPercent: this.llmConfig.stopLossPercent,
+              takeProfitPercent: this.llmConfig.takeProfitPercent,
+            },
+          )
+
+          if (!result.success) {
+            this.log(`[Crypto] Trade rejected: ${result.error}`)
+            continue
+          }
 
           this.updateStats({
             totalTrades: this._stats.totalTrades + 1,
           })
 
+          // Track position with PLM for SL/TP enforcement
+          if (!result.pending) {
+            const entryPrice = result.avgPrice ?? marketPrice
+            import('@/services/trading/PositionLifecycleManager').then(m => {
+              m.positionLifecycleManager.trackPosition({
+                marketSlug: market.slug,
+                outcome: prediction.predictedOutcome,
+                question: market.question,
+                entryPrice,
+                size: result.filledSize || tradeAmount / entryPrice,
+                costBasis: tradeAmount,
+                entryTime: Date.now(),
+                stopLossPercent: this.llmConfig.stopLossPercent,
+                takeProfitPercent: this.llmConfig.takeProfitPercent,
+                strategy: 'llm',
+                maxHoldMs: 4 * 60 * 60 * 1000,
+              })
+            }).catch(err => console.warn('[LLM Crypto] PLM track failed:', err))
+          }
+
           // Record in trade logger
-          tradeLogger.recordTrade({
-            strategy: 'llm',
-            action: 'BUY',
+          tradeLogger.logEntry({
             marketId: market.id,
-            tokenId,
-            outcome,
-            amount: tradeAmount,
-            price: market.outcomePrices[outcomeIdx],
-            confidence: prediction.confidence,
-            reasoning: prediction.reasoning,
-            orderType: this.llmConfig.orderType,
-          }).catch(() => {})
+            slug: market.slug,
+            question: market.question,
+            outcomes: market.outcomes || [],
+            strategy: 'llm',
+            side: 'BUY',
+            outcome: prediction.predictedOutcome,
+            modelProbability: prediction.confidence,
+            calibratedProbability: prediction.confidence,
+            marketPrice,
+            kellyFraction: useSettingsStore.getState().kellyFraction,
+            kellyBetSize: tradeAmount,
+            actualBetSize: tradeAmount,
+            orderType: result.pending ? 'GTD' : 'FOK',
+            fillPrice: result.avgPrice ?? marketPrice,
+            filledSize: result.filledSize,
+            success: true,
+            orderId: result.orderId,
+          })
 
           // Only take one crypto trade per cycle to conserve budget
           break

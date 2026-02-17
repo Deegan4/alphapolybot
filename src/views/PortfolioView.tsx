@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixStatsGrid, MatrixBadge, MatrixLoading, MatrixButton, AnimatedCounter } from '@/components/ui'
 import { useWalletStore } from '@/stores'
-import { dataClient } from '@/services/api'
+import { dataClient } from '@/services/api/DataClient'
 import { positionLifecycleManager, type PositionStatus } from '@/services/trading'
 import type { Position, Trade } from '@/types'
 import { cn } from '@/utils/cn'
@@ -21,7 +21,7 @@ const itemVariants = {
  * PortfolioView - Portfolio overview and position management
  */
 export const PortfolioView: React.FC = () => {
-  const { isConnected, usdcBalance } = useWalletStore()
+  const { isConnected, balance: usdcBalance } = useWalletStore()
   const [activeView, setActiveView] = useState<'markets' | 'spot' | 'closed'>('markets')
   const [positions, setPositions] = useState<Position[]>([])
   const [trackedPositions, setTrackedPositions] = useState<PositionStatus[]>([])

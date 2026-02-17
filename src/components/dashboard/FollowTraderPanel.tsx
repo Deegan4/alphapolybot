@@ -159,7 +159,7 @@ export const FollowTraderPanel: React.FC = () => {
   // ── No address set: show input prompt ──
   if (!followedAddress) {
     return (
-      <div className="bg-agent-card border border-matrix-border rounded-lg p-3">
+      <div className="card-base p-3">
         <div className="text-xs font-mono font-semibold text-matrix-green mb-2">
           FOLLOW TRADER
         </div>
@@ -196,7 +196,7 @@ export const FollowTraderPanel: React.FC = () => {
 
   // ── Address set: show trader data ──
   return (
-    <div className="bg-agent-card border border-matrix-border rounded-lg p-3 flex flex-col min-h-0 max-h-full overflow-hidden">
+    <div className="card-base p-3 flex flex-col min-h-0 max-h-full overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-1.5">

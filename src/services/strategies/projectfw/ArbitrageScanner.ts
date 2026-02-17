@@ -10,7 +10,7 @@ import type { EventAnalyzer } from './crossmarket/EventAnalyzer'
 import type { DependencyClassifier } from './crossmarket/DependencyClassifier'
 import type { MutexValidator } from './crossmarket/MutexValidator'
 import { FrankWolfeOptimizer } from './FrankWolfeOptimizer'
-import { gammaClient } from '@/services/api'
+import { gammaClient } from '@/services/api/GammaClient'
 import { clobClient } from '@/services/api/CLOBClient'
 import { realtimeService } from '@/services/realtime'
 
@@ -340,7 +340,7 @@ export class ArbitrageScanner {
         mu: snapshot.prices,
         guaranteedProfit: bidSum - 1.0,
         fwGap: 0,
-        klDivergence: this.optimizer.klDivergence(snapshot.prices, snapshot.prices.map(() => 0.5)),
+        klDivergence: this.optimizer.klDivergence(snapshot.prices, snapshot.prices.map(() => 1 / snapshot.prices.length)),
         iterations: 0,
         converged: true,
         tradeLegs: sellLegs,
@@ -593,7 +593,7 @@ export class ArbitrageScanner {
         mu: snapshot.prices,
         guaranteedProfit: bidSum - 1.0,
         fwGap: 0,
-        klDivergence: this.optimizer.klDivergence(snapshot.prices, snapshot.prices.map(() => 0.5)),
+        klDivergence: this.optimizer.klDivergence(snapshot.prices, snapshot.prices.map(() => 1 / snapshot.prices.length)),
         iterations: 0,
         converged: true,
         tradeLegs: sellLegs,

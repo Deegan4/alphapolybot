@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   LineChart,
   Line,
@@ -68,7 +68,7 @@ export const PerformancePanel: React.FC = () => {
   const strategyKeys = Object.keys(summary.byStrategy).filter(k => summary.byStrategy[k].trades > 0)
 
   return (
-    <div className="bg-agent-card border border-agent-border rounded-lg p-4 gradient-border flex flex-col gap-3">
+    <div className="card-base p-4 gradient-border flex flex-col gap-3">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h3 className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium">
@@ -116,14 +116,13 @@ export const PerformancePanel: React.FC = () => {
 
           {/* Cumulative P&L chart */}
           {cumulativePnl.length >= 2 && (
-            <div className="h-[100px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
+            <PnlChartContainer>
                 <LineChart data={cumulativePnl} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
                   <XAxis dataKey="time" hide />
                   <YAxis hide domain={['auto', 'auto']} />
                   <ReferenceLine y={0} stroke="#334155" strokeDasharray="3 3" />
                   <Tooltip
-                    contentStyle={{ background: '#0a0f0a', border: '1px solid #1a3a1a', fontSize: 11, fontFamily: 'monospace' }}
+                    contentStyle={{ background: 'rgba(10, 15, 10, 0.8)', backdropFilter: 'blur(16px)', border: '1px solid rgba(34, 197, 94, 0.1)', borderRadius: '12px', fontSize: 11, fontFamily: 'monospace' }}
                     labelStyle={{ color: '#6ee7b7' }}
                     formatter={(v: number) => [`$${v.toFixed(2)}`, 'P&L']}
                   />
@@ -135,8 +134,7 @@ export const PerformancePanel: React.FC = () => {
                     dot={false}
                   />
                 </LineChart>
-              </ResponsiveContainer>
-            </div>
+            </PnlChartContainer>
           )}
 
           {/* Per-strategy table */}
@@ -181,6 +179,31 @@ export const PerformancePanel: React.FC = () => {
             </div>
           )}
         </>
+      )}
+    </div>
+  )
+}
+
+/** Defers Recharts render until the container has positive dimensions */
+function PnlChartContainer({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [hasSize, setHasSize] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const ro = new ResizeObserver(([e]) => {
+      const { width: w, height: h } = e.contentRect
+      setHasSize(w > 0 && h > 0)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return (
+    <div ref={ref} className="h-[100px] w-full">
+      {hasSize && (
+        <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+          {children as React.ReactElement}
+        </ResponsiveContainer>
       )}
     </div>
   )

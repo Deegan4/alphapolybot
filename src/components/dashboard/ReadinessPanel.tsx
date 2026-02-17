@@ -64,7 +64,7 @@ export const ReadinessPanel: React.FC = () => {
 
   // Full checklist
   return (
-    <div className="mx-1 mb-2 rounded bg-agent-card border border-agent-border overflow-hidden">
+    <div className="mx-1 mb-2 card-base overflow-hidden">
       {/* Header */}
       <div className="px-3 py-2 border-b border-agent-border flex items-center justify-between">
         <div className="flex items-center gap-2">

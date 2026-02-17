@@ -34,7 +34,10 @@ const MatrixLoading: React.FC = () => (
  * App - Main application component with routing
  */
 const App: React.FC = () => {
-  const { dryRun, openRouterApiKey, gtcFallbackEnabled, gtcExpiryMinutes } = useSettingsStore()
+  const dryRun = useSettingsStore((s) => s.dryRun)
+  const openRouterApiKey = useSettingsStore((s) => s.openRouterApiKey)
+  const gtcFallbackEnabled = useSettingsStore((s) => s.gtcFallbackEnabled)
+  const gtcExpiryMinutes = useSettingsStore((s) => s.gtcExpiryMinutes)
   const initialized = useRef(false)
 
   // Initialize strategy manager on first load
@@ -80,6 +83,17 @@ const App: React.FC = () => {
         console.error('[App] Failed to initialize strategy manager:', error)
       }
 
+      // Hydrate Coinbase credentials from persisted settings into the singleton client.
+      // Zustand persist restores store state on reload, but the CoinbaseClient singleton
+      // only receives credentials via setter side-effects — so we push them here on init.
+      const { coinbaseApiKey, coinbaseSecret } = useSettingsStore.getState()
+      if (coinbaseApiKey && coinbaseSecret) {
+        import('@/services/api/CoinbaseClient').then(({ coinbaseClient }) => {
+          coinbaseClient.setCredentials(coinbaseApiKey, coinbaseSecret)
+          console.log('[App] Coinbase credentials hydrated from persisted settings')
+        }).catch(() => {})
+      }
+
       // Connect RTDS for streaming crypto prices (no auth needed)
       import('@/services/realtime').then(({ rtdsService }) => {
         rtdsService.connect().then(connected => {
@@ -119,34 +133,25 @@ const App: React.FC = () => {
       // so on page refresh we need to re-call connect() to restore balances.
       const seedPhrase = import.meta.env.VITE_WALLET_SEED_PHRASE
       if (seedPhrase && seedPhrase !== 'word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12') {
-        const { address } = useWalletStore.getState()
-        // NOTE: connect() now auto-computes the correct proxy via CREATE2.
-        // Do NOT restore a persisted proxyAddress here — it may be stale/wrong.
-        if (!useWalletStore.getState().isConnected || address) {
+        // Auto-reconnect using PM US credentials from env
+        if (!useWalletStore.getState().isConnected) {
           console.log('[App] Auto-reconnecting wallet from env seed phrase...')
           try {
             const success = await useWalletStore.getState().connect(seedPhrase)
             if (success) {
               console.log('[App] Wallet auto-reconnected — balances synced')
 
+              // Start balance polling globally — previously lived in Header.tsx
+              // which isn't rendered on the Dashboard route (DashboardLayout has no Header).
+              // Services (RiskManager, strategies) read balance from any route.
+              useWalletStore.getState().startPolling()
+
               // Connect user channel WebSocket after wallet is ready
-              // Requires CLOB API credentials (derived from wallet)
-              import('@/services/api').then(({ clobClient }) => {
-                import('@/services/realtime').then(({ userChannelService }) => {
-                  const creds = clobClient.getCredentials()
-                  if (creds) {
-                    userChannelService.setAuth({
-                      apiKey: creds.key,
-                      secret: creds.secret,
-                      passphrase: creds.passphrase,
-                    })
-                    userChannelService.connect().then(connected => {
-                      if (connected) {
-                        console.log('[App] User channel connected — push-based order updates active')
-                      }
-                    })
-                  } else {
-                    console.log('[App] CLOB credentials not available — user channel skipped')
+              // Uses polymarketUSClient credentials (Ed25519, set during wallet connect)
+              import('@/services/realtime').then(({ userChannelService }) => {
+                userChannelService.connect().then(connected => {
+                  if (connected) {
+                    console.log('[App] User channel connected — push-based order updates active')
                   }
                 })
               }).catch(() => {})
@@ -161,6 +166,9 @@ const App: React.FC = () => {
     }
 
     initializeApp()
+
+    // Cleanup polling on unmount (rare — App is root, but good hygiene)
+    return () => { useWalletStore.getState().stopPolling() }
   }, [])
 
   // Tab lifecycle safety: warn before closing/refreshing with live strategies running

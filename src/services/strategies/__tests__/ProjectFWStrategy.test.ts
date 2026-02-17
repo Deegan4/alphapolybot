@@ -3,7 +3,7 @@ import { ProjectFWStrategy } from '../ProjectFWStrategy'
 
 // Mock all external dependencies
 
-vi.mock('@/services/api', () => ({
+vi.mock('@/services/api/GammaClient', () => ({
   gammaClient: {
     getActiveMarkets: vi.fn().mockResolvedValue([]),
     getEvents: vi.fn().mockResolvedValue([]),
@@ -74,7 +74,7 @@ vi.mock('@/services/trading/PositionLifecycleManager', () => ({
 
 vi.mock('@/stores/walletStore', () => ({
   useWalletStore: {
-    getState: () => ({ usdcBalance: 100, usdcBridgedBalance: 100, usdcNativeBalance: 0, balance: 0.5 }),
+    getState: () => ({ balance: 100, buyingPower: 100 }),
   },
 }))
 
@@ -232,7 +232,7 @@ describe('ProjectFWStrategy', () => {
 
   describe('scanning', () => {
     it('runs full scan on enable', async () => {
-      const { gammaClient } = await import('@/services/api')
+      const { gammaClient } = await import('@/services/api/GammaClient')
       await strategy.initialize()
       await strategy.enable()
 

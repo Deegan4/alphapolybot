@@ -8,7 +8,7 @@
  * at the desired price level before committing capital.
  */
 
-import { clobClient } from '@/services/api'
+import { polymarketUSClient } from '@/services/api'
 import type { OrderBook } from '@/types'
 
 export interface DepthCheck {
@@ -33,17 +33,17 @@ export class OrderBookDepthAnalyzer {
    * Walks the ask side of the order book to determine how much
    * can fill at the target price ± slippage tolerance.
    *
-   * @param tokenId - The CLOB token ID
-   * @param orderSizeUSD - Desired order size in USDC
+   * @param slug - The market slug
+   * @param orderSizeUSD - Desired order size in USD
    * @param maxSlippage - Maximum acceptable slippage (0.02 = 2%)
    * @returns DepthCheck with liquidity analysis
    */
   async checkBuyDepth(
-    tokenId: string,
+    slug: string,
     orderSizeUSD: number,
     maxSlippage = 0.02,
   ): Promise<DepthCheck> {
-    const book = await clobClient.getOrderBook(tokenId)
+    const book = await polymarketUSClient.getOrderBook(slug)
     if (!book || book.asks.length === 0) {
       return {
         sufficient: false,
@@ -63,11 +63,11 @@ export class OrderBookDepthAnalyzer {
    * Walks the bid side of the order book.
    */
   async checkSellDepth(
-    tokenId: string,
+    slug: string,
     orderSizeShares: number,
     maxSlippage = 0.02,
   ): Promise<DepthCheck> {
-    const book = await clobClient.getOrderBook(tokenId)
+    const book = await polymarketUSClient.getOrderBook(slug)
     if (!book || book.bids.length === 0) {
       return {
         sufficient: false,
@@ -88,11 +88,11 @@ export class OrderBookDepthAnalyzer {
    * Useful for Kelly-sizing cap: min(kellySize, maxFillable).
    */
   async getMaxFillableSize(
-    tokenId: string,
+    slug: string,
     side: 'BUY' | 'SELL',
     maxSlippage = 0.02,
   ): Promise<number> {
-    const book = await clobClient.getOrderBook(tokenId)
+    const book = await polymarketUSClient.getOrderBook(slug)
     if (!book) return 0
 
     const levels = side === 'BUY' ? book.asks : book.bids

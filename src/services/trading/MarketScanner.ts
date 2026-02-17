@@ -1,5 +1,5 @@
 import type { Market } from '@/types'
-import { gammaClient } from '@/services/api'
+import { polymarketUSClient } from '@/services/api'
 import { calibrationTracker } from './CalibrationTracker'
 
 export interface ScanResult {
@@ -55,9 +55,8 @@ export class MarketScanner {
    */
   async scan(): Promise<ScanResult[]> {
     try {
-      // maxAgeHours=0 means no age filter — scan all active markets
-      const maxAge = this.config.maxAgeHours > 0 ? this.config.maxAgeHours : undefined
-      const markets = await gammaClient.getActiveMarkets(maxAge)
+      // Fetch all active markets from US API
+      const markets = await polymarketUSClient.getMarkets({ active: true })
 
       this.scanResults = markets.map(market => this.evaluateMarket(market))
       this.lastScanTime = new Date()
@@ -193,16 +192,6 @@ export class MarketScanner {
         eligible: false,
         score: 0,
         reason: 'Market does not have valid outcomes',
-      }
-    }
-
-    // Check token IDs exist
-    if (!market.clobTokenIds || market.clobTokenIds.length !== 2) {
-      return {
-        market,
-        eligible: false,
-        score: 0,
-        reason: 'Market does not have valid token IDs',
       }
     }
 

@@ -66,9 +66,36 @@ export class PolyBacktestClient extends BaseApiClient {
     return this.get<PolyBacktestMarketsResponse>('/v1/markets', { params })
   }
 
-  /** Get a single market by ID. */
+  /** Get a single market by ID. Falls back to condition_id search if 404. */
   async getMarket(marketId: string): Promise<PolyBacktestMarket> {
-    return this.get<PolyBacktestMarket>(`/v1/markets/${marketId}`)
+    try {
+      return await this.get<PolyBacktestMarket>(`/v1/markets/${marketId}`)
+    } catch (err) {
+      if ((err as { status?: number }).status === 404 && marketId.startsWith('0x')) {
+        // Might be a Polymarket condition_id — search for it
+        return this.findByConditionId(marketId)
+      }
+      throw err
+    }
+  }
+
+  /** Search markets by Polymarket condition_id (paginated scan). */
+  private async findByConditionId(conditionId: string): Promise<PolyBacktestMarket> {
+    let offset = 0
+    const limit = 100
+    const normalizedId = conditionId.toLowerCase()
+    while (true) {
+      const page = await this.getMarkets({ limit, offset })
+      const match = page.markets.find(
+        m => m.condition_id?.toLowerCase() === normalizedId
+          || m.clob_token_up?.toLowerCase() === normalizedId
+          || m.clob_token_down?.toLowerCase() === normalizedId
+      )
+      if (match) return match
+      offset += page.markets.length
+      if (offset >= page.total || page.markets.length === 0) break
+    }
+    throw Object.assign(new Error(`No market found for condition/token ID: ${conditionId}`), { status: 404 })
   }
 
   /** Get a single market by slug (e.g. "btc-updown-15m-1707926400"). */
@@ -119,6 +146,7 @@ export class PolyBacktestClient extends BaseApiClient {
     marketId: string,
     includeOrderbook = false,
     onProgress?: (fetched: number, total: number) => void,
+    signal?: AbortSignal,
   ): Promise<PolyBacktestSnapshot[]> {
     const allSnapshots: PolyBacktestSnapshot[] = []
     let offset = 0
@@ -135,6 +163,7 @@ export class PolyBacktestClient extends BaseApiClient {
 
     // Paginate remaining
     while (offset < total) {
+      signal?.throwIfAborted()
       const page = await this.getSnapshots(marketId, {
         limit, offset, include_orderbook: includeOrderbook,
       })
@@ -153,12 +182,14 @@ export class PolyBacktestClient extends BaseApiClient {
    */
   async getResolvedMarkets(
     marketType: PolyBacktestMarketType,
+    signal?: AbortSignal,
   ): Promise<PolyBacktestMarket[]> {
     const allMarkets: PolyBacktestMarket[] = []
     let offset = 0
     const limit = 100
 
     while (true) {
+      signal?.throwIfAborted()
       const page = await this.getMarkets({
         limit, offset, market_type: marketType, resolved: true,
       })

@@ -98,7 +98,8 @@ export function useCryptoPrices(): Record<AssetKey, CryptoAssetState> {
 
   // ── Source 3: HTTP polling fallback (only when both WS are stale) ───
   useEffect(() => {
-    // Immediate fetch to populate cards before any WS connects
+    // Immediate fetch to populate cards before any WS connects.
+    // Sequential with 500ms stagger to avoid CoinGecko 429 if Binance is down.
     const fetchAll = async () => {
       for (const asset of ASSETS) {
         try {
@@ -108,6 +109,7 @@ export function useCryptoPrices(): Record<AssetKey, CryptoAssetState> {
             ingestPrice(asset, p.priceUSD)
           }
         } catch { /* retry next interval */ }
+        await new Promise(r => setTimeout(r, 500))
       }
     }
     fetchAll()

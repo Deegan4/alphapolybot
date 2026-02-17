@@ -49,6 +49,19 @@ export class NotificationService {
       if (settings.enableSoundAlerts) {
         this.playSound(activity.type)
       }
+
+      // 4. Telegram alert (fire-and-forget)
+      const shouldAlert =
+        (activity.type === 'trade' || activity.type === 'sell') && settings.alertOnTrade ||
+        (activity.type === 'error' || activity.type === 'warning') && settings.alertOnError
+      if (shouldAlert && settings.telegramBotToken && settings.telegramChatId) {
+        this.sendTelegram(settings.telegramBotToken, settings.telegramChatId, `[${activity.type.toUpperCase()}] ${activity.message}`).catch(() => {})
+      }
+
+      // 5. Discord alert (fire-and-forget)
+      if (shouldAlert && settings.discordWebhookUrl) {
+        this.sendDiscord(settings.discordWebhookUrl, `**${activity.type.toUpperCase()}** — ${activity.message}`).catch(() => {})
+      }
     })
 
     console.log('[NotificationService] Initialized')
@@ -120,6 +133,40 @@ export class NotificationService {
       oscillator.stop(ctx.currentTime + 0.3)
     } catch {
       // AudioContext may not be available - silently ignore
+    }
+  }
+
+  /**
+   * Send a message via Telegram Bot API
+   */
+  async sendTelegram(botToken: string, chatId: string, text: string): Promise<boolean> {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+      })
+      return res.ok
+    } catch {
+      console.warn('[NotificationService] Telegram send failed')
+      return false
+    }
+  }
+
+  /**
+   * Send a message via Discord webhook
+   */
+  async sendDiscord(webhookUrl: string, content: string): Promise<boolean> {
+    try {
+      const res = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      })
+      return res.ok || res.status === 204
+    } catch {
+      console.warn('[NotificationService] Discord send failed')
+      return false
     }
   }
 

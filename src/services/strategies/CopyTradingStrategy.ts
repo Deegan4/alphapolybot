@@ -1,6 +1,6 @@
 import { BaseStrategy } from './BaseStrategy'
 import { DataClient } from '@/services/api/DataClient'
-import { gammaClient } from '@/services/api'
+import { gammaClient } from '@/services/api/GammaClient'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import type { Trade, Market, StrategyType } from '@/types'

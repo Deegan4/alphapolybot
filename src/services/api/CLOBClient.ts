@@ -761,6 +761,19 @@ export class CLOBClient extends BaseApiClient {
         error: response.errorMsg || 'Order placement failed',
       }
     } catch (error) {
+      // Auto-rederive on 401 and retry once — API keys can expire
+      const status = (error as { status?: number }).status
+      const msg = error instanceof Error ? error.message : String(error)
+      const is401 = status === 401 || msg.includes('401')
+
+      if (is401 && !request._retried) {
+        console.warn('[CLOBClient] 401 on order — rederiving API key and retrying...')
+        const newCreds = await this.deriveApiKey()
+        if (newCreds) {
+          return this.placeOrder({ ...request, _retried: true })
+        }
+      }
+
       console.error('Failed to place order:', error)
       return {
         success: false,
@@ -816,7 +829,7 @@ export class CLOBClient extends BaseApiClient {
       }
 
       // Find a liquid binary market via GammaClient
-      const { gammaClient } = await import('@/services/api')
+      const { gammaClient } = await import('@/services/api/GammaClient')
       const markets = await gammaClient.getMarkets({
         active: true,
         closed: false,

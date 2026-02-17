@@ -41,7 +41,7 @@ export const RecentTradesGrid: React.FC = () => {
   }
 
   return (
-    <div className="bg-agent-card border border-agent-border rounded-lg p-4 flex flex-col min-h-0">
+    <div className="card-base p-4 flex flex-col min-h-0">
       <div className="flex items-center gap-2 mb-2">
         <span className="text-sm">&#128200;</span>
         <span className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium">

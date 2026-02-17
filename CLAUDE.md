@@ -8,7 +8,7 @@ Browser-based TypeScript/React Polymarket trading bot. Vite 7, React 18, Zustand
 npm run dev          # Vite dev server on :4000 (auto-opens browser)
 npm run dev:strict-csp # Dev server with strict CSP headers
 npm run build        # Production build (uses vite build, NOT tsc)
-npm test             # Vitest single run (445 tests)
+npm test             # Vitest single run (511 tests)
 npm run test:watch   # Vitest watch mode
 npm run lint         # ESLint (.eslintrc.cjs)
 npm run preview      # Preview production build
@@ -20,7 +20,7 @@ npm run preview      # Preview production build
 
 - **Singleton services** exported from modules: `export const tradingService = new TradingService()`
 - **Event-driven strategies**: BaseStrategy has `.on()` / `.emit()` pattern
-- **Zustand stores** with `persist` middleware (settingsStore, walletStore). notificationStore has no persist.
+- **Zustand stores** with `persist` middleware (settingsStore v29, walletStore). notificationStore and backtestStore have no persist.
 - **Barrel exports** via `index.ts` in each service directory
 - **ActivityLogger** is the central audit trail — services subscribe to it
 - **Path alias**: `@/` maps to `src/`
@@ -41,15 +41,17 @@ src/
 ├── components/
 │   ├── charts/        # MatrixLineChart, MatrixAreaChart, MatrixBarChart, MatrixPieChart,
 │   │                  # MatrixGauge, MatrixSparkline
-│   ├── dashboard/     # 21 components: ActivePositionsCard, AssetCard, AssetCardsRow,
-│   │                  # DiagnosticsBanner, FollowTraderPanel, HistoryView, PerformancePanel,
-│   │                  # PortfolioPanel, ReadinessPanel, RecentTradesGrid, SniperTopBar,
-│   │                  # SpotCryptoView, StrategyDropdown, WindowTimer, MatrixDataTable, etc.
+│   ├── dashboard/     # 22 components: ActivePositionsCard, AssetCard, AssetCardsRow,
+│   │                  # BacktestView, DiagnosticsBanner, FollowTraderPanel, HistoryView,
+│   │                  # PerformancePanel, PortfolioPanel, ReadinessPanel, RecentTradesGrid,
+│   │                  # SniperTopBar, SpotCryptoView, StrategyDropdown, WindowTimer,
+│   │                  # MatrixDataTable, MatrixMetricCard, MatrixProgressCard, etc.
 │   ├── layout/        # AppLayout, DashboardLayout, SettingsLayout, Header, Sidebar, MatrixRain
 │   └── ui/            # 18 Matrix-themed components (Button, Card, Modal, Toast, etc.)
 ├── hooks/             # useWallet, useBalanceHistory, useCryptoPrices, usePolymarketPrices
 ├── services/
-│   ├── api/           # BaseApiClient, CLOBClient, GammaClient, DataClient, PriceOracleService, CoinbaseClient
+│   ├── api/           # BaseApiClient, CLOBClient, GammaClient, DataClient, PriceOracleService,
+│   │                  # CoinbaseClient, PolyBacktestClient, PolymarketUSClient
 │   ├── llm/           # OpenRouterService (multi-model, budget-bucketed)
 │   ├── notifications/ # NotificationService (toast + browser + Web Audio)
 │   ├── realtime/      # RealtimeService, RTDSService (crypto), UserChannelService (auth push),
@@ -58,6 +60,7 @@ src/
 │   ├── strategies/    # BaseStrategy, LLMPrediction, DipArb, ProjectFW, BtcUpDown, MicroMomentum,
 │   │                  # MeanReversion, CopyTrading, DipDetector
 │   │   ├── __tests__/ # DipArb, FW Optimizer, FW Strategy, BtcUpDown, MeanReversion, CopyTrading tests
+│   │   ├── btcupdown/ # signalEngine, BacktestRunner, HistoricalEnrichment
 │   │   └── projectfw/ # FrankWolfeOptimizer, ArbitrageScanner, crossmarket/
 │   ├── trading/       # TradingService, RiskManager, PLM, ActivityLogger, GtcOrderManager,
 │   │   │              # KellySizer, GasOracle, OrderBookDepth, TradeLogger, EdgeTracker,
@@ -65,7 +68,7 @@ src/
 │   │   │              # RejectionTracker, MarketScanner
 │   │   └── __tests__/ # RiskManager, PLM, KellySizer, EdgeTracker tests
 │   └── wallet/        # WalletService (Ethers.js wrapper)
-├── stores/            # settingsStore (v26), walletStore, notificationStore, balanceHistoryStore
+├── stores/            # settingsStore (v29), walletStore, notificationStore, balanceHistoryStore, backtestStore
 ├── types/             # api.ts, wallet.ts, index.ts
 ├── utils/             # secureStorage, cn (tailwind-merge)
 └── views/             # TradingTerminal, DashboardView, PortfolioView, ActivityView, SettingsView, NotFoundView
@@ -120,13 +123,13 @@ src/
 ### Environment
 - Project lives on external drive: `/Volumes/SAMSUNG 1TB/alphapolybot` — paths have spaces, always quote.
 - `useWalletStore.getState()` is synchronous Zustand read, safe in non-React service code.
-- **Vite dev proxies** (in `vite.config.ts`): `/api/clob` → Polymarket CLOB, `/api/gamma` → Gamma API, `/api/polygon-rpc` + `/api/polygon-rpc2` → Polygon RPC nodes, `/api/coinbase` → Coinbase API. API calls use these proxy paths in dev to avoid CORS.
+- **Vite dev proxies** (in `vite.config.ts`): `/api/pm-us` → `api.polymarket.us`, `/api/pm-gateway` → `gateway.polymarket.us`, `/api/gamma` → Gamma API, `/api/coinbase` → Coinbase API, `/api/polybacktest` → PolyBacktest API, `/v1/` → `api.polymarket.us` (direct, for SDK URL construction). API calls use these proxy paths in dev to avoid CORS.
 
 ## Testing
 
 - **Framework**: Vitest + jsdom + @testing-library/react
 - **Config**: `vitest.config.ts` (globals enabled, jsdom environment)
-- **445 tests** across 18 files: RiskManager (36), PLM (30), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (21), BtcUpDown (34), MeanReversion (53), EdgeTracker (24), CopyTrading (21), ArbitrageProfitFormula (30), MCP tools (12), MCP rounding (11), MCP auth (8)
+- **511 tests** across 21 files: RiskManager (32), PLM (25), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (17), settingsStore (18), BtcUpDown (34), MeanReversion (53), EdgeTracker (24), CopyTrading (21), ArbitrageProfitFormula (30), signalEngine (51), BacktestRunner (12), PolyBacktestClient (15), MCP tools (12), MCP rounding (11), MCP auth (8)
 - Test files live in `__tests__/` directories next to the code they test
 
 ## Environment Setup

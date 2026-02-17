@@ -38,8 +38,8 @@ vi.mock('@/stores/settingsStore', () => ({
 vi.mock('@/stores/walletStore', () => ({
   useWalletStore: {
     getState: () => ({
-      usdcBridgedBalance: 100,
-      usdcBalance: 100,
+      balance: 100,
+      buyingPower: 100,
     }),
   },
 }))
@@ -53,14 +53,10 @@ vi.mock('@/services/trading/TradingService', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
-  gammaClient: {
+  polymarketUSClient: {
     getEventBySlug: vi.fn().mockResolvedValue(null),
-    getActiveMarkets: vi.fn().mockResolvedValue([]),
   },
-  clobClient: {
-    getPrice: vi.fn(),
-    getOrderBook: vi.fn(),
-  },
+  normalizeEventToMarkets: vi.fn().mockReturnValue([]),
 }))
 
 vi.mock('@/services/api/PriceOracleService', () => ({

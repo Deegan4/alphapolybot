@@ -65,6 +65,12 @@ export interface TradeRecord {
 
   // Gas context
   gasPrice?: number             // gwei at execution time
+
+  // Mode
+  dryRun?: boolean              // true if trade was simulated (paper trading)
+
+  // Multi-wallet
+  walletId?: string             // Which wallet executed this trade
 }
 
 export interface BacktestSummary {
@@ -99,6 +105,8 @@ export class TradeLogger {
       id,
       timestamp: Date.now(),
       ...record,
+      dryRun: record.dryRun ?? this.readDryRun(),
+      walletId: record.walletId ?? this.readActiveWalletId(),
     }
 
     this.records.push(entry)
@@ -247,6 +255,28 @@ export class TradeLogger {
     } catch {
       // Storage not available — that's fine, we're append-only
     }
+  }
+
+  private _getDryRun: (() => boolean) | null = null
+  private readDryRun(): boolean {
+    if (!this._getDryRun) {
+      import('@/stores/settingsStore').then(m => {
+        this._getDryRun = () => m.useSettingsStore.getState().dryRun ?? false
+      }).catch(() => {})
+      return false
+    }
+    return this._getDryRun()
+  }
+
+  private _getActiveWalletId: (() => string) | null = null
+  private readActiveWalletId(): string {
+    if (!this._getActiveWalletId) {
+      import('@/stores/settingsStore').then(m => {
+        this._getActiveWalletId = () => m.useSettingsStore.getState().activeWalletId ?? ''
+      }).catch(() => {})
+      return ''
+    }
+    return this._getActiveWalletId()
   }
 
   private persistRecord(record: TradeRecord): void {

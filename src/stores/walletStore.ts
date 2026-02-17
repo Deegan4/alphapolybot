@@ -5,16 +5,11 @@ import { walletService } from '@/services/wallet'
 
 interface WalletStore extends WalletState {
   // Actions
-  connect: (seedPhrase: string) => Promise<boolean>
+  connect: (keyId: string, secretKey: string) => Promise<boolean>
   disconnect: () => void
-  setProxyAddress: (proxy: string | null) => void
   syncBalances: () => Promise<void>
   startPolling: () => void
   stopPolling: () => void
-  checkApprovals: () => Promise<void>
-  approveUSDC: () => Promise<boolean>
-  approveCTF: () => Promise<boolean>
-  ensureApprovals: () => Promise<boolean>
 }
 
 // Module-level polling state (not persisted, not in store)
@@ -25,55 +20,40 @@ export const useWalletStore = create<WalletStore>()(
   persist(
     (set) => ({
       // Initial state
-      address: null,
-      proxyAddress: null,
-      balance: 0,
-      usdcBalance: 0,
-      usdcBridgedBalance: 0,
-      usdcNativeBalance: 0,
+      keyId: null,
       isConnected: false,
       isConnecting: false,
-      chainId: null,
+      balance: 0,
+      buyingPower: 0,
       lastSync: null,
-      approvals: { usdc: false, ctf: false },
       error: null,
 
       // Actions
-      connect: async (seedPhrase: string) => {
+      connect: async (keyId: string, secretKey: string) => {
         set({ isConnecting: true, error: null })
-        
-        const success = await walletService.connect(seedPhrase)
+
+        const success = await walletService.connect(keyId, secretKey)
         const state = walletService.getState()
-        
+
         set({
           ...state,
           isConnecting: false,
         })
-        
+
         return success
       },
 
       disconnect: () => {
         walletService.disconnect()
         set({
-          address: null,
-          proxyAddress: null,
-          balance: 0,
-          usdcBalance: 0,
-          usdcBridgedBalance: 0,
-          usdcNativeBalance: 0,
+          keyId: null,
           isConnected: false,
           isConnecting: false,
-          chainId: null,
+          balance: 0,
+          buyingPower: 0,
           lastSync: null,
-          approvals: { usdc: false, ctf: false },
           error: null,
         })
-      },
-
-      setProxyAddress: (proxy: string | null) => {
-        walletService.setProxyAddress(proxy)
-        set({ proxyAddress: proxy })
       },
 
       syncBalances: async () => {
@@ -81,9 +61,7 @@ export const useWalletStore = create<WalletStore>()(
         const state = walletService.getState()
         set({
           balance: state.balance,
-          usdcBalance: state.usdcBalance,
-          usdcBridgedBalance: state.usdcBridgedBalance,
-          usdcNativeBalance: state.usdcNativeBalance,
+          buyingPower: state.buyingPower,
           lastSync: state.lastSync,
         })
       },
@@ -101,44 +79,12 @@ export const useWalletStore = create<WalletStore>()(
           pollIntervalId = null
         }
       },
-
-      checkApprovals: async () => {
-        const approvals = await walletService.checkApprovals()
-        set({ approvals })
-      },
-
-      approveUSDC: async () => {
-        const result = await walletService.approveUSDC()
-        if (result.success) {
-          const state = walletService.getState()
-          set({ approvals: state.approvals })
-        }
-        return result.success
-      },
-
-      approveCTF: async () => {
-        const result = await walletService.approveCTF()
-        if (result.success) {
-          const state = walletService.getState()
-          set({ approvals: state.approvals })
-        }
-        return result.success
-      },
-
-      ensureApprovals: async () => {
-        const result = await walletService.ensureApprovals()
-        const state = walletService.getState()
-        set({ approvals: state.approvals })
-        return result.success
-      },
     }),
     {
       name: 'alphapolybot-wallet',
       partialize: (state) => ({
-        // Only persist non-sensitive data
-        address: state.address,
-        proxyAddress: state.proxyAddress,
-        chainId: state.chainId,
+        // Only persist non-sensitive data (keyId is not secret, but secretKey is never stored)
+        keyId: state.keyId,
       }),
     }
   )

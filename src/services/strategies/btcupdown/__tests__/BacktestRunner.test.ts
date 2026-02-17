@@ -299,7 +299,7 @@ describe('BacktestRunner', () => {
       })
 
       expect(results).toHaveLength(2)
-      expect(polyBacktestClient.getResolvedMarkets).toHaveBeenCalledWith('15m')
+      expect(polyBacktestClient.getResolvedMarkets).toHaveBeenCalledWith('15m', undefined)
     })
 
     it('continues if one market fails', async () => {

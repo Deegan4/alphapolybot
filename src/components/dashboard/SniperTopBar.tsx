@@ -3,20 +3,27 @@ import { Link } from 'react-router-dom'
 import { WindowTimer } from './WindowTimer'
 import { StrategyDropdown } from './StrategyDropdown'
 import { useWalletStore, useSettingsStore } from '@/stores'
+import { walletService } from '@/services/wallet/WalletService'
+import type { WalletEntry } from '@/types'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import { tradeLogger, rejectionTracker, positionLifecycleManager, tradingService } from '@/services/trading'
 import { btcUpDownStrategy } from '@/services/strategies/BtcUpDownStrategy'
 import type { BacktestSummary } from '@/services/trading/TradeLogger'
 
 interface SniperTopBarProps {
-  activeTab: 'live' | 'history' | 'spotcrypto'
-  onTabChange: (tab: 'live' | 'history' | 'spotcrypto') => void
+  activeTab: 'live' | 'history' | 'spotcrypto' | 'backtest' | 'analytics'
+  onTabChange: (tab: 'live' | 'history' | 'spotcrypto' | 'backtest' | 'analytics') => void
 }
 
 export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChange }) => {
-  const balance = useWalletStore((s) => s.usdcBalance)
-  const { dryRun, setDryRun } = useSettingsStore()
+  const balance = useWalletStore((s) => s.balance)
+  const dryRun = useSettingsStore((s) => s.dryRun)
+  const setDryRun = useSettingsStore((s) => s.setDryRun)
+  const wallets = useSettingsStore((s) => s.wallets)
+  const activeWalletId = useSettingsStore((s) => s.activeWalletId)
+  const setActiveWallet = useSettingsStore((s) => s.setActiveWallet)
   const [confirmLive, setConfirmLive] = useState(false)
+  const [showWalletPicker, setShowWalletPicker] = useState(false)
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [summary, setSummary] = useState<BacktestSummary>(tradeLogger.getSummary())
   const [window, setWindow] = useState(btcUpDownStrategy.getActiveWindow())
@@ -58,52 +65,40 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
   const winRate = summary.totalTrades > 0 ? Math.round(summary.winRate * 100) : 0
 
   return (
-    <div className="relative z-50 flex items-center justify-between px-6 py-3.5 border-b border-agent-border bg-agent-card/60 backdrop-blur-sm">
+    <div className="relative z-50 flex flex-wrap items-center justify-between gap-2 px-3 sm:px-6 py-2.5 sm:py-3.5 border-b border-agent-green/[0.07] bg-agent-card/50 backdrop-blur-lg shadow-glass">
       {/* Left: Brand + tabs */}
-      <div className="flex items-center gap-5">
+      <div className="flex items-center gap-3 sm:gap-5">
         {/* Brand */}
         <div className="flex items-center gap-2">
           <span className="text-agent-green text-lg">&#9889;</span>
-          <span className="text-base font-sans font-bold text-agent-text tracking-wide">
+          <span className="hidden sm:inline text-base font-sans font-bold text-agent-text tracking-wide">
             AlphaPolyBot HQ
           </span>
         </div>
 
-        {/* Tabs */}
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => onTabChange('live')}
-            className={`px-3.5 py-1.5 rounded-md text-sm font-sans font-semibold transition-colors ${
-              activeTab === 'live'
-                ? 'bg-agent-green/15 text-agent-green border border-agent-green/30'
-                : 'text-agent-text-muted hover:text-agent-text'
-            }`}
-          >
-            <span className={activeTab === 'live' ? 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-agent-green' : 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-agent-text-label'} />
-            Live Trading
-          </button>
-          <button
-            onClick={() => onTabChange('history')}
-            className={`px-3.5 py-1.5 rounded-md text-sm font-sans font-semibold transition-colors ${
-              activeTab === 'history'
-                ? 'bg-agent-green/15 text-agent-green border border-agent-green/30'
-                : 'text-agent-text-muted hover:text-agent-text'
-            }`}
-          >
-            <span className={activeTab === 'history' ? 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-agent-green' : 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-agent-text-label'} />
-            History
-          </button>
-          <button
-            onClick={() => onTabChange('spotcrypto')}
-            className={`px-3.5 py-1.5 rounded-md text-sm font-sans font-semibold transition-colors ${
-              activeTab === 'spotcrypto'
-                ? 'bg-agent-green/15 text-agent-green border border-agent-green/30'
-                : 'text-agent-text-muted hover:text-agent-text'
-            }`}
-          >
-            <span className={activeTab === 'spotcrypto' ? 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-agent-green' : 'mr-1.5 inline-block w-1.5 h-1.5 rounded-full bg-agent-text-label'} />
-            Spot Crypto
-          </button>
+        {/* Tabs — horizontally scrollable on mobile */}
+        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+          {([
+            { key: 'live' as const, label: 'Live', labelFull: 'Live Trading' },
+            { key: 'history' as const, label: 'History', labelFull: 'History' },
+            { key: 'spotcrypto' as const, label: 'Spot', labelFull: 'Spot Crypto' },
+            { key: 'backtest' as const, label: 'Backtest', labelFull: 'Backtest' },
+            { key: 'analytics' as const, label: 'Stats', labelFull: 'Analytics' },
+          ]).map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => onTabChange(tab.key)}
+              className={`whitespace-nowrap px-2.5 sm:px-3.5 py-1.5 rounded-md text-xs sm:text-sm font-sans font-semibold transition-colors ${
+                activeTab === tab.key
+                  ? 'bg-agent-green/15 text-agent-green border border-agent-green/30'
+                  : 'text-agent-text-muted hover:text-agent-text'
+              }`}
+            >
+              <span className={`mr-1.5 inline-block w-1.5 h-1.5 rounded-full ${activeTab === tab.key ? 'bg-agent-green' : 'bg-agent-text-label'}`} />
+              <span className="hidden sm:inline">{tab.labelFull}</span>
+              <span className="sm:hidden">{tab.label}</span>
+            </button>
+          ))}
         </div>
 
         {/* Dry Run / Live toggle */}
@@ -172,17 +167,19 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
         )}
       </div>
 
-      {/* Center: Window timer */}
-      <WindowTimer
-        windowStartMs={window?.windowStartMs ?? null}
-        windowEndMs={window?.windowEndMs ?? null}
-        windowDurationMs={window?.windowDurationMs ?? null}
-      />
+      {/* Center: Window timer (hidden on small screens) */}
+      <div className="hidden md:block">
+        <WindowTimer
+          windowStartMs={window?.windowStartMs ?? null}
+          windowEndMs={window?.windowEndMs ?? null}
+          windowDurationMs={window?.windowDurationMs ?? null}
+        />
+      </div>
 
       {/* Right: Stats + status */}
-      <div className="flex items-center gap-6">
-        {/* Inline stats */}
-        <div className="flex items-center gap-5 text-sm font-mono">
+      <div className="flex items-center gap-3 sm:gap-6">
+        {/* Inline stats (hidden on mobile) */}
+        <div className="hidden lg:flex items-center gap-5 text-sm font-mono">
           <div className="text-center">
             <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Balance</div>
             <div className="text-agent-text font-semibold tabular-nums">${balance.toFixed(2)}</div>
@@ -205,7 +202,57 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
           </div>
         </div>
 
-        <div className="w-px h-6 bg-agent-border" />
+        <div className="hidden lg:block w-px h-6 bg-agent-border" />
+
+        {/* Wallet selector (only when multiple wallets configured) */}
+        {wallets.length > 1 && (
+          <div className="relative">
+            <button
+              onClick={() => setShowWalletPicker((v) => !v)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-agent-cyan/20 bg-agent-cyan/5 text-xs font-mono font-semibold text-agent-cyan hover:bg-agent-cyan/10 transition-all"
+              title="Switch wallet"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect width="20" height="14" x="2" y="5" rx="2" />
+                <path d="M2 10h20" />
+              </svg>
+              <span className="max-w-[80px] truncate">
+                {wallets.find((w) => w.id === activeWalletId)?.label ?? 'Wallet'}
+              </span>
+              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+
+            {showWalletPicker && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowWalletPicker(false)} />
+                <div className="absolute top-full right-0 mt-2 z-50 bg-agent-elevated border border-agent-cyan/20 rounded-lg p-1.5 shadow-lg min-w-[160px]">
+                  {wallets.map((w) => (
+                    <button
+                      key={w.id}
+                      onClick={async () => {
+                        if (w.id !== activeWalletId) {
+                          setActiveWallet(w.id)
+                          await walletService.switchWallet(w)
+                        }
+                        setShowWalletPicker(false)
+                      }}
+                      className={`w-full text-left px-3 py-1.5 rounded text-xs font-mono transition-colors flex items-center gap-2 ${
+                        w.id === activeWalletId
+                          ? 'bg-agent-cyan/15 text-agent-cyan'
+                          : 'text-agent-text-muted hover:text-agent-text hover:bg-agent-card'
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${w.id === activeWalletId ? 'bg-agent-cyan' : 'bg-agent-text-label'}`} />
+                      <span className="truncate">{w.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Status badge — clickable, opens strategy dropdown */}
         <div className="relative">
