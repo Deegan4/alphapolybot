@@ -34,6 +34,10 @@
  ╚══════════════════════════════════════════════════════════════╝
 ```
 
+<br/>
+
+![AlphaPolyBot Dashboard](docs/screenshots/dashboard-main.png)
+
 </div>
 
 ---
@@ -51,6 +55,33 @@
 - [Project Structure](#project-structure)
 - [Deployment](#deployment)
 - [Disclaimer](#disclaimer)
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%">
+<strong>Spot Crypto Trading</strong><br/>
+Real-time BTC/ETH/SOL positions with Z-score signals
+<br/><br/>
+<img src="docs/screenshots/spot-crypto.png" alt="Spot Crypto View" />
+</td>
+<td width="50%">
+<strong>Backtest Engine</strong><br/>
+Historical replay with equity curves and parameter sweeps
+<br/><br/>
+<img src="docs/screenshots/backtest.png" alt="Backtest View" />
+</td>
+</tr>
+<tr>
+<td colspan="2">
+<strong>Settings &amp; Configuration</strong><br/>
+Dry run mode, penny trader, wallet management, strategy parameters
+<br/><br/>
+<img src="docs/screenshots/settings.png" alt="Settings View" />
+</td>
+</tr>
+</table>
 
 ## Architecture
 
