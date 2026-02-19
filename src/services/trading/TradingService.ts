@@ -557,8 +557,9 @@ export class TradingService {
   /**
    * Listen for trade/order events from user channel WebSocket.
    */
-  private confirmViaUserChannel(orderId: string, timeoutMs: number): Promise<boolean> {
-    return new Promise(async (resolve) => {
+  private async confirmViaUserChannel(orderId: string, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      void (async () => {
       const { userChannelService } = await import('@/services/realtime')
 
       let resolved = false
@@ -595,12 +596,13 @@ export class TradingService {
         }
       })
 
-      setTimeout(async () => {
+      setTimeout(() => {
         if (resolved) return
         cleanup()
         console.log(`[TradingService] No user channel event for ${orderId} in ${timeoutMs}ms — falling back to polling`)
-        resolve(await this.confirmViaPolling(orderId, 5000))
+        void this.confirmViaPolling(orderId, 5000).then(resolve)
       }, timeoutMs)
+      })()
     })
   }
 

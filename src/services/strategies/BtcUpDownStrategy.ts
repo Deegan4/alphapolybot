@@ -1263,7 +1263,6 @@ Respond ONLY with JSON:
     // Compute live order flow imbalance from MicrostructureAnalyzer
     let imbalanceScore = 0
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { microstructureAnalyzer } = require('@/services/trading/MicrostructureAnalyzer')
       const firstSlug = input.market.slug
       if (firstSlug) {
