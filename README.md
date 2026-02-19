@@ -8,12 +8,12 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-511_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-557_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
 
-*A browser-based trading bot running seven independent strategies on [Polymarket](https://polymarket.com) prediction markets — from AI-powered LLM analysis to microstructure momentum, Frank-Wolfe optimized arbitrage, and whale copy trading.*
+*A browser-based trading bot running eight independent strategies on [Polymarket](https://polymarket.com) prediction markets — from AI-powered LLM analysis to microstructure momentum, Frank-Wolfe optimized arbitrage, dual-side maker hedging, and whale copy trading.*
 
 <br/>
 
@@ -21,16 +21,17 @@
  ╔══════════════════════════════════════════════════════════════╗
  ║  ░▒▓ ALPHA POLY BOT ▓▒░                                    ║
  ║                                                              ║
- ║  strategies: 7 ■■■■■■■░  positions: 3    P&L: +$12.47      ║
+ ║  strategies: 8 ■■■■■■■■  positions: 3    P&L: +$12.47      ║
  ║  uptime: 4h 23m          risk: NOMINAL   mode: LIVE         ║
  ║                                                              ║
  ║  [LLM] scanning 847 markets...  confidence: 0.72  ████░     ║
  ║  [DIP] watching 12 tokens       last dip: -6.2%   ███░░     ║
  ║  [F-W] 3 arb candidates         spread: 1.8%      ██░░░     ║
- ║  [BTC] 5-factor signal           score: 0.46       ████░     ║
+ ║  [BTC] 5-factor signal          score: 0.46       ████░     ║
  ║  [MIC] flow toxicity: 0.23      imbalance: +0.31  ███░░     ║
  ║  [MRV] BTC Z-score: -2.14      entry: SHORT       ████░     ║
  ║  [CPY] 3 whales tracked         last copy: 2m ago  ██░░░     ║
+ ║  [DSH] YES@0.52 NO@0.51        maker spread: 0.03 ███░░     ║
  ╚══════════════════════════════════════════════════════════════╝
 ```
 
@@ -94,14 +95,14 @@ Dry run mode, penny trader, wallet management, strategy parameters
 │          │Backtest  │          │          │                    │
 ├──────────┴──────────┴──────────┴──────────┴────────────────────┤
 │                      Zustand Stores                             │
-│        settings (v29) · wallet · notifications · backtest       │
+│        settings (v32) · wallet · notifications · backtest       │
 ├─────────────────────────────────────────────────────────────────┤
 │                     Strategy Manager                            │
-│ ┌───────┐ ┌─────┐ ┌───────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌──────┐│
-│ │  LLM  │ │ Dip │ │Frank- │ │ BTC │ │Micro│ │Mean │ │ Copy ││
-│ │Predict│ │ Arb │ │Wolfe  │ │Up/Dn│ │Struc│ │Revrt│ │Trade ││
-│ └───┬───┘ └──┬──┘ └───┬───┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬───┘│
-├─────┴────────┴────────┴────────┴────────┴────────┴────────┴────┤
+│ ┌──────┐ ┌─────┐ ┌──────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐│
+│ │ LLM  │ │ Dip │ │Frank-│ │ BTC │ │Micro│ │Mean │ │Copy │ │Dual ││
+│ │Predct│ │ Arb │ │Wolfe │ │Up/Dn│ │Struc│ │Revrt│ │Trade│ │Side ││
+│ └──┬───┘ └──┬──┘ └──┬───┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘│
+├─────┴─────────┴────────┴────────┴────────┴────────┴────────┴────┤
 │                      Trading Service                           │
 │ Kelly Sizer · Gas Oracle · Order Book Depth · Trade Logger     │
 │ Edge Tracker · Calibration · Rejection Tracker · Market Scanner│
@@ -129,6 +130,7 @@ Dry run mode, penny trader, wallet management, strategy parameters
 | 5 | **Microstructure Momentum** | Bid/ask imbalance, spread volatility, trade flow toxicity via MicrostructureAnalyzer | Exploits informed flow signals | Continuous |
 | 6 | **Mean Reversion** | Z-score mean reversion on Coinbase spot crypto (BTC/ETH/SOL) via BinanceWS live feed | Fades extreme Z-score deviations | Continuous |
 | 7 | **Copy Trading** | Mirrors trades from tracked Polymarket whale wallets with configurable position sizing | Piggybacks on whale alpha | Event-driven |
+| 8 | **Dual-Side Hedge** | Maker-only YES+NO orders with 70/30 directional bias, driven by BTC signal engine + DynamicFeeService EV gate | Captures spread on both sides while maintaining directional exposure | Event-driven (signal-gated) |
 
 ## Risk Infrastructure
 
@@ -183,7 +185,7 @@ npm run preview        # Preview production build
 
 ## Testing
 
-511 tests across 21 suites covering all critical paths:
+557 tests across 23 suites covering all critical paths:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
@@ -199,18 +201,20 @@ npm run preview        # Preview production build
 | CrossMarket | 23 | Event analysis, dependency classification, mutex |
 | OpenRouterService | 21 | Budget tracking, model selection, signal fusion |
 | EdgeTracker | 24 | Realized vs. predicted edge, decay tracking |
-| signalEngine | 51 | Stateless 5-factor signal extraction |
+| signalEngine | 57 | Stateless 5-factor signal extraction, 5m profile |
 | BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
 | PolyBacktestClient | 15 | API pagination, auth, data transforms |
 | ArbitrageProfitFormula | 30 | Profit calculation, fee deduction, edge cases |
+| DynamicFeeService | 26 | Quadratic fee curve, trade EV, dual-side EV, Kelly |
+| DualSideHedgeStrategy | 14 | Maker YES+NO, bias logic, signal-gated entry |
 | secureStorage | 17 | Encryption, key derivation, migration |
-| settingsStore | 18 | Persistence, version migration (v29), setter isolation |
+| settingsStore | 18 | Persistence, version migration (v32), setter isolation |
 | MCP Tools | 12 | Tool execution, parameter validation |
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
 | MCP Auth | 8 | API key handling, HMAC signing |
 
 ```bash
-npm test    # Runs all 511 tests in ~3s
+npm test    # Runs all 557 tests in ~3s
 ```
 
 ## MCP Server
@@ -258,14 +262,14 @@ src/
 │   ├── notifications/  # Toast + Browser + Web Audio
 │   ├── realtime/       # RealtimeService, RTDSService, UserChannelService, BinanceWSService
 │   ├── storage/        # IndexedDB v4 (6 object stores)
-│   ├── strategies/     # 7 strategies + optimizers + cross-market + signal engine
+│   ├── strategies/     # 8 strategies + optimizers + cross-market + signal engine
 │   │   ├── btcupdown/  # signalEngine, BacktestRunner, HistoricalEnrichment
 │   │   └── projectfw/  # FrankWolfeOptimizer, ArbitrageScanner
 │   ├── trading/        # TradingService, RiskManager, PLM, KellySizer, GasOracle,
 │   │                   # OrderBookDepth, TradeLogger, EdgeTracker, CalibrationTracker,
 │   │                   # MicrostructureAnalyzer, ReadinessChecker, RejectionTracker
 │   └── wallet/         # Ethers.js wrapper, approvals, balance tracking
-├── stores/             # Zustand (settings v29, wallet, notifications, backtest)
+├── stores/             # Zustand (settings v32, wallet, notifications, backtest)
 ├── views/              # TradingTerminal, DashboardView, PortfolioView, ActivityView, SettingsView
 ├── types/              # API types, wallet types
 └── utils/              # secureStorage, cn (tailwind-merge)
