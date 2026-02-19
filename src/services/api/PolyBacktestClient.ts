@@ -84,7 +84,7 @@ export class PolyBacktestClient extends BaseApiClient {
     let offset = 0
     const limit = 100
     const normalizedId = conditionId.toLowerCase()
-    while (true) {
+    for (;;) {
       const page = await this.getMarkets({ limit, offset })
       const match = page.markets.find(
         m => m.condition_id?.toLowerCase() === normalizedId
@@ -188,7 +188,7 @@ export class PolyBacktestClient extends BaseApiClient {
     let offset = 0
     const limit = 100
 
-    while (true) {
+    for (;;) {
       signal?.throwIfAborted()
       const page = await this.getMarkets({
         limit, offset, market_type: marketType, resolved: true,

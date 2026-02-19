@@ -172,7 +172,7 @@ export class PolymarketUSClient {
     const fallback = import.meta.env.DEV
       ? `${location.protocol}//${location.host}`
       : 'https://gamma-api.polymarket.com';
-    let url = this.apiBaseUrl;
+    const url = this.apiBaseUrl;
     if (!url || typeof url !== 'string' || url.trim() === '') {
       console.error('[PolymarketUSClient] Invalid or missing API base URL. Using fallback.');
       return fallback;
