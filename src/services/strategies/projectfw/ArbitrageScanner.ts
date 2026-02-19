@@ -3,13 +3,14 @@ import type {
   ArbOpportunity,
   FWOptimizerConfig,
   MarketSnapshot,
+  TradeLeg,
 } from './types'
 import type { CrossMarketOpportunity, DependencyGraph } from './crossmarket/types'
 import type { EventAnalyzer } from './crossmarket/EventAnalyzer'
 import type { DependencyClassifier } from './crossmarket/DependencyClassifier'
 import type { MutexValidator } from './crossmarket/MutexValidator'
 import { FrankWolfeOptimizer } from './FrankWolfeOptimizer'
-import { gammaClient } from '@/services/api'
+import { gammaClient } from '@/services/api/GammaClient'
 import { clobClient } from '@/services/api/CLOBClient'
 import { realtimeService } from '@/services/realtime'
 
@@ -22,6 +23,10 @@ export interface ScannerConfig {
   gasEstimateUSD: number
   enableMultiOutcome: boolean
   tradeSize: number
+  /** Max parallel market evaluations in Phase 2 (default: 10) */
+  maxConcurrency: number
+  /** Stop scanning after finding this many arbs (default: 5) */
+  maxOpportunitiesPerScan: number
 }
 
 export interface RejectionStats {
@@ -29,11 +34,14 @@ export interface RejectionStats {
   lowLiquidity: number
   lowVolume: number
   missingData: number
+  spreadPreFilter: number
   coherent: number
   multiOutcome: number
   snapshotFailed: number
   optimizerFailed: number
   unprofitable: number
+  /** Order book depth too thin to fill tradeSize */
+  insufficientDepth: number
 }
 
 export interface ScanResult {
@@ -117,11 +125,13 @@ export class ArbitrageScanner {
       lowLiquidity: 0,
       lowVolume: 0,
       missingData: 0,
+      spreadPreFilter: 0,
       coherent: 0,
       multiOutcome: 0,
       snapshotFailed: 0,
       optimizerFailed: 0,
       unprofitable: 0,
+      insufficientDepth: 0,
     }
 
     const allCandidates: Market[] = []
@@ -139,7 +149,7 @@ export class ArbitrageScanner {
     // Lower-liquidity markets are more likely to have wider spreads (arb opportunities)
     // but we need SOME liquidity for fills. Sort by liquidity ascending to
     // check the "sweet spot" markets first, then cap at maxOrderBookChecks.
-    const maxOrderBookChecks = 75
+    const maxOrderBookChecks = 150
     allCandidates.sort((a, b) => (a.liquidity ?? 0) - (b.liquidity ?? 0))
     const candidates = allCandidates.slice(0, maxOrderBookChecks)
 
@@ -147,67 +157,61 @@ export class ArbitrageScanner {
     let closestAskSum = Infinity
 
     if (allCandidates.length > 0) {
-      console.log(`[ArbitrageScanner] ${allCandidates.length} candidates passed basic filters, checking ${candidates.length} order books (sorted by liquidity asc)...`)
+      console.log(`[ArbitrageScanner] ${allCandidates.length} candidates passed basic filters, pre-screening ${candidates.length} with spread data...`)
     }
 
-    // Process candidates in parallel (batches of 5 to avoid rate limits).
-    // For each market: fetch order books → check ask-sum < 1.0 → if yes, run optimizer.
-    // Gamma mid-prices always sum to 1.00 so we MUST check real ask prices.
-    const batchSize = 5
-    for (let i = 0; i < candidates.length; i += batchSize) {
-      const batch = candidates.slice(i, i + batchSize)
-      const results = await Promise.allSettled(
-        batch.map(async market => {
-          const snapshot = await this.buildSnapshot(market)
-          if (!snapshot) {
-            rejections.snapshotFailed++
-            return null
-          }
-
-          // Direct ask-sum check: the real profitability gate.
-          // Market makers keep ask sums >= 1.0 most of the time.
-          // An ask sum < 1.0 means we can buy all outcomes and merge for guaranteed profit.
-          const askPrices = snapshot.depth.map((d, idx) => {
-            const bestAsk = d.asks?.[0]?.price
-            return bestAsk != null && bestAsk > 0 ? bestAsk : snapshot.prices[idx]
-          })
-          const askSum = askPrices.reduce((s, p) => s + p, 0)
-
-          // Track closest askSum for diagnostics
-          if (askSum < closestAskSum) closestAskSum = askSum
-
-          if (askSum >= 1.0) {
-            // No spread arb — ask-sum overpriced. This is the normal state.
-            rejections.coherent++
-            return null
-          }
-
-          // Ask sum is below $1.00 — potential arb! Run optimizer for optimal allocation.
-          const result = this.optimizer.solve(snapshot)
-          if (!result || result.tradeLegs.length === 0) {
-            rejections.optimizerFailed++
-            return null
-          }
-
-          const netProfitUSD = this.computeNetProfit(result.guaranteedProfit, result.tradeLegs.length)
-          if (netProfitUSD <= 0) {
-            rejections.unprofitable++
-            return null
-          }
-
-          // Cache market for reactive scanning
-          this.cacheMarket(market)
-
-          console.log(`[ArbitrageScanner] ARB FOUND: ${market.question?.substring(0, 40)} | askSum=${askSum.toFixed(4)} | net=$${netProfitUSD.toFixed(4)}`)
-          return { market, snapshot, result, netProfitUSD } as ArbOpportunity
-        })
-      )
-
-      for (const r of results) {
-        if (r.status === 'fulfilled' && r.value) {
-          opportunities.push(r.value)
+    // Phase 1: Lightweight spread pre-screen.
+    // Fetch best bid/ask for all tokens in one batch, then filter out markets
+    // where askSum >= 1.02 (obviously no arb). Saves ~90% of full order book fetches.
+    // Threshold is 1.02 (loose) because full snapshot check at 1.0 is the real gate.
+    let spreadScreened = candidates
+    if (candidates.length > 0) {
+      try {
+        const allTokenIds = new Set<string>()
+        for (const m of candidates) {
+          if (m.clobTokenIds) m.clobTokenIds.forEach(tid => allTokenIds.add(tid))
         }
+
+        if (allTokenIds.size > 0) {
+          const spreadsMap = await clobClient.getSpreads(Array.from(allTokenIds))
+
+          spreadScreened = candidates.filter(market => {
+            if (!market.clobTokenIds || market.clobTokenIds.length === 0) return true // keep if no tokens to check
+            const askPrices = market.clobTokenIds.map(tid => {
+              const spread = spreadsMap.get(tid)
+              return spread?.ask ?? 1.0
+            })
+            const askSum = askPrices.reduce((s, p) => s + p, 0)
+            if (askSum >= 1.02) {
+              rejections.spreadPreFilter++
+              return false
+            }
+            return true
+          })
+
+          console.log(`[ArbitrageScanner] Spread pre-screen: ${candidates.length} → ${spreadScreened.length} survivors (${rejections.spreadPreFilter} filtered)`)
+        }
+      } catch (err) {
+        // Spread pre-screen is best-effort — fall through to full snapshot on failure
+        console.warn('[ArbitrageScanner] Spread pre-screen failed, falling back to full scan:', err)
       }
+    }
+
+    // Phase 2: Full order book snapshot + VWAP + dynamic fees for survivors.
+    // Uses concurrency pool (maxConcurrency) instead of fixed batches of 5.
+    // Early-terminates when maxOpportunitiesPerScan arbs found.
+    const maxOpps = this.config.maxOpportunitiesPerScan ?? 5
+    const diagnostics = { closestAskSum }
+    const evaluatedResults = await this.runWithConcurrency(
+      spreadScreened,
+      market => this.evaluateMarket(market, rejections, diagnostics),
+      this.config.maxConcurrency ?? 10,
+      () => opportunities.length >= maxOpps,
+    )
+    closestAskSum = diagnostics.closestAskSum
+
+    for (const result of evaluatedResults) {
+      opportunities.push(result)
     }
 
     // Sort by net profit descending — execute best opportunities first
@@ -215,7 +219,7 @@ export class ArbitrageScanner {
 
     // Diagnostic: log closest askSum so we can see how close markets get to profitability
     if (closestAskSum < Infinity) {
-      console.log(`[ArbitrageScanner] Scan complete: ${candidates.length} checked, closest askSum=${closestAskSum.toFixed(4)} (need < 1.0000), arbs=${opportunities.length}`)
+      console.log(`[ArbitrageScanner] Scan complete: ${spreadScreened.length}/${candidates.length} checked (${rejections.spreadPreFilter} spread-filtered), closest askSum=${closestAskSum.toFixed(4)} (need < 1.0000), arbs=${opportunities.length}`)
     }
 
     const metrics = { total: markets.length, candidates: allCandidates.length, eligible: opportunities.length, rejections }
@@ -226,6 +230,191 @@ export class ArbitrageScanner {
     }
 
     return { opportunities, metrics }
+  }
+
+  /**
+   * Evaluate a single market for arbitrage opportunity.
+   * Uses VWAP depth-aware pricing and per-token dynamic fees.
+   *
+   * Extracted from fullScan for use with the concurrency pool.
+   */
+  private async evaluateMarket(
+    market: Market,
+    rejections: RejectionStats,
+    diagnostics?: { closestAskSum: number },
+  ): Promise<ArbOpportunity | null> {
+    const snapshot = await this.buildSnapshot(market)
+    if (!snapshot) {
+      rejections.snapshotFailed++
+      return null
+    }
+
+    // ── VWAP depth-aware pricing ──
+    // Walk order book levels to compute volume-weighted average fill prices
+    // instead of using only top-of-book (level 0). Prevents overestimating
+    // profit on thin books where tradeSize eats through multiple levels.
+    let hasInsufficientAskDepth = false
+    const askPrices = snapshot.depth.map((d, idx) => {
+      const vwap = ArbitrageScanner.computeVWAP(d.asks, this.config.tradeSize)
+      if (vwap && !vwap.sufficient) hasInsufficientAskDepth = true
+      return vwap?.vwap ?? snapshot.prices[idx]
+    })
+    const askSum = askPrices.reduce((s, p) => s + p, 0)
+
+    // Track closest askSum for diagnostics
+    if (diagnostics && askSum < diagnostics.closestAskSum) {
+      diagnostics.closestAskSum = askSum
+    }
+
+    let hasInsufficientBidDepth = false
+    const bidPrices = snapshot.depth.map((d, idx) => {
+      const vwap = ArbitrageScanner.computeVWAP(d.bids, this.config.tradeSize)
+      if (vwap && !vwap.sufficient) hasInsufficientBidDepth = true
+      return vwap?.vwap ?? snapshot.prices[idx]
+    })
+    const bidSum = bidPrices.reduce((s, p) => s + p, 0)
+
+    const numLegs = snapshot.prices.filter((_, i) => !snapshot.settled[i]).length
+
+    // ── Per-token dynamic fees ──
+    // Fetch actual fee rate from CLOB API (cached in CLOBClient for lifetime).
+    // Use max fee across all outcomes (conservative). Crypto markets charge
+    // 1000 bps (10%) vs standard 100 bps (1%).
+    let marketFeeBps = this.config.takerFeeBps
+    try {
+      const feeRates = await Promise.all(
+        market.clobTokenIds.map(tid => clobClient.getFeeRateBps(tid))
+      )
+      const maxFee = Math.max(...feeRates)
+      if (maxFee > 0) marketFeeBps = maxFee
+    } catch {
+      // Fee fetch failed — use static config default
+    }
+
+    // ── Paper formula: π_i(t) = max(0, |y_i| − N_i·γ_i) ──
+
+    // PATH 1: Underpriced bundle — buy all outcomes at VWAP ask, merge for $1
+    if (askSum < 1.0) {
+      if (hasInsufficientAskDepth) {
+        rejections.insufficientDepth++
+        return null
+      }
+
+      const result = this.optimizer.solve(snapshot)
+      if (!result || result.tradeLegs.length === 0) {
+        rejections.optimizerFailed++
+        return null
+      }
+
+      const netProfitUSD = this.computeNetProfit(1 - askSum, result.tradeLegs.length, marketFeeBps)
+      if (netProfitUSD <= 0) {
+        rejections.unprofitable++
+        return null
+      }
+
+      this.cacheMarket(market)
+      console.log(`[ArbitrageScanner] ARB FOUND (underpriced): ${market.question?.substring(0, 40)} | askSum=${askSum.toFixed(4)} | fee=${marketFeeBps}bps | net=$${netProfitUSD.toFixed(4)}`)
+      return { market, snapshot, result, netProfitUSD, arbType: 'underpriced' as const, feeRateBps: marketFeeBps }
+    }
+
+    // PATH 2: Overpriced bundle — Buy-a-Bundle at $1, sell outcomes at VWAP bid
+    if (bidSum > 1.0) {
+      if (hasInsufficientBidDepth) {
+        rejections.insufficientDepth++
+        return null
+      }
+
+      const overpricedProfit = this.computeOverpricedProfit(bidSum, numLegs, marketFeeBps)
+      if (overpricedProfit <= 0) {
+        rejections.unprofitable++
+        return null
+      }
+
+      const sellLegs = this.buildOverpricedTradeLegs(snapshot, bidPrices)
+      if (sellLegs.length === 0) {
+        rejections.optimizerFailed++
+        return null
+      }
+
+      const syntheticResult = {
+        mu: snapshot.prices,
+        guaranteedProfit: bidSum - 1.0,
+        fwGap: 0,
+        klDivergence: this.optimizer.klDivergence(snapshot.prices, snapshot.prices.map(() => 1 / snapshot.prices.length)),
+        iterations: 0,
+        converged: true,
+        tradeLegs: sellLegs,
+      }
+
+      this.cacheMarket(market)
+      console.log(`[ArbitrageScanner] ARB FOUND (overpriced): ${market.question?.substring(0, 40)} | bidSum=${bidSum.toFixed(4)} | fee=${marketFeeBps}bps | net=$${overpricedProfit.toFixed(4)}`)
+      return { market, snapshot, result: syntheticResult, netProfitUSD: overpricedProfit, arbType: 'overpriced' as const, feeRateBps: marketFeeBps }
+    }
+
+    // Neither path profitable — normal state
+    rejections.coherent++
+    return null
+  }
+
+  /**
+   * Run async tasks with bounded concurrency (semaphore pattern).
+   * Replaces sequential batch processing with a concurrent pool.
+   *
+   * @param items - Input items to process
+   * @param fn - Async function to apply to each item (should not throw)
+   * @param limit - Max concurrent tasks
+   * @param earlyStop - Optional callback; when true, stops launching new tasks
+   * @returns Array of non-null results
+   */
+  private runWithConcurrency<T, R>(
+    items: T[],
+    fn: (item: T) => Promise<R | null>,
+    limit: number,
+    earlyStop?: () => boolean,
+  ): Promise<R[]> {
+    const results: R[] = []
+    let index = 0
+    let activeCount = 0
+
+    return new Promise<R[]>((resolve) => {
+      const next = () => {
+        // Drain: all items processed, no active tasks
+        if (index >= items.length && activeCount === 0) {
+          resolve(results)
+          return
+        }
+
+        // Launch tasks up to concurrency limit
+        while (activeCount < limit && index < items.length) {
+          if (earlyStop?.()) break
+          const currentIndex = index++
+          activeCount++
+
+          fn(items[currentIndex])
+            .then(result => {
+              if (result !== null && result !== undefined) {
+                results.push(result)
+              }
+            })
+            .catch(() => { /* individual failures are silent */ })
+            .finally(() => {
+              activeCount--
+              next()
+            })
+        }
+
+        // If early-stopped or exhausted items, wait for active tasks to drain
+        if (index >= items.length && activeCount === 0) {
+          resolve(results)
+        }
+      }
+
+      if (items.length === 0) {
+        resolve(results)
+      } else {
+        next()
+      }
+    })
   }
 
   /**
@@ -346,21 +535,74 @@ export class ArbitrageScanner {
     const snapshot = await this.buildSnapshot(market)
     if (!snapshot) return null
 
-    // Direct ask-sum check — same as fullScan
+    // ── VWAP depth-aware pricing (same logic as evaluateMarket) ──
+    let hasInsufficientAskDepth = false
     const askPrices = snapshot.depth.map((d, idx) => {
-      const bestAsk = d.asks?.[0]?.price
-      return bestAsk != null && bestAsk > 0 ? bestAsk : snapshot.prices[idx]
+      const vwap = ArbitrageScanner.computeVWAP(d.asks, this.config.tradeSize)
+      if (vwap && !vwap.sufficient) hasInsufficientAskDepth = true
+      return vwap?.vwap ?? snapshot.prices[idx]
     })
     const askSum = askPrices.reduce((s, p) => s + p, 0)
-    if (askSum >= 1.0) return null
 
-    const result = this.optimizer.solve(snapshot)
-    if (!result || result.tradeLegs.length === 0) return null
+    let hasInsufficientBidDepth = false
+    const bidPrices = snapshot.depth.map((d, idx) => {
+      const vwap = ArbitrageScanner.computeVWAP(d.bids, this.config.tradeSize)
+      if (vwap && !vwap.sufficient) hasInsufficientBidDepth = true
+      return vwap?.vwap ?? snapshot.prices[idx]
+    })
+    const bidSum = bidPrices.reduce((s, p) => s + p, 0)
 
-    const netProfitUSD = this.computeNetProfit(result.guaranteedProfit, result.tradeLegs.length)
-    if (netProfitUSD <= 0) return null
+    const numLegs = snapshot.prices.filter((_, i) => !snapshot.settled[i]).length
 
-    return { market, snapshot, result, netProfitUSD }
+    // ── Per-token dynamic fees (cached after first call) ──
+    let marketFeeBps = this.config.takerFeeBps
+    try {
+      const feeRates = await Promise.all(
+        market.clobTokenIds.map(tid => clobClient.getFeeRateBps(tid))
+      )
+      const maxFee = Math.max(...feeRates)
+      if (maxFee > 0) marketFeeBps = maxFee
+    } catch {
+      // Fee fetch failed — use static config default
+    }
+
+    // PATH 1: Underpriced — buy all, merge for $1
+    if (askSum < 1.0) {
+      if (hasInsufficientAskDepth) return null
+
+      const result = this.optimizer.solve(snapshot)
+      if (!result || result.tradeLegs.length === 0) return null
+
+      const netProfitUSD = this.computeNetProfit(1 - askSum, result.tradeLegs.length, marketFeeBps)
+      if (netProfitUSD <= 0) return null
+
+      return { market, snapshot, result, netProfitUSD, arbType: 'underpriced' as const, feeRateBps: marketFeeBps }
+    }
+
+    // PATH 2: Overpriced — Buy-a-Bundle at $1, sell at bid
+    if (bidSum > 1.0) {
+      if (hasInsufficientBidDepth) return null
+
+      const overpricedProfit = this.computeOverpricedProfit(bidSum, numLegs, marketFeeBps)
+      if (overpricedProfit <= 0) return null
+
+      const sellLegs = this.buildOverpricedTradeLegs(snapshot, bidPrices)
+      if (sellLegs.length === 0) return null
+
+      const syntheticResult = {
+        mu: snapshot.prices,
+        guaranteedProfit: bidSum - 1.0,
+        fwGap: 0,
+        klDivergence: this.optimizer.klDivergence(snapshot.prices, snapshot.prices.map(() => 1 / snapshot.prices.length)),
+        iterations: 0,
+        converged: true,
+        tradeLegs: sellLegs,
+      }
+
+      return { market, snapshot, result: syntheticResult, netProfitUSD: overpricedProfit, arbType: 'overpriced' as const, feeRateBps: marketFeeBps }
+    }
+
+    return null
   }
 
   /**
@@ -456,15 +698,128 @@ export class ArbitrageScanner {
   }
 
   /**
-   * Compute net profit in USD after taker fees and gas.
+   * Walk order book levels to compute Volume-Weighted Average Price (VWAP)
+   * for a given trade size. Pure function — no service dependencies.
    *
-   * netProfit = (guaranteedProfit * tradeSize) - (takerFee * tradeSize * numLegs) - (gas * numLegs)
+   * For BUY: walks ask levels (sorted lowest to highest price).
+   * For SELL: walks bid levels (sorted highest to lowest price).
+   *
+   * @param levels - Order book levels (asks or bids from snapshot.depth)
+   * @param tradeSize - Target trade size in USD
+   * @returns { vwap, fillableUSD, sufficient } or null if no valid levels
    */
-  computeNetProfit(guaranteedProfitRatio: number, numLegs: number): number {
-    const grossProfit = guaranteedProfitRatio * this.config.tradeSize
-    const totalFees = (this.config.takerFeeBps / 10000) * this.config.tradeSize * numLegs
-    const totalGas = this.config.gasEstimateUSD * numLegs
-    return grossProfit - totalFees - totalGas
+  static computeVWAP(
+    levels: Array<{ price: number; size: number }>,
+    tradeSize: number,
+  ): { vwap: number; fillableUSD: number; sufficient: boolean } | null {
+    if (!levels || levels.length === 0) return null
+
+    let filledUSD = 0
+    let totalShares = 0
+
+    for (const level of levels) {
+      if (level.price <= 0 || level.size <= 0) continue
+      const remaining = tradeSize - filledUSD
+      if (remaining <= 0) break
+
+      const levelValueUSD = level.price * level.size
+      const fillUSD = Math.min(levelValueUSD, remaining)
+      const fillShares = fillUSD / level.price
+
+      filledUSD += fillUSD
+      totalShares += fillShares
+    }
+
+    if (filledUSD <= 0 || totalShares <= 0) return null
+
+    return {
+      vwap: filledUSD / totalShares,
+      fillableUSD: filledUSD,
+      sufficient: filledUSD >= tradeSize * 0.5,
+    }
+  }
+
+  /**
+   * Compute net arbitrage profit using the Bregman Projection paper's formula:
+   *
+   *   π_i(t) = max(0, |y_i| − N_i · γ_i)
+   *
+   * Where:
+   *   |y_i| = actual price deviation from bundle cost $1.00:
+   *           (1 - askSum) for underpriced, (bidSum - 1) for overpriced
+   *   N_i   = number of trade legs (each incurs taker fee)
+   *   γ_i   = per-leg taker fee in USD = (takerFeeBps / 10000) * tradeSize
+   *
+   * IMPORTANT: priceDeviation must be the actual ask/bid deviation, NOT the
+   * optimizer's KL-based guaranteedProfit (which is in nats, not price units).
+   *
+   * The max(0, ...) is the paper's hard gate: small deviations that don't
+   * overcome the per-leg fee threshold produce ZERO profit, not negative.
+   * This prevents the optimizer from chasing micro-incoherence that fees eat.
+   */
+  computeNetProfit(priceDeviation: number, numLegs: number, feeRateBps?: number): number {
+    const effectiveFeeBps = feeRateBps ?? this.config.takerFeeBps
+    const grossProfit = priceDeviation * this.config.tradeSize
+    const perLegFee = (effectiveFeeBps / 10000) * this.config.tradeSize
+    const totalFees = numLegs * perLegFee
+    const gasCost = this.config.gasEstimateUSD
+
+    // Paper's formula: π = max(0, |y| - N·γ) minus gas
+    // Gas is not part of the paper's model but is real on Polygon.
+    return Math.max(0, grossProfit - totalFees) - gasCost
+  }
+
+  /**
+   * Compute net profit for the OVERPRICED bundle path (bidSum > $1.00).
+   *
+   * Strategy: Buy a complete set via Buy-a-Bundle at exactly $1.00,
+   * then sell each outcome at its bid price on the CLOB.
+   *
+   * Paper formula for overpriced case with Buy-a-Bundle:
+   *   π = max(0, (bidSum - 1.0) * tradeSize - N_i · γ_i) - gasCost
+   *
+   * The Buy-a-Bundle approach avoids the 2N·γ penalty of short-sell-and-cover
+   * because the bundle purchase is a single on-chain tx (not N separate buys).
+   */
+  computeOverpricedProfit(bidSum: number, numLegs: number, feeRateBps?: number): number {
+    const effectiveFeeBps = feeRateBps ?? this.config.takerFeeBps
+    const grossProfit = (bidSum - 1.0) * this.config.tradeSize
+    const perLegFee = (effectiveFeeBps / 10000) * this.config.tradeSize
+    const totalFees = numLegs * perLegFee
+    const gasCost = this.config.gasEstimateUSD
+
+    // Paper: π = max(0, |y| - N·γ) - gas
+    return Math.max(0, grossProfit - totalFees) - gasCost
+  }
+
+  /**
+   * Build SELL trade legs for overpriced bundle path.
+   * Each outcome gets a SELL leg at its bid price — after buying the complete
+   * set via Buy-a-Bundle at $1.00, we sell each outcome individually.
+   *
+   * Proportion is weighted by bid price (sell more of the expensive outcomes
+   * to extract maximum value from the overpricing).
+   */
+  private buildOverpricedTradeLegs(
+    snapshot: MarketSnapshot,
+    bidPrices: number[]
+  ): TradeLeg[] {
+    const legs: TradeLeg[] = []
+    const totalBid = bidPrices.reduce((s, p, i) => s + (snapshot.settled[i] ? 0 : p), 0)
+
+    for (let i = 0; i < bidPrices.length; i++) {
+      if (snapshot.settled[i]) continue
+      if (bidPrices[i] <= 0) continue
+
+      legs.push({
+        outcomeIndex: i,
+        side: 'SELL',
+        proportion: bidPrices[i] / Math.max(totalBid, 1e-10),
+        price: bidPrices[i],
+      })
+    }
+
+    return legs
   }
 
   /**

@@ -3,6 +3,9 @@ import React, { useEffect, useRef } from 'react'
 /**
  * MatrixRain - Animated background effect
  * Digital rain animation inspired by The Matrix
+ *
+ * Uses requestAnimationFrame (not setInterval) and pauses when the tab is
+ * hidden to avoid wasting CPU/GPU and leaking memory from offscreen draws.
  */
 export const MatrixRain: React.FC<{ opacity?: number }> = ({ opacity = 0.05 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -28,18 +31,42 @@ export const MatrixRain: React.FC<{ opacity?: number }> = ({ opacity = 0.05 }) =
 
     // Column setup
     const fontSize = 14
-    const columns = Math.floor(canvas.width / fontSize)
-    const drops: number[] = []
+    let columns = Math.floor(canvas.width / fontSize)
+    let drops: number[] = []
 
     // Initialize drops
-    for (let i = 0; i < columns; i++) {
-      drops[i] = Math.random() * -100
+    const initDrops = () => {
+      columns = Math.floor(canvas.width / fontSize)
+      drops = new Array(columns)
+      for (let i = 0; i < columns; i++) {
+        drops[i] = Math.random() * -100
+      }
     }
+    initDrops()
 
-    // Animation
-    const draw = () => {
+    // Reinitialize drops on resize so columns stay in sync with canvas width
+    const handleResize = () => {
+      resizeCanvas()
+      initDrops()
+    }
+    window.removeEventListener('resize', resizeCanvas)
+    window.addEventListener('resize', handleResize)
+
+    // Animation via rAF, throttled to ~20 FPS
+    let rafId = 0
+    let lastFrame = 0
+    let paused = document.hidden
+    const FRAME_INTERVAL = 50 // ms between frames (~20 FPS)
+
+    const draw = (now: number) => {
+      rafId = requestAnimationFrame(draw)
+
+      if (paused) return
+      if (now - lastFrame < FRAME_INTERVAL) return
+      lastFrame = now
+
       // Semi-transparent black to create fade effect
-      ctx.fillStyle = `rgba(0, 10, 0, 0.05)`
+      ctx.fillStyle = 'rgba(0, 10, 0, 0.05)'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
 
       // Green text
@@ -47,13 +74,9 @@ export const MatrixRain: React.FC<{ opacity?: number }> = ({ opacity = 0.05 }) =
       ctx.font = `${fontSize}px monospace`
 
       for (let i = 0; i < drops.length; i++) {
-        // Random character
         const char = charArray[Math.floor(Math.random() * charArray.length)]
-        
-        // Draw character
         ctx.fillText(char, i * fontSize, drops[i] * fontSize)
 
-        // Reset drop when it goes off screen
         if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
           drops[i] = 0
         }
@@ -61,11 +84,18 @@ export const MatrixRain: React.FC<{ opacity?: number }> = ({ opacity = 0.05 }) =
       }
     }
 
-    const interval = setInterval(draw, 50)
+    rafId = requestAnimationFrame(draw)
+
+    // Pause/resume on tab visibility change
+    const onVisibility = () => {
+      paused = document.hidden
+    }
+    document.addEventListener('visibilitychange', onVisibility)
 
     return () => {
-      clearInterval(interval)
-      window.removeEventListener('resize', resizeCanvas)
+      cancelAnimationFrame(rafId)
+      window.removeEventListener('resize', handleResize)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [opacity])
 

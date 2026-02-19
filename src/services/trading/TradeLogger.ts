@@ -23,7 +23,7 @@ export interface TradeRecord {
   outcomes: string[]
 
   // Decision context
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro'
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'mr'
   side: 'BUY' | 'SELL'
   outcome: string
   modelProbability?: number     // LLM confidence (0-1)
@@ -53,7 +53,7 @@ export interface TradeRecord {
   // Exit (filled in later when position closes)
   exitTimestamp?: number
   exitPrice?: number
-  exitReason?: 'stop-loss' | 'take-profit' | 'trailing-stop' | 'time-exit' | 'manual' | 'emergency' | 'merge'
+  exitReason?: 'stop-loss' | 'take-profit' | 'trailing-stop' | 'time-exit' | 'manual' | 'emergency' | 'merge' | 'redemption'
   pnlUSD?: number
   pnlPercent?: number
   holdTimeMs?: number
@@ -65,6 +65,12 @@ export interface TradeRecord {
 
   // Gas context
   gasPrice?: number             // gwei at execution time
+
+  // Mode
+  dryRun?: boolean              // true if trade was simulated (paper trading)
+
+  // Multi-wallet
+  walletId?: string             // Which wallet executed this trade
 }
 
 export interface BacktestSummary {
@@ -99,6 +105,8 @@ export class TradeLogger {
       id,
       timestamp: Date.now(),
       ...record,
+      dryRun: record.dryRun ?? this.readDryRun(),
+      walletId: record.walletId ?? this.readActiveWalletId(),
     }
 
     this.records.push(entry)
@@ -189,7 +197,7 @@ export class TradeLogger {
 
     // By strategy breakdown
     const byStrategy: BacktestSummary['byStrategy'] = {}
-    for (const strat of ['llm', 'dip', 'fw'] as const) {
+    for (const strat of ['llm', 'dip', 'fw', 'btc', 'micro', 'mr'] as const) {
       const stratRecords = closed.filter(r => r.strategy === strat)
       const stratWins = stratRecords.filter(r => (r.pnlUSD ?? 0) > 0)
       const stratPnl = stratRecords.reduce((s, r) => s + (r.pnlUSD ?? 0), 0)
@@ -247,6 +255,28 @@ export class TradeLogger {
     } catch {
       // Storage not available — that's fine, we're append-only
     }
+  }
+
+  private _getDryRun: (() => boolean) | null = null
+  private readDryRun(): boolean {
+    if (!this._getDryRun) {
+      import('@/stores/settingsStore').then(m => {
+        this._getDryRun = () => m.useSettingsStore.getState().dryRun ?? false
+      }).catch(() => {})
+      return false
+    }
+    return this._getDryRun()
+  }
+
+  private _getActiveWalletId: (() => string) | null = null
+  private readActiveWalletId(): string {
+    if (!this._getActiveWalletId) {
+      import('@/stores/settingsStore').then(m => {
+        this._getActiveWalletId = () => m.useSettingsStore.getState().activeWalletId ?? ''
+      }).catch(() => {})
+      return ''
+    }
+    return this._getActiveWalletId()
   }
 
   private persistRecord(record: TradeRecord): void {

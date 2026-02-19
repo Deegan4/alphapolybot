@@ -24,10 +24,11 @@ export interface GasEstimate {
 }
 
 // Polygon gas station V2 endpoint
-const GAS_STATION_URL = 'https://gasstation.polygon.technology/v2'
+const GAS_STATION_URL = import.meta.env.VITE_GAS_STATION_URL || 'https://gasstation.polygon.technology/v2'
 
-// Rough MATIC/USD price — updated periodically. Fallback for when we can't fetch.
-const DEFAULT_MATIC_USD = 0.40
+// POL (formerly MATIC) price in USD — updated via setMaticPrice() from PriceOracleService.
+// Fallback only used until first real price arrives. POL was ~$0.09 as of Feb 2025.
+const DEFAULT_POL_USD = 0.10
 
 // Gas units for common operations
 const GAS_UNITS = {
@@ -41,7 +42,7 @@ const CACHE_TTL_MS = 15_000
 
 export class GasOracle {
   private cachedEstimate: GasEstimate | null = null
-  private maticPriceUSD = DEFAULT_MATIC_USD
+  private maticPriceUSD = DEFAULT_POL_USD
   private fetchInProgress: Promise<GasEstimate | null> | null = null
 
   /**
@@ -101,6 +102,9 @@ export class GasOracle {
 
   private async _fetch(): Promise<GasEstimate | null> {
     try {
+      // Refresh POL price alongside gas prices (best-effort, never blocks)
+      this.refreshPolPrice().catch(() => {})
+
       const response = await fetch(GAS_STATION_URL, { signal: AbortSignal.timeout(5000) })
       if (!response.ok) return this.cachedEstimate // Return stale cache on error
 
@@ -123,10 +127,34 @@ export class GasOracle {
       }
 
       this.cachedEstimate = estimate
+      console.debug(`[GasOracle] ${standard.toFixed(0)} gwei, POL=$${this.maticPriceUSD.toFixed(4)}, merge=$${estimate.mergeCostUSD.toFixed(4)}`)
       return estimate
     } catch (error) {
       console.warn('[GasOracle] Failed to fetch gas prices:', error)
       return this.cachedEstimate // Return stale cache
+    }
+  }
+
+  /**
+   * Fetch current POL (ex-MATIC) price from CoinGecko.
+   * Called automatically on each gas fetch cycle (every 15s).
+   * Best-effort — failure keeps the previous price.
+   */
+  private async refreshPolPrice(): Promise<void> {
+    try {
+      const coingeckoBase = import.meta.env.VITE_COINGECKO_API_URL || 'https://api.coingecko.com/api/v3'
+      const resp = await fetch(
+        `${coingeckoBase}/simple/price?ids=polygon-ecosystem-token&vs_currencies=usd`,
+        { signal: AbortSignal.timeout(5000) }
+      )
+      if (!resp.ok) return
+      const data = await resp.json()
+      const price = data?.['polygon-ecosystem-token']?.usd
+      if (typeof price === 'number' && price > 0) {
+        this.maticPriceUSD = price
+      }
+    } catch {
+      // Non-critical — keep using previous price
     }
   }
 

@@ -1,5 +1,5 @@
 import { BaseApiClient } from './BaseApiClient'
-import type { Position, ApiPosition, Trade, PortfolioSummary, UserActivity } from '@/types'
+import type { Position, ApiPosition, ApiTrade, Trade, PortfolioSummary, UserActivity } from '@/types'
 
 /**
  * Data API Client
@@ -77,11 +77,12 @@ export class DataClient extends BaseApiClient {
     const { limit = 100, offset = 0 } = options
 
     try {
-      const response = await this.get<Trade[]>(
+      const response = await this.get<ApiTrade[]>(
         `/trades?user=${this.walletAddress}&limit=${limit}&offset=${offset}`
       )
-      
-      return response || []
+
+      if (!response || !Array.isArray(response)) return []
+      return response.map(this.convertApiTrade)
     } catch (error) {
       console.error('Failed to fetch trade history:', error)
       return []
@@ -246,6 +247,23 @@ export class DataClient extends BaseApiClient {
       },
       entryTime: new Date(),
       lastUpdate: new Date(apiPos.lastUpdated || Date.now()),
+    }
+  }
+
+  /**
+   * Convert raw Data API trade to our Trade type
+   */
+  private convertApiTrade(raw: ApiTrade): Trade {
+    return {
+      id: raw.id,
+      marketId: raw.market,
+      tokenId: raw.asset_id,
+      side: raw.side,
+      price: parseFloat(raw.price) || 0,
+      size: parseFloat(raw.size) || 0,
+      fee: parseFloat(raw.fee) || 0,
+      timestamp: new Date(raw.timestamp),
+      txHash: raw.transaction_hash || '',
     }
   }
 

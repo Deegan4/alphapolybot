@@ -4,6 +4,8 @@ import { DipArbStrategy, dipArbStrategy } from './DipArbStrategy'
 import { ProjectFWStrategy, projectFWStrategy } from './ProjectFWStrategy'
 import { BtcUpDownStrategy, btcUpDownStrategy } from './BtcUpDownStrategy'
 import { MicrostructureMomentumStrategy, microMomentumStrategy } from './MicrostructureMomentumStrategy'
+import { MeanReversionStrategy, meanReversionStrategy } from './MeanReversionStrategy'
+import { CopyTradingStrategy, copyTradingStrategy } from './CopyTradingStrategy'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import type { StrategyStats } from '@/types'
 
@@ -32,6 +34,8 @@ export class StrategyManager {
     this.registerStrategy('project-fw', projectFWStrategy)
     this.registerStrategy('btc-updown', btcUpDownStrategy)
     this.registerStrategy('micro-momentum', microMomentumStrategy)
+    this.registerStrategy('mean-reversion', meanReversionStrategy)
+    this.registerStrategy('copy-trading', copyTradingStrategy)
   }
 
   /**
@@ -112,6 +116,20 @@ export class StrategyManager {
   }
 
   /**
+   * Get Mean Reversion strategy (typed)
+   */
+  getMeanRevStrategy(): MeanReversionStrategy {
+    return meanReversionStrategy
+  }
+
+  /**
+   * Get Copy Trading strategy (typed)
+   */
+  getCopyTradingStrategy(): CopyTradingStrategy {
+    return copyTradingStrategy
+  }
+
+  /**
    * Enable a strategy
    */
   async enableStrategy(id: string): Promise<void> {
@@ -138,10 +156,10 @@ export class StrategyManager {
     await strategy.disable() // disable() internally calls stop()
 
     // Cancel pending GTD orders for this strategy (dynamic import avoids circular dep)
-    const strategyTag = id === 'llm-prediction' ? 'llm' : id === 'dip-arb' ? 'dip' : id === 'project-fw' ? 'fw' : id === 'btc-updown' ? 'btc' : id === 'micro-momentum' ? 'micro' : null
+    const strategyTag = id === 'llm-prediction' ? 'llm' : id === 'dip-arb' ? 'dip' : id === 'project-fw' ? 'fw' : id === 'btc-updown' ? 'btc' : id === 'micro-momentum' ? 'micro' : id === 'mean-reversion' ? 'meanrev' : id === 'copy-trading' ? 'copy' : null
     if (strategyTag) {
       import('@/services/trading/GtcOrderManager').then(({ gtcOrderManager }) => {
-        gtcOrderManager.cancelAllForStrategy(strategyTag as 'llm' | 'dip' | 'fw' | 'btc' | 'micro').then(n => {
+        gtcOrderManager.cancelAllForStrategy(strategyTag as 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy').then(n => {
           if (n > 0) activityLogger.logSystem(`Cancelled ${n} pending GTD order(s) for ${strategy.name}`)
         })
       }).catch(() => {})

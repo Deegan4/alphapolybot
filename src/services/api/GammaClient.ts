@@ -50,7 +50,7 @@ function normalizeMarket(raw: any): Market {
  */
 export class GammaClient extends BaseApiClient {
   constructor() {
-    super(import.meta.env.VITE_GAMMA_API_URL || 'https://gamma-api.polymarket.com', {
+    super(import.meta.env.VITE_GAMMA_API_URL || (import.meta.env.DEV ? '/api/gamma' : 'https://gamma-api.polymarket.com'), {
       maxRequestsPerMinute: 100,
       maxRetries: 3,
       timeout: 15000,
@@ -96,11 +96,7 @@ export class GammaClient extends BaseApiClient {
       // Handle both array response and object response
       const markets = Array.isArray(response) ? response : (response.markets || [])
 
-      // Normalize: Gamma API returns outcomePrices as strings, parse to numbers
-      return markets.map(m => ({
-        ...m,
-        outcomePrices: (m.outcomePrices ?? []).map(p => typeof p === 'string' ? parseFloat(p) : p),
-      }))
+      return markets.map(normalizeMarket)
     } catch (error) {
       console.error('Failed to fetch markets:', error)
       throw error
@@ -113,7 +109,7 @@ export class GammaClient extends BaseApiClient {
   async getMarket(marketId: string): Promise<Market | null> {
     try {
       const response = await this.get<Market>(`/markets/${marketId}`)
-      return response
+      return normalizeMarket(response)
     } catch (error) {
       console.error(`Failed to fetch market ${marketId}:`, error)
       return null
@@ -225,6 +221,43 @@ export class GammaClient extends BaseApiClient {
     } catch (error) {
       console.error('Failed to fetch events:', error)
       return []
+    }
+  }
+
+  /**
+   * Get a single event by its exact slug.
+   * Used for BTC/ETH/SOL Up/Down 15-min market discovery where slugs
+   * follow the pattern: {asset}-updown-15m-{windowStartUnix}
+   */
+  async getEventBySlug(slug: string): Promise<GammaEvent | null> {
+    try {
+      const response = await this.get<GammaEventsResponse | GammaEvent[]>(
+        `/events?slug=${encodeURIComponent(slug)}`
+      )
+      const events: GammaEvent[] = Array.isArray(response)
+        ? response
+        : (response.events || [])
+
+      if (events.length === 0) return null
+
+      const event = events[0]
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawMarkets = (event as any).markets || []
+      const eventNegRisk = Boolean((event as any).enableNegRisk ?? (event as any).negRisk ?? false)
+
+      // Normalize nested markets (same pattern as getActiveMarkets)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      event.markets = rawMarkets.map((raw: any) => {
+        if (eventNegRisk && !raw.negRisk && !raw.enableNegRisk && !raw.neg_risk) {
+          raw.negRisk = true
+        }
+        return normalizeMarket(raw)
+      })
+
+      return event
+    } catch (error) {
+      console.error(`[GammaClient] Failed to fetch event by slug ${slug}:`, error)
+      return null
     }
   }
 

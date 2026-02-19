@@ -21,11 +21,11 @@ export const MatrixBadge: React.FC<MatrixBadgeProps> = ({
   className,
 }) => {
   const variants = {
-    default: 'bg-matrix-border/50 text-matrix-text-secondary border-matrix-border',
-    success: 'bg-matrix-primary/10 text-matrix-primary border-matrix-primary/30',
-    warning: 'bg-matrix-secondary/10 text-matrix-secondary border-matrix-secondary/30',
-    danger: 'bg-red-500/10 text-red-400 border-red-500/30',
-    info: 'bg-matrix-cyan/10 text-matrix-cyan border-matrix-cyan/30',
+    default: 'bg-agent-border/50 text-agent-text-muted border-agent-border',
+    success: 'bg-agent-green/10 text-agent-green border-agent-green/30',
+    warning: 'bg-agent-orange/10 text-agent-orange border-agent-orange/30',
+    danger: 'bg-agent-red/10 text-agent-red border-agent-red/30',
+    info: 'bg-agent-cyan/10 text-agent-cyan border-agent-cyan/30',
   }
 
   const sizes = {
@@ -51,21 +51,21 @@ export const MatrixBadge: React.FC<MatrixBadgeProps> = ({
           <span
             className={cn(
               'animate-ping absolute inline-flex h-full w-full rounded-full opacity-75',
-              variant === 'success' && 'bg-matrix-primary',
-              variant === 'warning' && 'bg-matrix-secondary',
-              variant === 'danger' && 'bg-red-400',
-              variant === 'info' && 'bg-matrix-cyan',
-              variant === 'default' && 'bg-matrix-text-secondary'
+              variant === 'success' && 'bg-agent-green',
+              variant === 'warning' && 'bg-agent-orange',
+              variant === 'danger' && 'bg-agent-red',
+              variant === 'info' && 'bg-agent-cyan',
+              variant === 'default' && 'bg-agent-text-muted'
             )}
           />
           <span
             className={cn(
               'relative inline-flex rounded-full h-2 w-2',
-              variant === 'success' && 'bg-matrix-primary',
-              variant === 'warning' && 'bg-matrix-secondary',
-              variant === 'danger' && 'bg-red-400',
-              variant === 'info' && 'bg-matrix-cyan',
-              variant === 'default' && 'bg-matrix-text-secondary'
+              variant === 'success' && 'bg-agent-green',
+              variant === 'warning' && 'bg-agent-orange',
+              variant === 'danger' && 'bg-agent-red',
+              variant === 'info' && 'bg-agent-cyan',
+              variant === 'default' && 'bg-agent-text-muted'
             )}
           />
         </span>

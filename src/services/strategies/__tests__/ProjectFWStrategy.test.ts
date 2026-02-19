@@ -3,7 +3,7 @@ import { ProjectFWStrategy } from '../ProjectFWStrategy'
 
 // Mock all external dependencies
 
-vi.mock('@/services/api', () => ({
+vi.mock('@/services/api/GammaClient', () => ({
   gammaClient: {
     getActiveMarkets: vi.fn().mockResolvedValue([]),
     getEvents: vi.fn().mockResolvedValue([]),
@@ -17,6 +17,7 @@ vi.mock('@/services/api/CLOBClient', () => ({
       asks: [{ price: 0.46, size: 100 }],
     }),
     cancelOrder: vi.fn().mockResolvedValue(undefined),
+    getFeeRateBps: vi.fn().mockResolvedValue(100),
   },
 }))
 
@@ -73,7 +74,7 @@ vi.mock('@/services/trading/PositionLifecycleManager', () => ({
 
 vi.mock('@/stores/walletStore', () => ({
   useWalletStore: {
-    getState: () => ({ usdcBalance: 100, usdcBridgedBalance: 100, usdcNativeBalance: 0, balance: 0.5 }),
+    getState: () => ({ balance: 100, buyingPower: 100 }),
   },
 }))
 
@@ -153,8 +154,8 @@ describe('ProjectFWStrategy', () => {
     it('returns default config', () => {
       const config = strategy.getFWConfig()
       expect(config.alpha).toBe(0.5)
-      expect(config.tradeSize).toBe(3)
-      expect(config.minProfitBps).toBe(50)
+      expect(config.tradeSize).toBe(5)
+      expect(config.minProfitBps).toBe(30)
       expect(config.maxConcurrentArbs).toBe(2)
       expect(config.takerFeeBps).toBe(100)
     })
@@ -165,7 +166,7 @@ describe('ProjectFWStrategy', () => {
       expect(config.tradeSize).toBe(5)
       expect(config.alpha).toBe(0.8)
       // Other values remain default
-      expect(config.minProfitBps).toBe(50)
+      expect(config.minProfitBps).toBe(30)
     })
 
     it('emits configUpdated event', () => {
@@ -231,7 +232,7 @@ describe('ProjectFWStrategy', () => {
 
   describe('scanning', () => {
     it('runs full scan on enable', async () => {
-      const { gammaClient } = await import('@/services/api')
+      const { gammaClient } = await import('@/services/api/GammaClient')
       await strategy.initialize()
       await strategy.enable()
 

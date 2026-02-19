@@ -35,3 +35,6 @@ coverage/
 # Misc
 *.local
 https:/
+
+# Local Netlify folder
+.netlify

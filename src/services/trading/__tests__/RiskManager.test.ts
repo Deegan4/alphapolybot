@@ -4,7 +4,7 @@ import { RiskManager } from '../RiskManager'
 // Hoisted mutable state — vi.mock() is hoisted above const declarations,
 // so we use vi.hoisted() to make these available inside mock factories.
 const { mockWalletState, mockSettingsState } = vi.hoisted(() => ({
-  mockWalletState: { usdcBalance: 100, usdcBridgedBalance: 100, usdcNativeBalance: 0, balance: 0.5 },
+  mockWalletState: { balance: 100, buyingPower: 100 },
   mockSettingsState: {
     dailyLossLimit: 4,
     weeklyLossLimit: 20,
@@ -18,7 +18,6 @@ const { mockWalletState, mockSettingsState } = vi.hoisted(() => ({
 }))
 
 // Mock wallet store - default to healthy balance
-// usdcBridgedBalance is what Polymarket actually uses (USDC.e)
 vi.mock('@/stores/walletStore', () => ({
   useWalletStore: {
     getState: () => mockWalletState,
@@ -55,10 +54,8 @@ describe('RiskManager', () => {
     // Fresh instance per test (not the singleton)
     rm = new RiskManager()
     // Reset wallet balances to defaults
-    mockWalletState.usdcBalance = 100
-    mockWalletState.usdcBridgedBalance = 100
-    mockWalletState.usdcNativeBalance = 0
-    mockWalletState.balance = 0.5
+    mockWalletState.balance = 100
+    mockWalletState.buyingPower = 100
     // Reset penny mode
     mockSettingsState.pennyTraderMode = false
   })
@@ -113,16 +110,16 @@ describe('RiskManager', () => {
   })
 
   it('rejects when insufficient balance', () => {
-    mockWalletState.usdcBalance = 2
-    mockWalletState.usdcBridgedBalance = 2
+    mockWalletState.balance = 2
+    mockWalletState.buyingPower = 2
     const result = rm.validateTrade(10)
     expect(result.allowed).toBe(false)
     expect(result.riskCode).toBe('INSUFFICIENT_BALANCE')
   })
 
   it('rejects when balance is below minimum', () => {
-    mockWalletState.usdcBalance = 4 // below minBalanceForTrade (5)
-    mockWalletState.usdcBridgedBalance = 4
+    mockWalletState.balance = 4 // below minBalanceForTrade (5)
+    mockWalletState.buyingPower = 4
     const result = rm.validateTrade(3)
     expect(result.allowed).toBe(false)
     expect(result.riskCode).toBe('INSUFFICIENT_BALANCE')
@@ -135,8 +132,8 @@ describe('RiskManager', () => {
     // Even with emergency stop, disabled means allowed
     // Need fresh instance since emergencyStop latches
     const rm2 = new RiskManager({ enabled: false })
-    mockWalletState.usdcBalance = 0 // zero balance
-    mockWalletState.usdcBridgedBalance = 0
+    mockWalletState.balance = 0 // zero balance
+    mockWalletState.buyingPower = 0
     const result = rm2.validateTrade(1000)
     expect(result.allowed).toBe(true)
   })
@@ -240,8 +237,8 @@ describe('RiskManager', () => {
     expect(rm.validateTrade(10).allowed).toBe(false)
 
     rm.resetEmergencyStop()
-    mockWalletState.usdcBalance = 100
-    mockWalletState.usdcBridgedBalance = 100
+    mockWalletState.balance = 100
+    mockWalletState.buyingPower = 100
     expect(rm.validateTrade(10).allowed).toBe(true)
   })
 
@@ -335,44 +332,12 @@ describe('RiskManager', () => {
     for (let i = 0; i < 4; i++) {
       rm.recordTradeResult(false)
     }
-    mockWalletState.usdcBalance = 100
-    mockWalletState.usdcBridgedBalance = 100
+    mockWalletState.balance = 100
+    mockWalletState.buyingPower = 100
     const result = rm.validateTrade(10)
     expect(result.allowed).toBe(true)
   })
 
-  // ────────────────────────────────────────────
-  // Gas (MATIC) check
-  // ────────────────────────────────────────────
-
-  it('rejects when MATIC balance below minMaticForGas', () => {
-    mockWalletState.balance = 0.005 // below default 0.01
-    const result = rm.validateTrade(5)
-    expect(result.allowed).toBe(false)
-    expect(result.riskCode).toBe('INSUFFICIENT_GAS')
-    expect(result.reason).toContain('MATIC')
-  })
-
-  it('rejects when MATIC balance is zero', () => {
-    mockWalletState.balance = 0
-    const result = rm.validateTrade(5)
-    expect(result.allowed).toBe(false)
-    expect(result.riskCode).toBe('INSUFFICIENT_GAS')
-  })
-
-  it('allows trade when MATIC balance is sufficient', () => {
-    mockWalletState.balance = 0.5 // well above 0.01
-    const result = rm.validateTrade(5)
-    expect(result.allowed).toBe(true)
-  })
-
-  it('respects custom minMaticForGas config', () => {
-    rm.setConfig({ minMaticForGas: 0.1 })
-    mockWalletState.balance = 0.05 // below custom 0.1 threshold
-    const result = rm.validateTrade(5)
-    expect(result.allowed).toBe(false)
-    expect(result.riskCode).toBe('INSUFFICIENT_GAS')
-  })
 
   // ────────────────────────────────────────────
   // Penny Trader Mode

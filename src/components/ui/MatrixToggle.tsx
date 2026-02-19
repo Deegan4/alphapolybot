@@ -12,7 +12,7 @@ interface MatrixToggleProps {
 }
 
 /**
- * MatrixToggle - ON/OFF switch with spring-animated thumb and gradient track
+ * MatrixToggle - ON/OFF switch with spring-animated thumb
  */
 export const MatrixToggle: React.FC<MatrixToggleProps> = ({
   enabled,
@@ -35,12 +35,12 @@ export const MatrixToggle: React.FC<MatrixToggleProps> = ({
       {(label || description) && (
         <div className="flex-1">
           {label && (
-            <span className="text-matrix-text-primary font-mono text-sm">
+            <span className="text-agent-text font-mono text-sm">
               {label}
             </span>
           )}
           {description && (
-            <p className="text-matrix-text-secondary text-xs mt-0.5">
+            <p className="text-agent-text-muted text-xs mt-0.5">
               {description}
             </p>
           )}
@@ -55,25 +55,20 @@ export const MatrixToggle: React.FC<MatrixToggleProps> = ({
         className={cn(
           'relative inline-flex shrink-0 cursor-pointer rounded-full',
           'border-2 border-transparent',
-          'focus:outline-none focus:ring-2 focus:ring-matrix-primary/50 focus:ring-offset-2 focus:ring-offset-matrix-bg',
+          'focus:outline-none focus:ring-2 focus:ring-agent-green/50 focus:ring-offset-2 focus:ring-offset-agent-bg',
           'disabled:opacity-50 disabled:cursor-not-allowed',
           track,
           enabled
-            ? 'bg-gradient-to-r from-matrix-primary to-matrix-cyan'
-            : 'bg-matrix-border'
+            ? 'bg-agent-green'
+            : 'bg-agent-border'
         )}
-        animate={{
-          boxShadow: enabled
-            ? '0 0 12px rgba(0, 255, 0, 0.5)'
-            : '0 0 0px rgba(0, 255, 0, 0)',
-        }}
         transition={{ duration: 0.2 }}
       >
-        <span className="sr-only">Toggle</span>
+        <span className="sr-only">{label ? `Toggle ${label}` : 'Toggle'}</span>
         <motion.span
           className={cn(
             'pointer-events-none inline-block rounded-full',
-            'bg-matrix-bg shadow-lg ring-0',
+            'bg-agent-bg shadow-lg ring-0',
             thumb
           )}
           animate={{ x: enabled ? offset : 2 }}

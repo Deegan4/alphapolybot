@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixToggle, MatrixBadge, MatrixStatsGrid, MatrixButton, AnimatedCounter } from '@/components/ui'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import { activityLogger } from '@/services/trading/ActivityLogger'
-import { positionLifecycleManager } from '@/services/trading'
+import { positionLifecycleManager, tradeLogger } from '@/services/trading'
 import type { ActivityItem } from '@/types'
 import { useWalletStore } from '@/stores'
 import { cn } from '@/utils/cn'
@@ -23,7 +23,7 @@ const itemVariants = {
  * Per spec: "Three-column layout: Market Discovery | Analysis | Activity Feed"
  */
 export const TradingTerminal: React.FC = () => {
-  const { isConnected, usdcBalance } = useWalletStore()
+  const { isConnected, balance: usdcBalance } = useWalletStore()
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [activities, setActivities] = useState<ActivityItem[]>([])
 
@@ -81,13 +81,18 @@ export const TradingTerminal: React.FC = () => {
     }
   }, [])
 
-  const combinedStats = strategyManager.getCombinedStats()
+  // Use TradeLogger (persistent IndexedDB) for real P&L stats instead of volatile in-memory _stats
+  const [tradeSummary, setTradeSummary] = useState(tradeLogger.getSummary())
+  useEffect(() => {
+    const id = setInterval(() => setTradeSummary(tradeLogger.getSummary()), 5000)
+    return () => clearInterval(id)
+  }, [])
 
   const stats: { label: string; value: string | number; variant?: 'profit' | 'loss' | 'default' }[] = [
     { label: 'Portfolio Value', value: `$${usdcBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}` },
-    { label: 'Total Trades', value: combinedStats.totalTrades },
-    { label: 'Win Rate', value: `${(combinedStats.winRate * 100).toFixed(1)}%` },
-    { label: 'P&L', value: `$${combinedStats.totalPnl.toFixed(2)}`, variant: combinedStats.totalPnl >= 0 ? 'profit' : 'loss' },
+    { label: 'Total Trades', value: tradeSummary.totalTrades },
+    { label: 'Win Rate', value: `${(tradeSummary.winRate * 100).toFixed(1)}%` },
+    { label: 'P&L', value: `$${tradeSummary.totalPnlUSD.toFixed(2)}`, variant: tradeSummary.totalPnlUSD >= 0 ? 'profit' : 'loss' },
   ]
 
   const anyRunning = strategies.some(s => s.enabled)
@@ -145,7 +150,7 @@ export const TradingTerminal: React.FC = () => {
       <MatrixStatsGrid stats={stats} />
 
       {/* Main 3-column layout */}
-      <div className="flex-1 grid grid-cols-3 gap-4 min-h-0">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 min-h-0">
         {/* Column 1: Strategy Controls — gradient variant */}
         <MatrixCard title="STRATEGIES" variant="gradient" className="flex flex-col min-h-0">
           <motion.div
@@ -185,9 +190,7 @@ export const TradingTerminal: React.FC = () => {
 
         {/* Column 3: Activity Feed — terminal variant (subdued) */}
         <MatrixCard title="ACTIVITY FEED" variant="terminal" className="flex flex-col min-h-0">
-          <div className="flex-1 overflow-auto">
-            <ActivityFeed entries={activities} />
-          </div>
+          <ActivityFeed entries={activities} />
         </MatrixCard>
       </div>
     </div>
@@ -398,6 +401,21 @@ const MarketAnalysisPanel: React.FC<{ isActive: boolean; entries: ActivityItem[]
  * Activity Feed Component
  */
 const ActivityFeed: React.FC<{ entries: ActivityItem[] }> = ({ entries }) => {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const autoScroll = useRef(true)
+
+  // Auto-scroll to top when new entries arrive (newest-first list)
+  useEffect(() => {
+    if (autoScroll.current && scrollRef.current) {
+      scrollRef.current.scrollTo({ top: 0 })
+    }
+  }, [entries])
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return
+    autoScroll.current = scrollRef.current.scrollTop < 60
+  }
+
   const getTypeStyles = (type: ActivityItem['type']) => {
     switch (type) {
       case 'trade': return 'text-matrix-primary border-matrix-primary/30'
@@ -422,7 +440,7 @@ const ActivityFeed: React.FC<{ entries: ActivityItem[] }> = ({ entries }) => {
 
   if (entries.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-matrix-text-secondary">
+      <div className="flex-1 flex items-center justify-center text-matrix-text-secondary">
         <div className="text-center">
           <div className="text-4xl mb-4 opacity-30">◇</div>
           <p className="text-sm font-sans">No activity yet</p>
@@ -433,33 +451,35 @@ const ActivityFeed: React.FC<{ entries: ActivityItem[] }> = ({ entries }) => {
   }
 
   return (
-    <motion.div
-      className="space-y-2"
-      variants={containerVariants}
-      initial="hidden"
-      animate="show"
-    >
-      {entries.map((entry) => (
-        <motion.div
-          key={entry.id}
-          variants={itemVariants}
-          className={cn(
-            'bg-matrix-bg/60 border-l-2 rounded-r px-3 py-2',
-            getTypeStyles(entry.type)
-          )}
-        >
-          <div className="flex items-start gap-2">
-            <span className="text-xs opacity-50">{getTypeIcon(entry.type)}</span>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-mono truncate">{entry.message}</p>
-              <p className="text-xs text-matrix-text-secondary font-sans">
-                {new Date(entry.timestamp).toLocaleTimeString()}
-              </p>
+    <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto min-h-0">
+      <motion.div
+        className="space-y-2 p-2"
+        variants={containerVariants}
+        initial="hidden"
+        animate="show"
+      >
+        {entries.map((entry) => (
+          <motion.div
+            key={entry.id}
+            variants={itemVariants}
+            className={cn(
+              'bg-matrix-bg/60 border-l-2 rounded-r px-3 py-2',
+              getTypeStyles(entry.type)
+            )}
+          >
+            <div className="flex items-start gap-2">
+              <span className="text-xs opacity-50">{getTypeIcon(entry.type)}</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-mono truncate">{entry.message}</p>
+                <p className="text-xs text-matrix-text-secondary font-sans">
+                  {new Date(entry.timestamp).toLocaleTimeString()}
+                </p>
+              </div>
             </div>
-          </div>
-        </motion.div>
-      ))}
-    </motion.div>
+          </motion.div>
+        ))}
+      </motion.div>
+    </div>
   )
 }
 

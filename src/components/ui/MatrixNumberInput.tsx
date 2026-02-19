@@ -75,7 +75,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const val = e.target.value
       setInternalValue(val)
-      
+
       if (val === '' || val === '-') {
         onChange?.(undefined)
       } else {
@@ -111,7 +111,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
         {label && (
           <label
             htmlFor={inputId}
-            className="mb-1 block text-xs font-medium uppercase tracking-wider text-matrix-muted"
+            className="mb-1 block text-xs font-medium uppercase tracking-wider text-agent-text-label"
           >
             {label}
           </label>
@@ -125,9 +125,9 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
               disabled={disabled || (min !== undefined && parseFloat(currentValue) <= min)}
               className={cn(
                 'flex h-10 w-10 items-center justify-center',
-                'rounded-l border border-r-0 border-matrix-border bg-matrix-bg',
-                'text-matrix-muted transition-colors',
-                'hover:border-matrix-primary/50 hover:text-matrix-primary',
+                'rounded-l border border-r-0 border-agent-border bg-agent-bg',
+                'text-agent-text-label transition-colors',
+                'hover:border-agent-green/50 hover:text-agent-green',
                 'disabled:cursor-not-allowed disabled:opacity-50'
               )}
             >
@@ -140,7 +140,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
           {/* Input container */}
           <div className="relative flex-1">
             {prefix && (
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm text-matrix-muted">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm text-agent-text-label">
                 {prefix}
               </span>
             )}
@@ -154,15 +154,15 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
               onBlur={handleBlur}
               disabled={disabled}
               className={cn(
-                'h-10 w-full border border-matrix-border bg-matrix-bg',
-                'px-3 text-center font-mono text-sm text-matrix-primary',
-                'placeholder:text-matrix-muted/50',
-                'focus:border-matrix-primary/50 focus:outline-none',
-                'focus:shadow-[0_0_10px_rgba(0,255,0,0.2)]',
+                'h-10 w-full border border-agent-border bg-agent-bg',
+                'px-3 text-center font-mono text-sm text-agent-green',
+                'placeholder:text-agent-text-label/50',
+                'focus:border-agent-green/50 focus:outline-none',
+                'focus:ring-1 focus:ring-agent-green/30',
                 'disabled:cursor-not-allowed disabled:opacity-50',
                 'transition-all duration-200',
                 !showControls && 'rounded',
-                error && 'border-matrix-red',
+                error && 'border-agent-red',
                 prefix && 'pl-8',
                 suffix && 'pr-8',
                 className
@@ -170,7 +170,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
               {...props}
             />
             {suffix && (
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-sm text-matrix-muted">
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-sm text-agent-text-label">
                 {suffix}
               </span>
             )}
@@ -184,9 +184,9 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
               disabled={disabled || (max !== undefined && parseFloat(currentValue) >= max)}
               className={cn(
                 'flex h-10 w-10 items-center justify-center',
-                'rounded-r border border-l-0 border-matrix-border bg-matrix-bg',
-                'text-matrix-muted transition-colors',
-                'hover:border-matrix-primary/50 hover:text-matrix-primary',
+                'rounded-r border border-l-0 border-agent-border bg-agent-bg',
+                'text-agent-text-label transition-colors',
+                'hover:border-agent-green/50 hover:text-agent-green',
                 'disabled:cursor-not-allowed disabled:opacity-50'
               )}
             >
@@ -200,7 +200,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
           <p
             className={cn(
               'mt-1 text-xs',
-              error ? 'text-matrix-red' : 'text-matrix-muted'
+              error ? 'text-agent-red' : 'text-agent-text-label'
             )}
           >
             {error ?? hint}

@@ -50,8 +50,43 @@ vi.mock('../ActivityLogger', () => ({
   },
 }))
 
-// Strategies mock no longer needed — PLM no longer notifies strategy of close
-// (LLMPredictionStrategy now queries PLM directly for position count)
+// Mock stores (PLM reads dryRun from settingsStore)
+const mockDryRun = { value: false }
+vi.mock('@/stores', () => ({
+  useSettingsStore: {
+    getState: () => ({ dryRun: mockDryRun.value }),
+  },
+  useWalletStore: {
+    getState: () => ({}),
+    subscribe: vi.fn(),
+  },
+}))
+
+// Mock US client (PLM fetches positions/markets via dynamic import)
+vi.mock('@/services/api', () => ({
+  polymarketUSClient: {
+    getPositions: vi.fn().mockResolvedValue([]),
+    getMarketBySlug: vi.fn().mockResolvedValue(null),
+  },
+}))
+
+// Mock storage (PLM persists positions via dynamic import — prevent unhandled rejections)
+vi.mock('@/services/storage', () => ({
+  indexedDBService: {
+    storePosition: vi.fn().mockResolvedValue(undefined),
+    removePosition: vi.fn().mockResolvedValue(undefined),
+    loadPositions: vi.fn().mockResolvedValue([]),
+  },
+}))
+
+// Mock TradeLogger (used in executeSell path)
+vi.mock('../TradeLogger', () => ({
+  tradeLogger: {
+    findOpenRecord: vi.fn(),
+    logEntry: vi.fn(),
+    logExit: vi.fn(),
+  },
+}))
 
 // ==========================================
 // HELPERS
@@ -59,9 +94,7 @@ vi.mock('../ActivityLogger', () => ({
 
 function makePosition(overrides: Partial<TrackedPosition> = {}): TrackedPosition {
   return {
-    tokenId: 'token-abc-123',
-    marketId: 'market-1',
-    conditionId: 'cond-1',
+    marketSlug: 'will-btc-exceed-100k',
     outcome: 'yes',
     question: 'Will BTC exceed $100k by end of month?',
     entryPrice: 0.50,
@@ -84,6 +117,7 @@ describe('PositionLifecycleManager', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockDryRun.value = false
     plm = new PositionLifecycleManager()
   })
 
@@ -111,20 +145,20 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(pos)
 
       expect(plm.count).toBe(1)
-      expect(mockSubscribeMarket).toHaveBeenCalledWith('token-abc-123')
+      expect(mockSubscribeMarket).toHaveBeenCalledWith('will-btc-exceed-100k')
     })
 
     it('tracks multiple positions', () => {
-      plm.trackPosition(makePosition({ tokenId: 'a' }))
-      plm.trackPosition(makePosition({ tokenId: 'b' }))
-      plm.trackPosition(makePosition({ tokenId: 'c' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-b' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-c' }))
 
       expect(plm.count).toBe(3)
     })
 
-    it('overwrites position with same tokenId', () => {
-      plm.trackPosition(makePosition({ tokenId: 'a', entryPrice: 0.40 }))
-      plm.trackPosition(makePosition({ tokenId: 'a', entryPrice: 0.60 }))
+    it('overwrites position with same marketSlug', () => {
+      plm.trackPosition(makePosition({ marketSlug: 'market-a', entryPrice: 0.40 }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a', entryPrice: 0.60 }))
 
       expect(plm.count).toBe(1)
       const positions = plm.getPositions()
@@ -137,12 +171,12 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition())
       expect(plm.count).toBe(1)
 
-      plm.removePosition('token-abc-123')
+      plm.removePosition('will-btc-exceed-100k')
       expect(plm.count).toBe(0)
-      expect(mockUnsubscribeMarket).toHaveBeenCalledWith('token-abc-123')
+      expect(mockUnsubscribeMarket).toHaveBeenCalledWith('will-btc-exceed-100k')
     })
 
-    it('does nothing for unknown tokenId', () => {
+    it('does nothing for unknown marketSlug', () => {
       plm.removePosition('nonexistent')
       expect(plm.count).toBe(0)
     })
@@ -160,8 +194,8 @@ describe('PositionLifecycleManager', () => {
 
       expect(positions).toHaveLength(1)
       expect(positions[0].currentPrice).toBe(0.60)
-      expect(positions[0].pnlPercent).toBeCloseTo(0.20) // +20%
-      expect(positions[0].pnlUsd).toBeCloseTo(1.0) // (0.60 - 0.50) * 10
+      expect(positions[0].pnlPercent).toBeCloseTo(0.20) // +20% gross (fees deducted at sell, not display)
+      expect(positions[0].pnlUsd).toBeCloseTo(1.00) // 10 shares * ($0.60 - $0.50)
       expect(positions[0].isStale).toBe(false)
     })
 
@@ -184,7 +218,7 @@ describe('PositionLifecycleManager', () => {
       const positions = plm.getPositions()
 
       expect(positions[0].currentPrice).toBe(0.50)
-      expect(positions[0].pnlPercent).toBe(0)
+      expect(positions[0].pnlPercent).toBeCloseTo(0) // 0% gross (no fee subtraction on display)
     })
   })
 
@@ -201,13 +235,13 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Simulate price update: 0.50 → 0.40 = -20% (exceeds -15% stop-loss)
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       // Give async sell time to complete
-      // placeSell(tokenId, size, price?, negRisk?) — price=undefined, negRisk=undefined
+      // placeSell(slug, outcome, size, price?, orderType?) — GTC for exit sells
       await vi.waitFor(() => {
-        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined)
+        expect(mockPlaceSell).toHaveBeenCalledWith('will-btc-exceed-100k', 'yes', 10, undefined, 'GTC')
       })
     })
 
@@ -219,8 +253,8 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Simulate price update: 0.50 → 0.45 = -10% (within -15% threshold)
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.45, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.45, timestamp: new Date() })
 
       expect(mockPlaceSell).not.toHaveBeenCalled()
     })
@@ -239,11 +273,11 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Simulate price update: 0.50 → 0.70 = +40% (exceeds +30% take-profit)
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.70, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.70, timestamp: new Date() })
 
       await vi.waitFor(() => {
-        expect(mockPlaceSell).toHaveBeenCalledWith('token-abc-123', 10, undefined, undefined)
+        expect(mockPlaceSell).toHaveBeenCalledWith('will-btc-exceed-100k', 'yes', 10, undefined, 'GTC')
       })
     })
   })
@@ -262,8 +296,8 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition({ entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
 
       // Trigger stop-loss
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       // Wait for first (failed) sell
       await vi.advanceTimersByTimeAsync(100)
@@ -288,11 +322,11 @@ describe('PositionLifecycleManager', () => {
       plm.initialize()
       plm.trackPosition(makePosition({ entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
 
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
 
       // Rapid-fire two price updates that both breach stop-loss
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
-      priceCallback('token-abc-123', { mid: 0.38, timestamp: new Date() })
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
+      priceCallback('will-btc-exceed-100k', { mid: 0.38, timestamp: new Date() })
 
       // Only ONE sell call should have been made
       await vi.waitFor(() => {
@@ -309,12 +343,12 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition())
       expect(plm.count).toBe(1)
 
-      const result = await plm.forceClosePosition('token-abc-123')
+      const result = await plm.forceClosePosition('will-btc-exceed-100k')
       expect(result).toBe(true)
       expect(plm.count).toBe(0)
     })
 
-    it('returns false for unknown tokenId', async () => {
+    it('returns false for unknown marketSlug', async () => {
       const result = await plm.forceClosePosition('nonexistent')
       expect(result).toBe(false)
     })
@@ -325,9 +359,9 @@ describe('PositionLifecycleManager', () => {
       mockPlaceSell.mockResolvedValue({ success: true, orderId: 'sell' })
       mockGetPrice.mockReturnValue({ mid: 0.55, timestamp: new Date() })
 
-      plm.trackPosition(makePosition({ tokenId: 'a' }))
-      plm.trackPosition(makePosition({ tokenId: 'b' }))
-      plm.trackPosition(makePosition({ tokenId: 'c' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-b' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-c' }))
       expect(plm.count).toBe(3)
 
       const result = await plm.forceCloseAll()
@@ -342,8 +376,8 @@ describe('PositionLifecycleManager', () => {
         .mockResolvedValueOnce({ success: false, error: 'failed' })
       mockGetPrice.mockReturnValue({ mid: 0.55, timestamp: new Date() })
 
-      plm.trackPosition(makePosition({ tokenId: 'a' }))
-      plm.trackPosition(makePosition({ tokenId: 'b' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-a' }))
+      plm.trackPosition(makePosition({ marketSlug: 'market-b' }))
 
       const result = await plm.forceCloseAll()
       expect(result.closed).toBe(1)
@@ -358,7 +392,7 @@ describe('PositionLifecycleManager', () => {
 
       plm.trackPosition(makePosition())
       expect(callback).toHaveBeenCalledTimes(1)
-      expect(callback).toHaveBeenCalledWith([expect.objectContaining({ tokenId: 'token-abc-123' })])
+      expect(callback).toHaveBeenCalledWith([expect.objectContaining({ marketSlug: 'will-btc-exceed-100k' })])
     })
 
     it('fires when position is removed', () => {
@@ -368,7 +402,7 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition())
       plm.onChange(callback)
 
-      plm.removePosition('token-abc-123')
+      plm.removePosition('will-btc-exceed-100k')
       expect(callback).toHaveBeenCalledWith([])
     })
 
@@ -395,8 +429,8 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Trigger stop-loss: 0.50 → 0.40 = -20%
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       await vi.waitFor(() => {
         // pnlUsd = (0.40 - 0.50) * 10 = -1.0
@@ -416,8 +450,8 @@ describe('PositionLifecycleManager', () => {
       }))
 
       // Trigger take-profit: 0.50 → 0.70 = +40%
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.70, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.70, timestamp: new Date() })
 
       await vi.waitFor(() => {
         // pnlUsd = (0.70 - 0.50) * 10 = 2.0
@@ -435,17 +469,18 @@ describe('PositionLifecycleManager', () => {
       plm.trackPosition(makePosition({ entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
 
       // Trigger stop-loss
-      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (tokenId: string, data: unknown) => void
-      priceCallback('token-abc-123', { mid: 0.40, timestamp: new Date() })
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
 
       // Advance through all 3 retries (attempt 1 + backoff 2s + attempt 2 + backoff 4s + attempt 3)
       await vi.advanceTimersByTimeAsync(100)   // attempt 1 resolves
       await vi.advanceTimersByTimeAsync(2100)  // retry backoff, attempt 2
       await vi.advanceTimersByTimeAsync(4100)  // retry backoff, attempt 3
 
-      expect(mockRecordTradeResult).toHaveBeenCalledWith(false)
+      expect(mockRecordTradeResult).toHaveBeenCalledWith(false, 0, 'structural')
 
       vi.useRealTimers()
     })
   })
+
 })

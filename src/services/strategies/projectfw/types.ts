@@ -62,6 +62,15 @@ export interface MarketSnapshot {
   marketId: string
 }
 
+/**
+ * Arbitrage type per Bregman Projection paper formula:
+ *   π_i(t) = max(0, |p_i(t) − k| − N_i · γ_i)
+ *
+ * - 'underpriced': askSum < $1.00 → buy all outcomes, merge for $1
+ * - 'overpriced':  bidSum > $1.00 → Buy-a-Bundle at $1, sell at bids
+ */
+export type ArbType = 'underpriced' | 'overpriced'
+
 /** An arbitrage opportunity found by the scanner */
 export interface ArbOpportunity {
   /** The market with incoherent prices */
@@ -70,8 +79,12 @@ export interface ArbOpportunity {
   snapshot: MarketSnapshot
   /** Optimization result with profit guarantee */
   result: FWOptimizationResult
-  /** Net profit after fees and gas (in USD) */
+  /** Net profit after fees and gas (in USD), computed via paper's π formula */
   netProfitUSD: number
+  /** Which arbitrage path: underpriced (buy-merge) or overpriced (bundle-sell) */
+  arbType?: ArbType
+  /** Per-token fee rate used for profit calculation (bps). Fetched dynamically per market. */
+  feeRateBps?: number
 }
 
 /** FW optimizer configuration */

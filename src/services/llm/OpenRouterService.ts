@@ -1,5 +1,6 @@
 import type { Market, PredictionResult, AnalysisRecord, LLMConfig } from '@/types'
 import type { MarketDependency, DependencyType } from '@/services/strategies/projectfw/crossmarket/types'
+import { formatContextForPrompt, formatCryptoDataForPrompt, type MarketContext } from './MarketContextBuilder'
 
 /**
  * OpenRouter LLM Service
@@ -13,13 +14,14 @@ import type { MarketDependency, DependencyType } from '@/services/strategies/pro
  */
 export class OpenRouterService {
   private apiKey: string
-  private baseUrl = 'https://openrouter.ai/api/v1'
+  private baseUrl = import.meta.env.VITE_OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1'
   private analysisHistory: AnalysisRecord[] = []
 
   // Cost tracking — partitioned daily budget enforcement
   private budgets: Record<string, { limit: number; spent: number; calls: number; lastReset: string }> = {
     prediction:  { limit: 1.00, spent: 0, calls: 0, lastReset: '' },
     crossMarket: { limit: 0.50, spent: 0, calls: 0, lastReset: '' },
+    premium:     { limit: 0.50, spent: 0, calls: 0, lastReset: '' },
   }
   private totalSpendUSD = 0               // Lifetime spend across all buckets (session only)
 
@@ -88,7 +90,7 @@ export class OpenRouterService {
   /**
    * Analyze a market and predict the outcome
    */
-  async analyzeMarket(market: Market): Promise<PredictionResult> {
+  async analyzeMarket(market: Market, context?: MarketContext): Promise<PredictionResult> {
     const startTime = Date.now()
 
     if (!this.apiKey) {
@@ -106,11 +108,26 @@ export class OpenRouterService {
     }
 
     try {
-      const prompt = this.buildAnalysisPrompt(market)
-      const response = await this.callOpenRouter(prompt)
+      const prompt = this.buildAnalysisPrompt(market, context)
 
-      // Track cost from API response (prediction bucket)
-      this.recordCost(response.cost, 'prediction')
+      // Premium model tiering: use expensive model for high-quality markets
+      let modelOverride: string | undefined
+      let budgetBucket = 'prediction'
+      const premiumModel = this.config.premiumModel
+      const premiumThreshold = this.config.premiumModelThreshold ?? 25
+      if (premiumModel && context?.qualityScore != null && context.qualityScore >= premiumThreshold) {
+        this.maybeResetBucket('premium')
+        const premBudget = this.budgets.premium
+        if (premBudget.spent < premBudget.limit) {
+          modelOverride = premiumModel
+          budgetBucket = 'premium'
+        }
+      }
+
+      const response = await this.callOpenRouter(prompt, modelOverride)
+
+      // Track cost from API response
+      this.recordCost(response.cost, budgetBucket)
 
       const result = this.parsePrediction(response.message)
       
@@ -147,11 +164,61 @@ export class OpenRouterService {
   }
 
   /**
+   * Analyze a crypto prediction market using real-time BinanceWS data.
+   * Uses crypto-specific prompt template with live price/volume data.
+   */
+  async analyzeCryptoMarket(market: Market, context?: MarketContext, cryptoModel?: string): Promise<PredictionResult> {
+    const startTime = Date.now()
+
+    if (!this.apiKey) {
+      throw new Error('OpenRouter API key not configured')
+    }
+
+    this.maybeResetBucket('prediction')
+    const predBudget = this.budgets.prediction
+    if (predBudget.spent >= predBudget.limit) {
+      throw new Error(`Daily LLM budget exhausted: $${predBudget.spent.toFixed(2)} / $${predBudget.limit.toFixed(2)}`)
+    }
+
+    try {
+      const prompt = this.buildCryptoPrompt(market, context)
+      const modelOverride = cryptoModel || undefined
+      const response = await this.callOpenRouter(prompt, modelOverride)
+      this.recordCost(response.cost, 'prediction')
+      const result = this.parsePrediction(response.message)
+      result.analysisTime = Date.now() - startTime
+
+      const record: AnalysisRecord = {
+        id: crypto.randomUUID(),
+        marketId: market.id,
+        marketQuestion: market.question,
+        prediction: result,
+        timestamp: new Date(),
+      }
+      this.analysisHistory.push(record)
+      if (this.analysisHistory.length > 200) {
+        this.analysisHistory = this.analysisHistory.slice(-200)
+      }
+
+      return result
+    } catch (error) {
+      console.error('Crypto LLM analysis failed:', error)
+      return {
+        predictedOutcome: 'yes',
+        confidence: 0.1,
+        reasoning: `Crypto analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        sources: [],
+        analysisTime: Date.now() - startTime,
+      }
+    }
+  }
+
+  /**
    * Get a second opinion from a different model for signal fusion.
    * Used selectively on borderline or high-stakes trades.
    * Returns null if budget exhausted or API fails (non-blocking).
    */
-  async getSecondOpinion(market: Market): Promise<PredictionResult | null> {
+  async getSecondOpinion(market: Market, context?: MarketContext): Promise<PredictionResult | null> {
     // Budget check (uses prediction bucket)
     this.maybeResetBucket('prediction')
     const predBudget = this.budgets.prediction
@@ -161,12 +228,30 @@ export class OpenRouterService {
     }
 
     // Use a different model for diversity
-    const secondaryModel = this.config.model.includes('llama')
+    const baseSecondaryModel = this.config.model.includes('llama')
       ? 'google/gemma-2-9b-it'       // If primary is Llama, use Gemma
       : 'meta-llama/llama-3.1-70b-instruct' // Otherwise use Llama
+    const secondaryModel = this.config.webSearchEnabled
+      ? `${baseSecondaryModel}:online`
+      : baseSecondaryModel
 
     try {
-      const prompt = this.buildAnalysisPrompt(market)
+      const prompt = this.buildAnalysisPrompt(market, context)
+      const body: Record<string, unknown> = {
+        model: secondaryModel,
+        messages: [
+          { role: 'system', content: this.config.webSearchEnabled
+            ? 'Market analyst with web research. Use search results to make informed predictions. JSON only.'
+            : 'Market analyst. JSON only.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: this.config.temperature,
+        max_tokens: this.config.webSearchEnabled ? 600 : this.config.maxTokens,
+      }
+      if (this.config.webSearchEnabled) {
+        body.plugins = [{ id: 'web', max_results: 3 }]
+      }
+
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -175,15 +260,7 @@ export class OpenRouterService {
           'HTTP-Referer': window.location.origin,
           'X-Title': 'AlphaPolyBot - Signal Fusion',
         },
-        body: JSON.stringify({
-          model: secondaryModel,
-          messages: [
-            { role: 'system', content: 'Market analyst. JSON only.' },
-            { role: 'user', content: prompt },
-          ],
-          temperature: this.config.temperature,
-          max_tokens: this.config.maxTokens,
-        }),
+        body: JSON.stringify(body),
       })
 
       if (!response.ok) return null
@@ -198,12 +275,68 @@ export class OpenRouterService {
       } else if (data.usage) {
         cost = (data.usage.prompt_tokens ?? 0) / 1000 * 0.00059 +
                (data.usage.completion_tokens ?? 0) / 1000 * 0.00079
+        if (this.config.webSearchEnabled) {
+          cost += 0.012 // Exa search cost
+        }
       }
       this.recordCost(cost, 'prediction')
 
       return this.parsePrediction(data.choices[0].message)
     } catch {
       return null
+    }
+  }
+
+  /**
+   * Analyze a crypto signal for the BTC Up/Down strategy.
+   * Takes a pre-built prompt (strategy builds it with signal context).
+   * Returns confirmation/adjustment or null on any failure (fail-open).
+   * Uses prediction budget bucket. Accepts optional model override (e.g. deepseek/deepseek-r1).
+   */
+  async analyzeCryptoSignal(prompt: string, model?: string): Promise<{
+    confirm: boolean
+    adjustment: number  // -20 to +20 confidence adjustment
+    reasoning: string
+  } | null> {
+    if (!this.apiKey) return null
+
+    // Budget check (prediction bucket)
+    this.maybeResetBucket('prediction')
+    const predBudget = this.budgets.prediction
+    if (predBudget.spent >= predBudget.limit) {
+      console.warn('[analyzeCryptoSignal] Budget exhausted')
+      return null
+    }
+
+    const modelOverride = model || undefined
+
+    try {
+      const response = await this.callOpenRouter(prompt, modelOverride, {
+        systemPrompt: 'Crypto signal analyst. Confirm or reject trading signals. JSON only.',
+        temperature: 0.2,
+        title: 'AlphaPolyBot - Crypto Signal Confirmation',
+      })
+      this.recordCost(response.cost, 'prediction')
+
+      // Strip <think>...</think> blocks from reasoning models (e.g. DeepSeek R1)
+      // then extract JSON: {"confirm": true/false, "confidence_adjustment": -20 to +20, "reasoning": "..."}
+      let content = response.message.content
+      content = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+      const jsonMatch = content.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) {
+        console.warn('[analyzeCryptoSignal] No JSON in response:', content.slice(0, 200))
+        return null
+      }
+
+      const parsed = JSON.parse(jsonMatch[0])
+      return {
+        confirm: Boolean(parsed.confirm),
+        adjustment: Math.max(-20, Math.min(20, Number(parsed.confidence_adjustment) || 0)),
+        reasoning: String(parsed.reasoning || '').slice(0, 200),
+      }
+    } catch (error) {
+      console.warn('[analyzeCryptoSignal] Failed:', error instanceof Error ? error.message : error)
+      return null // Fail-open: any error means proceed with mechanical signal
     }
   }
 
@@ -236,50 +369,130 @@ export class OpenRouterService {
   /**
    * Build the analysis prompt
    */
-  private buildAnalysisPrompt(market: Market): string {
+  private buildAnalysisPrompt(market: Market, context?: MarketContext): string {
     const odds = market.outcomePrices || [0.5, 0.5]
     const desc = market.description
       ? `\nContext: ${market.description.substring(0, 150)}`
       : ''
+
+    // Build market signals section from context (if available)
+    let signalsSection = ''
+    if (context) {
+      signalsSection = formatContextForPrompt(context)
+    }
+
+    // When web search is enabled, use an expanded prompt that instructs the LLM
+    // to research the topic using injected search results before predicting.
+    if (this.config.webSearchEnabled) {
+      const today = new Date().toISOString().slice(0, 10)
+      return `You are a prediction market analyst. Today is ${today}. Research this question using web search results, then predict the outcome.
+
+MARKET: "${market.question}"
+- ${market.outcomes?.[0] || 'Yes'}: ${(odds[0] * 100).toFixed(1)}% current odds
+- ${market.outcomes?.[1] || 'No'}: ${(odds[1] * 100).toFixed(1)}% current odds
+- Volume: $${market.volume?.toLocaleString() || '?'}, Liquidity: $${market.liquidity?.toLocaleString() || '?'}${desc}${signalsSection}
+
+Instructions:
+1. Search for the latest news, polls, expert analysis, or data relevant to this question
+2. Assess whether the current market odds are accurate or mispriced
+3. If you find strong evidence for one side, predict that side with high confidence
+4. If evidence is mixed or insufficient, respond with low confidence
+
+Respond ONLY with JSON:
+{"prediction":"yes|no","confidence":0-100,"reasoning":"2-3 sentences citing evidence found","sources":["url1","url2"]}`
+    }
 
     return `Predict this market outcome. Respond ONLY with JSON.
 
 Q: "${market.question}"
 - ${market.outcomes?.[0] || 'Yes'}: ${(odds[0] * 100).toFixed(1)}%
 - ${market.outcomes?.[1] || 'No'}: ${(odds[1] * 100).toFixed(1)}%
-- Vol: $${market.volume?.toLocaleString() || '?'}, Liq: $${market.liquidity?.toLocaleString() || '?'}${desc}
+- Vol: $${market.volume?.toLocaleString() || '?'}, Liq: $${market.liquidity?.toLocaleString() || '?'}${desc}${signalsSection}
 
 {"prediction":"yes|no","confidence":0-100,"reasoning":"1 sentence"}`
+  }
+
+  /**
+   * Build crypto-specific analysis prompt with live BinanceWS data.
+   */
+  private buildCryptoPrompt(market: Market, context?: MarketContext): string {
+    const odds = market.outcomePrices || [0.5, 0.5]
+    const today = new Date().toISOString().slice(0, 10)
+
+    const cryptoDataSection = formatCryptoDataForPrompt(market)
+    let signalsSection = ''
+    if (context) {
+      signalsSection = formatContextForPrompt(context)
+    }
+
+    return `You are a crypto prediction market analyst. Today is ${today}.
+
+MARKET: "${market.question}" (Polymarket crypto category)
+- ${market.outcomes?.[0] || 'Yes'}: ${(odds[0] * 100).toFixed(1)}% | ${market.outcomes?.[1] || 'No'}: ${(odds[1] * 100).toFixed(1)}%
+- Vol: $${market.volume?.toLocaleString() || '?'}, Liq: $${market.liquidity?.toLocaleString() || '?'}${cryptoDataSection}${signalsSection}
+
+Analyze whether current crypto conditions favor YES or NO.
+Consider: price momentum, volatility regime, volume trends, and whether the market odds reflect current conditions.
+If volatility is high, give lower confidence. If momentum strongly aligns with one outcome, increase confidence.
+
+Respond ONLY with JSON:
+{"prediction":"yes|no","confidence":0-100,"reasoning":"2-3 sentences analyzing crypto data"}`
   }
 
   /**
    * Call OpenRouter API
    * Returns the message content and cost info for budget tracking.
    */
-  private async callOpenRouter(prompt: string): Promise<{ message: { content: string }; cost: number }> {
+  private async callOpenRouter(prompt: string, modelOverride?: string, opts?: {
+    systemPrompt?: string
+    temperature?: number
+    maxTokens?: number
+    title?: string
+  }): Promise<{ message: { content: string; annotations?: Array<{ type: string; url?: string; title?: string }> }; cost: number }> {
+    // When web search is enabled, append :online to model slug and add plugins config
+    const baseModel = modelOverride || this.config.model
+    const model = this.config.webSearchEnabled
+      ? `${baseModel}:online`
+      : baseModel
+
+    // Reasoning models (e.g. DeepSeek R1) need much larger output budgets for <think> blocks
+    const isReasoningModel = model.includes('deepseek-r1') || model.includes('o1') || model.includes('o3')
+    const defaultMaxTokens = this.config.webSearchEnabled ? 600
+      : modelOverride ? 600  // Premium models get larger output budget
+      : this.config.maxTokens
+
+    const body: Record<string, unknown> = {
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: opts?.systemPrompt ?? (this.config.webSearchEnabled
+            ? 'Market analyst with web research. Use search results to make informed predictions. JSON only.'
+            : 'Market analyst. JSON only.'),
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      temperature: opts?.temperature ?? this.config.temperature,
+      max_tokens: isReasoningModel ? 4000 : (opts?.maxTokens ?? defaultMaxTokens),
+    }
+
+    // Add web search plugin config for result count control
+    if (this.config.webSearchEnabled) {
+      body.plugins = [{ id: 'web', max_results: 3 }]
+    }
+
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
         'HTTP-Referer': window.location.origin,
-        'X-Title': 'AlphaPolyBot - Polymarket LLM Trading',
+        'X-Title': opts?.title ?? 'AlphaPolyBot - Polymarket LLM Trading',
       },
-      body: JSON.stringify({
-        model: this.config.model,
-        messages: [
-          {
-            role: 'system',
-            content: 'Market analyst. JSON only.',
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-        temperature: this.config.temperature,
-        max_tokens: this.config.maxTokens,
-      }),
+      body: JSON.stringify(body),
     })
 
     if (!response.ok) {
@@ -295,6 +508,7 @@ Q: "${market.question}"
 
     // Extract cost: OpenRouter returns usage.total_cost (in USD) when available.
     // Fall back to token-count estimate: ~$0.00059 per 1K input + $0.00079 per 1K output (Llama 3.1 70B rates).
+    // When web search is enabled, add Exa search cost: $0.004 per result × 3 results = $0.012.
     let cost = 0
     if (data.usage?.total_cost != null) {
       cost = data.usage.total_cost
@@ -302,6 +516,9 @@ Q: "${market.question}"
       const inputTokens = data.usage.prompt_tokens ?? 0
       const outputTokens = data.usage.completion_tokens ?? 0
       cost = (inputTokens / 1000) * 0.00059 + (outputTokens / 1000) * 0.00079
+      if (this.config.webSearchEnabled) {
+        cost += 0.012 // Exa search: $0.004/result × 3 results
+      }
     }
 
     return { message: data.choices[0].message, cost }
@@ -310,13 +527,13 @@ Q: "${market.question}"
   /**
    * Parse the LLM response into a prediction
    */
-  private parsePrediction(response: { content: string }): PredictionResult {
+  private parsePrediction(response: { content: string; annotations?: Array<{ type: string; url?: string; title?: string }> }): PredictionResult {
     const content = response.content || ''
-    
+
     try {
       // Try to extract JSON from the response
       const jsonMatch = content.match(/\{[\s\S]*\}/)
-      
+
       if (!jsonMatch) {
         throw new Error('No JSON found in response')
       }
@@ -334,11 +551,18 @@ Q: "${market.question}"
         throw new Error(`Invalid confidence: ${parsed.confidence}`)
       }
 
+      // Merge sources from JSON response and OpenRouter web search annotations
+      const jsonSources: string[] = Array.isArray(parsed.sources) ? parsed.sources.map(String) : []
+      const annotationSources: string[] = (response.annotations || [])
+        .filter(a => a.type === 'url_citation' && a.url)
+        .map(a => a.url as string)
+      const allSources = [...new Set([...jsonSources, ...annotationSources])]
+
       return {
         predictedOutcome: prediction as 'yes' | 'no',
         confidence: confidence / 100, // Convert to 0-1 scale
         reasoning: String(parsed.reasoning || 'No reasoning provided'),
-        sources: Array.isArray(parsed.sources) ? parsed.sources.map(String) : [],
+        sources: allSources,
         analysisTime: 0,
       }
     } catch (parseError) {

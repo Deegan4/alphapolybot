@@ -52,7 +52,7 @@ export const AnimatedCounter: React.FC<AnimatedCounterProps> = ({
     <motion.span
       className={cn(
         'tabular-nums font-mono',
-        colorBySign && value >= 0 && 'text-matrix-primary',
+        colorBySign && value >= 0 && 'text-agent-green',
         colorBySign && value < 0 && 'text-red-400',
         className
       )}

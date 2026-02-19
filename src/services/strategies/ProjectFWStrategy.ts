@@ -6,17 +6,15 @@ import { EventAnalyzer } from './projectfw/crossmarket/EventAnalyzer'
 import { DependencyClassifier } from './projectfw/crossmarket/DependencyClassifier'
 import { MutexValidator } from './projectfw/crossmarket/MutexValidator'
 import type { ProjectFWConfig, FWArbRound, FWArbLeg, PriceData } from '@/types'
-import { gammaClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { tradingService } from '@/services/trading/TradingService'
-import { walletService } from '@/services/wallet'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import { openRouterService } from '@/services/llm/OpenRouterService'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
 import { KellySizer } from '@/services/trading/KellySizer'
-import { gasOracle } from '@/services/trading/GasOracle'
 import { tradeLogger } from '@/services/trading/TradeLogger'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 const DEFAULT_CONFIG: ProjectFWConfig = {
   // Algorithm parameters
@@ -25,8 +23,8 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
   epsilon0: 0.1,
   maxIterations: 50,
   // Trading parameters
-  tradeSize: 3,
-  minProfitBps: 50,
+  tradeSize: 5, // Polymarket minimum order size is 5 shares
+  minProfitBps: 30, // 30bps — catches thin-edge arbs at small bankroll ($10-25)
   maxConcurrentArbs: 2,
   scanIntervalMs: 30000, // 30s (was 15s) — gives time for 75 order book checks
   cooldownMs: 60000,
@@ -46,7 +44,7 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
   takeProfitPercent: 0.10,
   // Cross-market analysis (validation-only MVP)
   enableCrossMarket: false,
-  crossMarketBudgetUSD: 0.50,
+  crossMarketBudgetUSD: 0.25,
   mutexConfidenceThreshold: 0.75,
   crossMarketCacheTTL: 3_600_000,
   maxPairsPerLLMCall: 10,
@@ -67,8 +65,11 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
  * 1. Periodic scan discovers markets with incoherent prices
  * 2. FrankWolfeOptimizer computes optimal trade bundle
  * 3. ArbitrageScanner verifies profitability after fees
- * 4. Strategy executes multi-leg buy (all outcomes) then merges to USDC
- * 5. If merge fails, positions tracked by PLM as safety net
+ * 4. Strategy executes multi-leg buy (all outcomes)
+ * 5. Positions held until resolution ($1/set) — tracked by PLM
+ *
+ * PM US architecture: No on-chain merge/split. Profit is realized at resolution.
+ * Overpriced path (bidSum > 1.0) is not available — requires on-chain bundle split.
  */
 export class ProjectFWStrategy extends BaseStrategy {
   name = 'ProjectFW Arb'
@@ -104,6 +105,8 @@ export class ProjectFWStrategy extends BaseStrategy {
         gasEstimateUSD: this.fwConfig.gasEstimateUSD,
         enableMultiOutcome: this.fwConfig.enableMultiOutcome,
         tradeSize: this.fwConfig.tradeSize,
+        maxConcurrency: 10,
+        maxOpportunitiesPerScan: 5,
       }
     )
   }
@@ -230,13 +233,13 @@ export class ProjectFWStrategy extends BaseStrategy {
   }
 
   /**
-   * Execute an arbitrage bundle — buy all outcomes, then merge to USDC.
+   * Execute an arbitrage bundle.
    *
-   * Pattern mirrors DipArbStrategy.handleDipEvent():
-   *   1. Execute each leg sequentially via tradingService.placeBet()
-   *   2. If any leg fails, unwind previous legs
-   *   3. If all succeed, merge positions back to USDC
-   *   4. If merge fails, track with PLM as safety net
+   * UNDERPRICED (askSum < 1.0): Buy all outcomes via placeBet. Positions resolve
+   * at $1/set — profit = (1 - askSum) * tradeSize - fees. Tracked by PLM.
+   *
+   * OVERPRICED (bidSum > 1.0): Not available on PM US (requires on-chain bundle
+   * splitting). Scanner still detects these for logging, but execution is skipped.
    */
   private async executeArb(opp: ArbOpportunity): Promise<void> {
     const round: FWArbRound = {
@@ -255,7 +258,8 @@ export class ProjectFWStrategy extends BaseStrategy {
     const priceSumDisplay = (priceSum * 100).toFixed(1)
     const profitDisplay = (opp.netProfitUSD * 100).toFixed(2)
 
-    this.log(`ARB OPPORTUNITY: ${opp.market.question.substring(0, 40)}...`)
+    const arbPath = opp.arbType === 'overpriced' ? 'OVERPRICED (not executable on PM US)' : 'UNDERPRICED (buy all → hold to resolution)'
+    this.log(`ARB OPPORTUNITY [${arbPath}]: ${opp.market.question.substring(0, 40)}...`)
     this.log(`  Price sum: ${priceSumDisplay}¢ | Net profit: ${profitDisplay}¢ | KL: ${opp.result.klDivergence.toFixed(4)}`)
 
     activityLogger.logSystem(
@@ -282,10 +286,9 @@ export class ProjectFWStrategy extends BaseStrategy {
         },
       )
 
-      // Hard gate: if mutex validation found the pair coherent, skip this arb.
-      // "isCoherent" means the combined prices are consistent (no real mispricing).
       if (cmOpp.mutexValidation.isCoherent) {
         this.log(`  [CROSS-MKT] BLOCKED: mutex pair is coherent — no real mispricing`)
+        rejectionTracker.record('market_filter', 'fw', `mutex coherent: ${opp.market.question?.substring(0, 40)}`)
         activityLogger.logWarning('FW arb blocked by cross-market validation: mutex pair coherent', {
           market: opp.market.question.substring(0, 50),
           combinedPriceSum: cmOpp.mutexValidation.combinedPriceSum,
@@ -296,32 +299,27 @@ export class ProjectFWStrategy extends BaseStrategy {
       }
     }
 
+    // ── OVERPRICED PATH: Not available on PM US ──
+    // Requires on-chain splitPosition (buy bundle at $1, sell outcomes at bid).
+    // PM US uses centralized clearing with no on-chain operations.
+    if (opp.arbType === 'overpriced') {
+      this.log(`OVERPRICED ARB: Skipped — requires on-chain bundle split (not available on PM US)`)
+      activityLogger.logInfo('FW overpriced arb detected but not executable on PM US', {
+        market: opp.market.question.substring(0, 50),
+        bidSum: priceSum,
+        netProfit: opp.netProfitUSD,
+      })
+      round.status = 'failed'
+      this.arbRounds.push(round)
+      return
+    }
+
     try {
       this.activeArbs++
       this.lastTradeTimes.set(opp.market.id, Date.now())
 
-      // Gas check: skip if gas cost would eat the profit
-      try {
-        const numLegs = opp.result.tradeLegs.length
-        const gasCost = await gasOracle.estimateCostUSD(numLegs + 1) // legs + merge
-        if (gasCost > opp.netProfitUSD * 0.5) {
-          this.log(`Gas too expensive: $${gasCost.toFixed(4)} > 50% of profit $${opp.netProfitUSD.toFixed(4)} — skipping`)
-          activityLogger.logInfo('FW arb skipped: gas too expensive', {
-            gasCost,
-            netProfit: opp.netProfitUSD,
-          })
-          round.status = 'failed'
-          this.arbRounds.push(round)
-          return
-        }
-      } catch {
-        // Gas oracle failed — proceed (arb profit calculation already includes static gas estimate)
-      }
-
       // Revalidate arb with FRESH order book prices before committing capital.
-      // Between scan finding the opportunity and now, prices may have moved.
       try {
-        // Invalidate snapshot cache so buildSnapshot fetches fresh order books
         this.scanner.invalidateSnapshotCache(opp.market.id)
         const freshSnapshot = await this.scanner.buildSnapshot(opp.market)
 
@@ -337,9 +335,17 @@ export class ProjectFWStrategy extends BaseStrategy {
             return
           }
 
+          const freshAskPrices = freshSnapshot.depth.map((d, idx) => {
+            const vwap = ArbitrageScanner.computeVWAP(d.asks, this.fwConfig.tradeSize)
+            return vwap?.vwap ?? freshSnapshot.prices[idx]
+          })
+          const freshAskSum = freshAskPrices.reduce((s, p) => s + p, 0)
+          const freshDeviation = freshAskSum < 1.0 ? 1 - freshAskSum : 0
+
           const freshNetProfit = this.scanner.computeNetProfit(
-            freshResult.guaranteedProfit,
-            freshResult.tradeLegs.length
+            freshDeviation,
+            freshResult.tradeLegs.length,
+            opp.feeRateBps
           )
           if (freshNetProfit <= 0) {
             this.log(`Revalidation: net profit $${freshNetProfit.toFixed(4)} ≤ 0 — aborting`)
@@ -353,36 +359,38 @@ export class ProjectFWStrategy extends BaseStrategy {
             return
           }
 
-          // Use fresh prices for execution
           opp.result = freshResult
           opp.snapshot = freshSnapshot
           opp.netProfitUSD = freshNetProfit
           this.log(`Revalidation confirmed: net profit $${freshNetProfit.toFixed(4)} (was $${profitDisplay}¢)`)
         }
       } catch (err) {
-        // Revalidation failed — proceed with original data (best effort)
         this.log(`Revalidation check failed, proceeding with original prices: ${err}`)
       }
 
-      // Position sizing: penny mode → $1, otherwise Kelly-sized by arb profit ratio
+      // Position sizing: penny mode → minimum viable, otherwise Kelly-sized
       let effectiveTradeSize: number
       if (useSettingsStore.getState().pennyTraderMode) {
-        effectiveTradeSize = 1
+        const minProportion = Math.min(...opp.result.tradeLegs.map(l => l.proportion))
+        const maxPrice = Math.max(...opp.result.tradeLegs.map(l => l.price))
+        effectiveTradeSize = Math.max(1, (5 * maxPrice) / Math.max(minProportion, 0.01))
       } else {
-        const bankroll = useWalletStore.getState().usdcBridgedBalance ?? useWalletStore.getState().usdcBalance
+        const bankroll = useWalletStore.getState().balance
         const kellyFraction = useSettingsStore.getState().kellyFraction
         const fStar = KellySizer.arbKelly(opp.result.guaranteedProfit)
         effectiveTradeSize = KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar })
       }
+
+      // ── UNDERPRICED PATH: Buy all outcomes — profit locked at resolution ──
+      // Paper: π = max(0, (1 - askSum) * tradeSize - N·γ)
       for (let i = 0; i < opp.result.tradeLegs.length; i++) {
         const leg = opp.result.tradeLegs[i]
         const amount = effectiveTradeSize * leg.proportion
         const outcomeName = opp.snapshot.outcomes[leg.outcomeIndex]
-        // For binary markets: map to 'yes'/'no'. For multi-outcome: use explicit outcomeIndex.
         const isBinary = opp.snapshot.outcomes.length === 2
         const outcome: 'yes' | 'no' = isBinary
           ? (outcomeName.toLowerCase() === 'yes' ? 'yes' : 'no')
-          : 'yes' // placeholder — outcomeIndex below overrides the token selection
+          : 'yes'
 
         this.log(`LEG ${i + 1}: ${leg.side} ${outcomeName} $${amount.toFixed(2)} at ${(leg.price * 100).toFixed(1)}¢`)
 
@@ -405,7 +413,6 @@ export class ProjectFWStrategy extends BaseStrategy {
         round.legs.push(arbLeg)
 
         if (!result.success) {
-          // Leg failed — unwind previous legs
           activityLogger.logError(`Leg ${i + 1} failed: ${result.error}`)
           await this.unwindLegs(round, opp)
           round.status = 'failed'
@@ -421,23 +428,36 @@ export class ProjectFWStrategy extends BaseStrategy {
         )
       }
 
-      // All legs succeeded
+      // All legs succeeded — positions held until resolution
       round.status = 'complete'
-      this.log('ALL LEGS COMPLETE — Arb locked in!')
+      const expectedProfit = (1 - opp.snapshot.prices.reduce((s, p) => s + p, 0)) * effectiveTradeSize
+      this.log(`ALL LEGS COMPLETE — Arb locked in! Expected profit at resolution: $${expectedProfit.toFixed(4)}`)
+
+      // Track all positions with PLM for SL/TP monitoring until resolution
+      for (const leg of round.legs) {
+        if (leg.executed) {
+          this.trackFallbackPosition(leg, opp)
+        }
+      }
+
+      activityLogger.logTrade(
+        `FW ARB COMPLETE: ${round.legs.length} legs bought, held to resolution for $${expectedProfit.toFixed(4)} profit`,
+        { market: opp.market.question.substring(0, 50), totalCost: round.totalCost }
+      )
 
       // Record trade stats
       this.recordTrade(opp.netProfitUSD, round.totalCost, 0)
       this.emit('tradePlaced', { round })
 
-      // Log entry for backtest framework
+      // Log entries for backtest framework
       for (const leg of round.legs) {
         tradeLogger.logEntry({
           strategy: 'fw',
           marketId: opp.market.id,
-          conditionId: opp.market.conditionId,
+          conditionId: opp.snapshot.conditionId,
           question: opp.market.question,
           outcome: leg.outcome.toLowerCase() === 'yes' ? 'yes' : 'no',
-          side: 'buy',
+          side: leg.side.toLowerCase() === 'sell' ? 'sell' : 'buy',
           tokenId: leg.tokenId,
           price: leg.price,
           shares: leg.shares,
@@ -449,12 +469,10 @@ export class ProjectFWStrategy extends BaseStrategy {
             guaranteedProfit: opp.result.guaranteedProfit,
             netProfitUSD: opp.netProfitUSD,
             numLegs: opp.result.tradeLegs.length,
+            arbType: opp.arbType ?? 'underpriced',
           },
         })
       }
-
-      // Merge positions back to USDC
-      await this.mergePositions(round, opp)
 
       this.arbRounds.push(round)
     } catch (error) {
@@ -469,7 +487,7 @@ export class ProjectFWStrategy extends BaseStrategy {
 
   /**
    * Unwind executed legs when a later leg fails.
-   * Sells back each executed leg, or falls back to PLM tracking.
+   * Sells back each executed leg via PM US API, or falls back to PLM tracking.
    */
   private async unwindLegs(round: FWArbRound, opp: ArbOpportunity): Promise<void> {
     this.log('Unwinding executed legs...')
@@ -477,9 +495,12 @@ export class ProjectFWStrategy extends BaseStrategy {
     for (const leg of round.legs) {
       if (!leg.executed) continue
 
+      const outcomeForSell: 'yes' | 'no' = leg.outcome.toLowerCase() === 'yes' ? 'yes' : 'no'
+
       try {
         const sellResult = await tradingService.placeSell(
-          leg.tokenId,
+          opp.market.slug,
+          outcomeForSell,
           leg.shares
         )
 
@@ -488,7 +509,6 @@ export class ProjectFWStrategy extends BaseStrategy {
             orderId: sellResult.orderId,
           })
         } else {
-          // Failed to sell — track with PLM as safety net
           activityLogger.logWarning(`Unwind sell failed for ${leg.outcome}: ${sellResult.error}`)
           this.trackFallbackPosition(leg, opp)
         }
@@ -500,82 +520,13 @@ export class ProjectFWStrategy extends BaseStrategy {
   }
 
   /**
-   * Merge all positions back to USDC (guaranteed $1 per complete set).
-   * Same pattern as DipArbStrategy.
-   */
-  private async mergePositions(round: FWArbRound, opp: ArbOpportunity): Promise<void> {
-    this.log('Merging positions back to USDC...')
-
-    // Merge amount is the minimum shares across all legs
-    const minShares = Math.min(...round.legs.map(l => l.shares))
-
-    // Retry merge up to 3 times with exponential backoff (2s, 4s, 8s)
-    const MAX_MERGE_RETRIES = 3
-    let mergeSuccess = false
-
-    for (let attempt = 1; attempt <= MAX_MERGE_RETRIES; attempt++) {
-      try {
-        const mergeResult = await walletService.mergePositions(
-          opp.market.conditionId,
-          minShares
-        )
-
-        if (mergeResult.success) {
-          mergeSuccess = true
-          round.status = 'merged'
-          round.mergeResult = { success: true, txHash: mergeResult.txHash }
-
-          const profit = (1 - opp.snapshot.prices.reduce((s, p) => s + p, 0)) * minShares
-          activityLogger.logTrade(
-            `FW MERGE: ${minShares.toFixed(2)} sets → +$${profit.toFixed(4)} profit`,
-            { conditionId: opp.market.conditionId, txHash: mergeResult.txHash, attempt }
-          )
-          this.log(`Merge successful (attempt ${attempt})! Profit: $${profit.toFixed(4)}`)
-          break
-        }
-
-        this.log(`Merge attempt ${attempt}/${MAX_MERGE_RETRIES} failed: ${mergeResult.error}`)
-
-        if (attempt === MAX_MERGE_RETRIES) {
-          round.mergeResult = { success: false, error: mergeResult.error }
-          activityLogger.logWarning(`Merge failed after ${MAX_MERGE_RETRIES} attempts: ${mergeResult.error} — positions held until resolution`)
-        } else {
-          const delayMs = 2000 * Math.pow(2, attempt - 1)
-          await new Promise(resolve => setTimeout(resolve, delayMs))
-        }
-      } catch (error) {
-        this.log(`Merge attempt ${attempt}/${MAX_MERGE_RETRIES} threw: ${error}`)
-
-        if (attempt === MAX_MERGE_RETRIES) {
-          round.mergeResult = { success: false, error: String(error) }
-          this.logError('Merge failed after all retries', error)
-        } else {
-          const delayMs = 2000 * Math.pow(2, attempt - 1)
-          await new Promise(resolve => setTimeout(resolve, delayMs))
-        }
-      }
-    }
-
-    // If all retries failed, track with PLM as safety net
-    if (!mergeSuccess) {
-      for (const leg of round.legs) {
-        if (leg.executed) {
-          this.trackFallbackPosition(leg, opp)
-        }
-      }
-    }
-  }
-
-  /**
-   * Track a position with PositionLifecycleManager when sell/merge fails.
-   * Uses dynamic import to avoid circular dependency (same pattern as DipArb).
+   * Track a position with PositionLifecycleManager when sell fails.
+   * Uses dynamic import to avoid circular dependency.
    */
   private trackFallbackPosition(leg: FWArbLeg, opp: ArbOpportunity): void {
-    import('@/services/trading/PositionLifecycleManager').then(m => {
+    import('@/services/trading/PositionLifecycleManager').then((m) => {
       m.positionLifecycleManager.trackPosition({
-        tokenId: leg.tokenId,
-        marketId: opp.market.id,
-        conditionId: opp.market.conditionId,
+        marketSlug: opp.market.slug,
         outcome: leg.outcome.toLowerCase() === 'yes' ? 'yes' : 'no',
         question: opp.market.question,
         entryPrice: leg.price,
@@ -585,7 +536,6 @@ export class ProjectFWStrategy extends BaseStrategy {
         stopLossPercent: this.fwConfig.stopLossPercent,
         takeProfitPercent: this.fwConfig.takeProfitPercent,
         strategy: 'fw',
-        negRisk: opp.market.negRisk,
       })
     }).catch(err => console.warn('[ProjectFW] Failed to track fallback position:', err))
   }

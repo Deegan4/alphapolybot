@@ -13,10 +13,10 @@ vi.mock('@/services/llm/OpenRouterService', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
-  gammaClient: {
+  polymarketUSClient: {
     getEvents: vi.fn().mockResolvedValue([]),
-    getActiveMarkets: vi.fn().mockResolvedValue([]),
   },
+  normalizeEventToMarkets: vi.fn().mockReturnValue([]),
 }))
 
 import { MutexValidator } from '../projectfw/crossmarket/MutexValidator'
@@ -32,8 +32,7 @@ function makeMarket(overrides: Partial<Market> = {}): Market {
     id: `market-${Math.random().toString(36).slice(2, 8)}`,
     question: 'Will X happen?',
     outcomes: ['Yes', 'No'],
-    clobTokenIds: ['tok-yes', 'tok-no'],
-    conditionId: 'cond-1',
+    slug: 'test-market',
     active: true,
     closed: false,
     endDate: '2025-12-31',

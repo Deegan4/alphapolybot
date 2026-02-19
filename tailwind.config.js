@@ -8,6 +8,29 @@ export default {
     extend: {
       colors: {
         // Matrix Theme Colors
+        // Agent Dashboard Colors (muted navy/dark palette)
+        'agent': {
+          'bg': '#0a0e1a',
+          'card': '#0d1117',
+          'elevated': '#161b22',
+          'border': '#1a1f2e',
+          'border-subtle': '#21262d',
+          'text': '#f0f6fc',
+          'text-muted': '#8b949e',
+          'text-label': '#6e7681',
+          'green': '#22c55e',
+          'green-dim': '#15803d',
+          'red': '#ef4444',
+          'red-dim': '#b91c1c',
+          'cyan': '#22d3ee',
+          'orange': '#f97316',
+          'purple': '#a855f7',
+        },
+        // Crypto asset brand colors
+        'btc': '#f7931a',
+        'eth': '#627eea',
+        'sol': '#9945ff',
+        // Matrix Theme Colors
         'matrix': {
           'bg': '#000a00',
           'bg-primary': '#000000',
@@ -83,8 +106,8 @@ export default {
         'glow-strong': '0 0 15px #00ff00, 0 0 30px rgba(0, 255, 0, 0.5)',
         'glow-error': '0 0 10px #ff0040, 0 0 20px rgba(255, 0, 64, 0.4)',
         'glow-cyan': '0 0 10px #00ffff, 0 0 20px rgba(0, 255, 255, 0.4)',
-        'glass': 'inset 0 1px 0 0 rgba(0, 255, 0, 0.05)',
-        'glass-cyan': 'inset 0 1px 0 0 rgba(0, 255, 255, 0.05)',
+        'glass': 'inset 0 1px 0 0 rgba(34, 197, 94, 0.08), 0 4px 16px rgba(0, 0, 0, 0.3)',
+        'glass-cyan': 'inset 0 1px 0 0 rgba(34, 211, 238, 0.08), 0 4px 16px rgba(0, 0, 0, 0.3)',
         'elevation-1': '0 2px 8px rgba(0, 0, 0, 0.4)',
         'elevation-2': '0 4px 16px rgba(0, 0, 0, 0.5), 0 0 8px rgba(0, 255, 0, 0.05)',
         'elevation-3': '0 8px 32px rgba(0, 0, 0, 0.6), 0 0 16px rgba(0, 255, 0, 0.1)',
