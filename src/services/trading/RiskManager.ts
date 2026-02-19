@@ -52,11 +52,11 @@ export interface RiskManagerStatus {
 // ==========================================
 
 const DEFAULT_CONFIG: RiskManagerConfig = {
-  dailyLossLimit: 4,
-  weeklyLossLimit: 20,
+  dailyLossLimit: 3,
+  weeklyLossLimit: 10,
   maxTradesPerHour: 20,
   consecutiveFailureLimit: 5,
-  minBalanceForTrade: 1.50,
+  minBalanceForTrade: 1.00,
   minMaticForGas: 0.01,
   maxDrawdownPercent: 0.30,       // 30% drawdown triggers emergency stop
   maxPerMarketExposure: 0.20,     // 20% of capital max per market
@@ -98,7 +98,6 @@ export class RiskManager {
   }
 
   constructor(config?: Partial<RiskManagerConfig>) {
-    // Read persisted settings, falling back to defaults
     const settings = useSettingsStore.getState()
     this.config = {
       dailyLossLimit: settings.dailyLossLimit ?? DEFAULT_CONFIG.dailyLossLimit,
@@ -121,21 +120,14 @@ export class RiskManager {
    */
   initialize(): void {
     this.unsubscribeLogger = activityLogger.subscribe((activity) => {
+      // Skip monitoring when risk management is disabled
+      if (!this.config.enabled) return
+
       // Reset failure counter on successful trade
       if (activity.type === 'trade') {
         this.consecutiveFailures = 0
       }
-
-      // Increment on trade-related errors (defense-in-depth)
-      if (activity.type === 'error') {
-        const msg = activity.message.toLowerCase()
-        if (msg.includes('trade') || msg.includes('order') || msg.includes('execution')) {
-          this.consecutiveFailures++
-          if (this.consecutiveFailures >= this.config.consecutiveFailureLimit) {
-            this.emergencyStop(`${this.consecutiveFailures} consecutive trade-related errors`)
-          }
-        }
-      }
+      // Failure counting handled exclusively by recordTradeResult()
     })
 
     console.log('[RiskManager] Initialized with config:', {
@@ -150,7 +142,7 @@ export class RiskManager {
    * Checks are ordered cheapest-first for fast rejection
    */
   validateTrade(tradeAmountUSDC: number, conditionId?: string, category?: string): RiskCheckResult {
-    // Skip all checks if risk management is disabled
+    // Risk management disabled: skip all checks
     if (!this.config.enabled) {
       return { allowed: true }
     }
@@ -214,11 +206,8 @@ export class RiskManager {
       }
     }
 
-    // 5. Read wallet balances — used by drawdown, concentration, and balance checks below.
-    //    USDC.e (bridged) is what Polymarket actually pulls from.
-    //    Native USDC in wallet is NOT usable on the exchange.
-    const { usdcBridgedBalance, usdcNativeBalance, balance: maticBalance } = useWalletStore.getState()
-    const currentBalance = usdcBridgedBalance ?? 0
+    // 5. Read wallet balance — used by drawdown, concentration, and balance checks below.
+    const { balance: currentBalance } = useWalletStore.getState()
     const reserved = this.capitalReservationFns.reduce((sum, fn) => sum + (fn() ?? 0), 0)
     const tradeable = currentBalance - reserved
 
@@ -272,22 +261,10 @@ export class RiskManager {
       const reservedNote = reserved > 0
         ? ` ($${reserved.toFixed(2)} reserved in pending GTD orders)`
         : ''
-      const nativeNote = usdcNativeBalance > 0
-        ? ` (you have $${usdcNativeBalance.toFixed(2)} in native USDC which Polymarket cannot use — swap to USDC.e)`
-        : ''
       return {
         allowed: false,
-        reason: `Insufficient tradeable USDC.e: $${tradeable.toFixed(2)} (need $${tradeAmountUSDC.toFixed(2)}, min $${this.config.minBalanceForTrade})${reservedNote}${nativeNote}`,
+        reason: `Insufficient balance: $${tradeable.toFixed(2)} (need $${tradeAmountUSDC.toFixed(2)}, min $${this.config.minBalanceForTrade})${reservedNote}`,
         riskCode: 'INSUFFICIENT_BALANCE',
-      }
-    }
-
-    // 7. Gas (MATIC) check — trades require on-chain txns that cost gas
-    if (maticBalance < this.config.minMaticForGas) {
-      return {
-        allowed: false,
-        reason: `Insufficient MATIC for gas: ${maticBalance.toFixed(6)} (min ${this.config.minMaticForGas})`,
-        riskCode: 'INSUFFICIENT_GAS',
       }
     }
 
@@ -360,6 +337,7 @@ export class RiskManager {
 
   /**
    * Reduce category exposure when a position closes.
+   * Also cleans up marketToCategory mapping when exposure hits zero.
    */
   reduceCategoryExposure(conditionId: string, amountUSDC: number): void {
     const category = this.marketToCategory.get(conditionId)
@@ -370,6 +348,10 @@ export class RiskManager {
       this.categoryExposure.delete(category)
     } else {
       this.categoryExposure.set(category, remaining)
+    }
+    // Clean up reverse lookup if market has no more exposure
+    if (!this.marketExposure.has(conditionId)) {
+      this.marketToCategory.delete(conditionId)
     }
   }
 
@@ -470,6 +452,27 @@ export class RiskManager {
    */
   get emergencyStopped(): boolean {
     return this._emergencyStopped
+  }
+
+  /**
+   * Prune in-memory collections. Called periodically from App.tsx.
+   * Removes expired rolling-window entries that validateTrade()
+   * would also clean, but this ensures cleanup even during idle periods.
+   */
+  pruneInMemory(): void {
+    const oneHourAgo = Date.now() - 60 * 60 * 1000
+    const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
+
+    const oldTimestamps = this.tradeTimestamps.length
+    this.tradeTimestamps = this.tradeTimestamps.filter(t => t > oneHourAgo)
+
+    const oldPnLs = this.tradePnLs.length
+    this.tradePnLs = this.tradePnLs.filter(t => t.timestamp > oneWeekAgo)
+
+    const pruned = (oldTimestamps - this.tradeTimestamps.length) + (oldPnLs - this.tradePnLs.length)
+    if (pruned > 0) {
+      console.log(`[RiskManager] Pruned ${pruned} expired in-memory entries`)
+    }
   }
 
   /**

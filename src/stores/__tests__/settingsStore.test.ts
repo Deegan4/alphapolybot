@@ -47,9 +47,7 @@ vi.mock('@/stores/walletStore', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
-  clobClient: {},
-  gammaClient: {},
-  dataClient: {},
+  polymarketUSClient: {},
 }))
 
 vi.mock('@/services/wallet', () => ({
@@ -96,9 +94,6 @@ describe('settingsStore', () => {
     it('has empty API keys by default', () => {
       const state = useSettingsStore.getState()
       expect(state.openRouterApiKey).toBe('')
-      expect(state.clobApiKey).toBe('')
-      expect(state.clobSecret).toBe('')
-      expect(state.clobPassphrase).toBe('')
     })
 
     it('has notifications enabled, sound disabled', () => {
@@ -109,12 +104,11 @@ describe('settingsStore', () => {
 
     it('has risk management defaults', () => {
       const state = useSettingsStore.getState()
-      expect(state.dailyLossLimit).toBe(4)
-      expect(state.weeklyLossLimit).toBe(20)
+      expect(state.dailyLossLimit).toBe(3)
+      expect(state.weeklyLossLimit).toBe(10)
       expect(state.maxTradesPerHour).toBe(20)
       expect(state.consecutiveFailureLimit).toBe(5)
-      expect(state.minBalanceForTrade).toBe(1.50)
-      expect(state.minMaticForGas).toBe(0.01)
+      expect(state.minBalanceForTrade).toBe(1.00)
       expect(state.riskManagementEnabled).toBe(true)
     })
 
@@ -126,8 +120,8 @@ describe('settingsStore', () => {
 
     it('has FW arb defaults', () => {
       const state = useSettingsStore.getState()
-      expect(state.fwTradeSize).toBe(3)
-      expect(state.fwMinProfitBps).toBe(50)
+      expect(state.fwTradeSize).toBe(5)
+      expect(state.fwMinProfitBps).toBe(30)
     })
   })
 
@@ -150,20 +144,6 @@ describe('settingsStore', () => {
       expect(useSettingsStore.getState().openRouterApiKey).toBe('sk-test-123')
     })
 
-    it('setClobApiKey updates state', () => {
-      useSettingsStore.getState().setClobApiKey('clob-key-456')
-      expect(useSettingsStore.getState().clobApiKey).toBe('clob-key-456')
-    })
-
-    it('setClobSecret updates state', () => {
-      useSettingsStore.getState().setClobSecret('secret-789')
-      expect(useSettingsStore.getState().clobSecret).toBe('secret-789')
-    })
-
-    it('setClobPassphrase updates state', () => {
-      useSettingsStore.getState().setClobPassphrase('pass-abc')
-      expect(useSettingsStore.getState().clobPassphrase).toBe('pass-abc')
-    })
 
     it('setNotifications updates state', () => {
       useSettingsStore.getState().setNotifications(false)
@@ -182,7 +162,6 @@ describe('settingsStore', () => {
       const store = useSettingsStore.getState()
       store.setDryRun(false)
       store.setOpenRouterApiKey('sk-key')
-      store.setClobApiKey('clob-key')
       store.setNotifications(false)
       store.setSoundAlerts(true)
 
@@ -198,7 +177,6 @@ describe('settingsStore', () => {
       const reset = useSettingsStore.getState()
       expect(reset.dryRun).toBe(true)
       expect(reset.openRouterApiKey).toBe('')
-      expect(reset.clobApiKey).toBe('')
       expect(reset.enableNotifications).toBe(true)
       expect(reset.enableSoundAlerts).toBe(false)
     })
@@ -242,13 +220,13 @@ describe('settingsStore', () => {
       const s = useSettingsStore.getState()
       expect(s.aggressiveMode).toBe(false)
       expect(s.pennyTraderMode).toBe(true)
-      expect(s.kellyFraction).toBe(0.25)
-      expect(s.dailyLossLimit).toBe(4)
-      expect(s.weeklyLossLimit).toBe(20)
+      expect(s.kellyFraction).toBe(0.15)
+      expect(s.dailyLossLimit).toBe(3)
+      expect(s.weeklyLossLimit).toBe(10)
       expect(s.maxTradesPerHour).toBe(20)
       expect(s.consecutiveFailureLimit).toBe(5)
       expect(s.microMinCompositeSignal).toBe(0.40)
-      expect(s.fwMinProfitBps).toBe(50)
+      expect(s.fwMinProfitBps).toBe(30)
     })
 
     it('toggling aggressive mode twice returns to original state', () => {

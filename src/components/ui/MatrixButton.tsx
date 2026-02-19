@@ -10,7 +10,7 @@ interface MatrixButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement
 }
 
 /**
- * MatrixButton - Neon-styled button with press animation
+ * MatrixButton - Agent-styled button with press animation
  */
 export const MatrixButton: React.FC<MatrixButtonProps> = ({
   variant = 'primary',
@@ -24,37 +24,34 @@ export const MatrixButton: React.FC<MatrixButtonProps> = ({
   const baseStyles = `
     relative font-mono font-medium rounded-md
     transition-all duration-200
-    border border-matrix-primary/30
+    border border-agent-green/30
     disabled:opacity-50 disabled:cursor-not-allowed
-    focus:outline-none focus:ring-2 focus:ring-matrix-primary/50
+    focus:outline-none focus:ring-2 focus:ring-agent-green/50
   `
 
   const variants = {
     primary: `
-      bg-matrix-primary/10 text-matrix-primary
-      hover:bg-matrix-primary/20 hover:border-matrix-primary/50
-      hover:shadow-[0_0_15px_rgba(0,255,0,0.3)]
-      active:bg-matrix-primary/30
+      bg-agent-green/10 text-agent-green
+      hover:bg-agent-green/20 hover:border-agent-green/50
+      active:bg-agent-green/30
     `,
     secondary: `
-      bg-matrix-secondary/10 text-matrix-secondary
-      border-matrix-secondary/30
-      hover:bg-matrix-secondary/20 hover:border-matrix-secondary/50
-      hover:shadow-[0_0_15px_rgba(255,165,0,0.3)]
-      active:bg-matrix-secondary/30
+      bg-agent-orange/10 text-agent-orange
+      border-agent-orange/30
+      hover:bg-agent-orange/20 hover:border-agent-orange/50
+      active:bg-agent-orange/30
     `,
     danger: `
-      bg-red-500/10 text-red-400
-      border-red-500/30
-      hover:bg-red-500/20 hover:border-red-500/50
-      hover:shadow-[0_0_15px_rgba(239,68,68,0.3)]
-      active:bg-red-500/30
+      bg-agent-red/10 text-agent-red
+      border-agent-red/30
+      hover:bg-agent-red/20 hover:border-agent-red/50
+      active:bg-agent-red/30
     `,
     ghost: `
-      bg-transparent text-matrix-text-secondary
+      bg-transparent text-agent-text-muted
       border-transparent
-      hover:bg-matrix-primary/10 hover:text-matrix-primary
-      hover:border-matrix-primary/30
+      hover:bg-agent-green/10 hover:text-agent-green
+      hover:border-agent-green/30
     `,
   }
 

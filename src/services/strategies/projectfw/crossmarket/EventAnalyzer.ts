@@ -1,6 +1,6 @@
-import type { Market, GammaEvent } from '@/types'
+import type { Market } from '@/types'
 import type { MarketGroup } from './types'
-import { gammaClient } from '@/services/api'
+import { polymarketUSClient, normalizeEventToMarkets } from '@/services/api'
 
 /**
  * EventAnalyzer
@@ -8,7 +8,7 @@ import { gammaClient } from '@/services/api'
  * Events naturally group related markets (e.g., "2024 Pennsylvania Election"
  * contains candidate-specific markets that are mutually exclusive).
  *
- * Zero LLM cost — uses existing GammaClient.getEvents() data structure.
+ * Zero LLM cost — uses existing PolymarketUSClient.getEvents() data structure.
  */
 export class EventAnalyzer {
   private groupCache: Map<string, MarketGroup> = new Map()
@@ -28,18 +28,18 @@ export class EventAnalyzer {
       return Array.from(this.groupCache.values())
     }
 
-    const events = await gammaClient.getEvents({ active: true, limit: 100 })
+    const events = await polymarketUSClient.getEvents({ active: true, limit: 100 })
     const groups: MarketGroup[] = []
 
     for (const event of events) {
-      const normalized = this.normalizeEventMarkets(event)
+      const normalized = normalizeEventToMarkets(event as any)
       const active = normalized.filter(m => m.active && !m.closed)
       if (active.length < 2) continue
 
       const totalLiquidity = active.reduce((sum, m) => sum + m.liquidity, 0)
 
       const group: MarketGroup = {
-        eventId: event.id,
+        eventId: String(event.id),
         eventTitle: event.title,
         markets: active,
         totalLiquidity,
@@ -47,7 +47,7 @@ export class EventAnalyzer {
       }
 
       groups.push(group)
-      this.groupCache.set(event.id, group)
+      this.groupCache.set(String(event.id), group)
     }
 
     this.lastFetchAt = Date.now()
@@ -95,63 +95,6 @@ export class EventAnalyzer {
     }
 
     return pairs
-  }
-
-  /**
-   * Normalize raw event market data to typed Market objects.
-   * GammaClient.getEvents() returns raw data — fields like outcomes,
-   * clobTokenIds, and outcomePrices may be JSON strings instead of arrays.
-   */
-  private normalizeEventMarkets(event: GammaEvent): Market[] {
-    const rawMarkets = (event as any).markets || []
-    const eventNegRisk = Boolean(
-      (event as any).enableNegRisk ?? (event as any).negRisk ?? false,
-    )
-
-    return rawMarkets.map((raw: any) => {
-      const outcomes = this.parseJsonArray(raw.outcomes).map(String)
-      const clobTokenIds = this.parseJsonArray(raw.clobTokenIds).map(String)
-      const outcomePrices = this.parseJsonArray(raw.outcomePrices).map(
-        (p: unknown) => (typeof p === 'string' ? parseFloat(p) : Number(p)),
-      )
-
-      return {
-        ...raw,
-        outcomes,
-        clobTokenIds,
-        outcomePrices,
-        volume:
-          typeof raw.volume === 'string'
-            ? parseFloat(raw.volume) || 0
-            : raw.volume ?? 0,
-        volume24hr:
-          raw.volume24hr != null
-            ? typeof raw.volume24hr === 'string'
-              ? parseFloat(raw.volume24hr) || 0
-              : raw.volume24hr
-            : undefined,
-        liquidity:
-          typeof raw.liquidity === 'string'
-            ? parseFloat(raw.liquidity) || 0
-            : raw.liquidity ?? 0,
-        negRisk: Boolean(
-          raw.negRisk ?? raw.enableNegRisk ?? raw.neg_risk ?? eventNegRisk,
-        ),
-      } as Market
-    })
-  }
-
-  private parseJsonArray(val: unknown): unknown[] {
-    if (Array.isArray(val)) return val
-    if (typeof val === 'string') {
-      try {
-        const parsed = JSON.parse(val)
-        return Array.isArray(parsed) ? parsed : []
-      } catch {
-        return []
-      }
-    }
-    return []
   }
 
   clearCache(): void {

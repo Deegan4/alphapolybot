@@ -44,6 +44,7 @@ interface PredictionRecord {
   timestamp: number
   actualOutcome?: 'yes' | 'no'
   resolvedAt?: number
+  category?: string           // Market category for per-category accuracy tracking
 }
 
 const NUM_BUCKETS = 10
@@ -56,7 +57,7 @@ export class CalibrationTracker {
   /**
    * Record a prediction (called when LLM analyzes a market).
    */
-  recordPrediction(marketId: string, predictedProb: number, predictedOutcome: 'yes' | 'no'): void {
+  recordPrediction(marketId: string, predictedProb: number, predictedOutcome: 'yes' | 'no', category?: string): void {
     // Avoid duplicate predictions for the same market
     const existing = this.predictions.find(p => p.marketId === marketId && !p.actualOutcome)
     if (existing) return
@@ -66,6 +67,7 @@ export class CalibrationTracker {
       predictedProb,
       predictedOutcome,
       timestamp: Date.now(),
+      category,
     })
 
     // Trim old predictions
@@ -183,6 +185,14 @@ export class CalibrationTracker {
   }
 
   /**
+   * Get total number of recorded predictions (resolved + unresolved).
+   * Used to decide whether enough data exists to trust calibration adjustments.
+   */
+  getTotalPredictions(): number {
+    return this.predictions.length
+  }
+
+  /**
    * Get number of unresolved predictions (markets we're tracking).
    */
   get unresolvedCount(): number {
@@ -212,6 +222,53 @@ export class CalibrationTracker {
     } catch {
       // Storage not available
     }
+  }
+
+  /**
+   * Get accuracy for a specific market category.
+   * Returns null if no resolved predictions exist for this category.
+   */
+  getCategoryAccuracy(category: string): { accuracy: number; sampleSize: number } | null {
+    const resolved = this.predictions.filter(
+      p => p.category === category && p.actualOutcome != null,
+    )
+    if (resolved.length === 0) return null
+
+    const correct = resolved.filter(p => p.predictedOutcome === p.actualOutcome).length
+    return {
+      accuracy: correct / resolved.length,
+      sampleSize: resolved.length,
+    }
+  }
+
+  /**
+   * Get top N categories by demonstrated accuracy.
+   * Only includes categories with at least minSamples resolved predictions.
+   */
+  getBestCategories(minSamples: number = 10, topN: number = 5): Array<{
+    category: string
+    accuracy: number
+    sampleSize: number
+  }> {
+    // Group resolved predictions by category
+    const categoryMap = new Map<string, { correct: number; total: number }>()
+    for (const pred of this.predictions) {
+      if (!pred.actualOutcome || !pred.category) continue
+      const entry = categoryMap.get(pred.category) ?? { correct: 0, total: 0 }
+      entry.total++
+      if (pred.predictedOutcome === pred.actualOutcome) entry.correct++
+      categoryMap.set(pred.category, entry)
+    }
+
+    return Array.from(categoryMap.entries())
+      .filter(([, stats]) => stats.total >= minSamples)
+      .map(([category, stats]) => ({
+        category,
+        accuracy: stats.correct / stats.total,
+        sampleSize: stats.total,
+      }))
+      .sort((a, b) => b.accuracy - a.accuracy)
+      .slice(0, topN)
   }
 
   private interpolate(confidence: number, buckets: CalibrationBucket[]): number {

@@ -7,8 +7,10 @@ import { tradingService } from '@/services/trading/TradingService'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import { tradeLogger } from '@/services/trading/TradeLogger'
 import { KellySizer } from '@/services/trading/KellySizer'
+import { edgeTracker } from '@/services/trading/EdgeTracker'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 // ==========================================
 // DEFAULTS
@@ -25,7 +27,7 @@ const DEFAULT_CONFIG: MicroMomentumConfig = {
   stopLossPercent: 0.15,
   takeProfitPercent: 0.20,
   maxHoldMs: 30 * 60 * 1000, // 30 minutes
-  marketBatchSize: 40,
+  marketBatchSize: 80,
 }
 
 // ==========================================
@@ -71,6 +73,8 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     this.setStatus('idle')
   }
 
+  private warmupUntil = 0 // Timestamp when warmup completes
+
   async start(): Promise<void> {
     if (this._status === 'running') return
 
@@ -91,6 +95,12 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     // Discover and subscribe to markets
     await this.refreshMarkets()
 
+    // 2-minute warmup — collect microstructure snapshots before first trade attempt
+    const WARMUP_MS = 2 * 60 * 1000
+    this.warmupUntil = Date.now() + WARMUP_MS
+    this.log(`Warming up for ${WARMUP_MS / 1000}s — collecting microstructure snapshots before trading`)
+    this.emit('warmup', { endsAt: this.warmupUntil })
+
     // Start scanning for signals
     this.scanInterval = window.setInterval(
       () => this.scanForSignals(),
@@ -103,7 +113,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       5 * 60 * 1000,
     )
 
-    activityLogger.logSystem('Microstructure Momentum Strategy started')
+    activityLogger.logSystem('Microstructure Momentum Strategy started (warming up)')
   }
 
   async stop(): Promise<void> {
@@ -129,6 +139,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     this.subscribedTokens.clear()
     this.positionMarkets.clear()
     this.lastTradeTimes.clear()
+    this.warmupUntil = 0
 
     this.setStatus('idle')
     activityLogger.logSystem('Microstructure Momentum Strategy stopped')
@@ -188,6 +199,13 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
   private async scanForSignals(): Promise<void> {
     if (!this._enabled || this._status !== 'running') return
 
+    // Warmup gate — don't trade until we've collected enough microstructure data
+    if (Date.now() < this.warmupUntil) {
+      const remaining = Math.ceil((this.warmupUntil - Date.now()) / 1000)
+      this.log(`[Warmup] ${remaining}s remaining — collecting snapshots, not trading yet`)
+      return
+    }
+
     // Check position limits
     let microPositionCount = 0
     try {
@@ -197,6 +215,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     } catch { /* PLM not available */ }
 
     if (microPositionCount >= this.microConfig.maxConcurrentPositions) {
+      rejectionTracker.record('position_limit', 'micro', `${microPositionCount}/${this.microConfig.maxConcurrentPositions} micro positions`)
       return
     }
 
@@ -227,10 +246,16 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       // All must pass for a trade to fire
 
       // 1. Composite signal strength
-      if (Math.abs(signal.compositeSignal) < this.microConfig.minCompositeSignal) continue
+      if (Math.abs(signal.compositeSignal) < this.microConfig.minCompositeSignal) {
+        rejectionTracker.record('confidence', 'micro', `composite ${signal.compositeSignal.toFixed(2)} too weak`)
+        continue
+      }
 
       // 2. Signal confidence (data quality)
-      if (signal.signalConfidence < this.microConfig.minSignalConfidence) continue
+      if (signal.signalConfidence < this.microConfig.minSignalConfidence) {
+        rejectionTracker.record('confidence', 'micro', `signal confidence ${(signal.signalConfidence * 100).toFixed(0)}% too low`)
+        continue
+      }
 
       // 3. Spread not widening (avoid uncertainty regimes)
       if (signal.spreadWidening) continue
@@ -300,11 +325,15 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           { marketId: market.id, orderId: result.orderId },
         )
 
-        // Track with PLM
+        // Track with PLM — fetch per-token fee rate for accurate TP adjustment
         const filledSize = result.filledSize ?? positionSize / currentPrice
-        import('@/services/trading/PositionLifecycleManager').then(m => {
+        const tokenIdForPlm = market.clobTokenIds[outcomeIndex]
+        Promise.all([
+          import('@/services/trading/PositionLifecycleManager'),
+          import('@/services/api').then(api => api.clobClient.getFeeRateBps(tokenIdForPlm)).catch(() => undefined),
+        ]).then(([m, feeRate]) => {
           m.positionLifecycleManager.trackPosition({
-            tokenId: market.clobTokenIds[outcomeIndex],
+            tokenId: tokenIdForPlm,
             marketId: market.id,
             conditionId: market.conditionId,
             outcome,
@@ -318,6 +347,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
             strategy: 'micro',
             negRisk: market.negRisk,
             maxHoldMs: this.microConfig.maxHoldMs,
+            takerFeeBps: feeRate,
           })
         }).catch(err => console.warn('[MicroMomentum] PLM track failed:', err))
 
@@ -336,7 +366,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           kellyFraction: fStar,
           kellyBetSize: KellySizer.sizeBet({
             kellyFraction,
-            bankroll: useWalletStore.getState().usdcBridgedBalance ?? 0,
+            bankroll: useWalletStore.getState().balance,
             fullKelly: fStar,
           }),
           actualBetSize: positionSize,
@@ -369,11 +399,13 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
   private calculatePositionSize(modelProb: number, marketPrice: number): number {
     const pennyMode = useSettingsStore.getState().pennyTraderMode
-    if (pennyMode) return 1.0
+    // Polymarket CLOB requires minimum 5 shares per order
+    if (pennyMode) return Math.max(1.0, 5 * marketPrice)
 
-    const bankroll = useWalletStore.getState().usdcBridgedBalance ?? useWalletStore.getState().usdcBalance
+    const bankroll = useWalletStore.getState().balance
     const kellyFraction = useSettingsStore.getState().kellyFraction
-    const fStar = KellySizer.polymarketKelly(modelProb, marketPrice)
+    const adaptiveProb = edgeTracker.getAdaptiveModelProb('micro', modelProb)
+    const fStar = KellySizer.polymarketKelly(adaptiveProb, marketPrice)
 
     if (fStar <= 0) return 0 // No edge — don't trade
 

@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { MatrixCard, MatrixBadge, MatrixButton, AnimatedCounter } from '@/components/ui'
+import { MatrixCard, MatrixBadge, MatrixButton, MatrixLoading, AnimatedCounter } from '@/components/ui'
 import { activityLogger } from '@/services/trading/ActivityLogger'
-import type { ActivityItem, ActivityType } from '@/types'
+import { dataClient } from '@/services/api/DataClient'
+import { useWalletStore } from '@/stores'
+import type { ActivityItem, ActivityType, UserActivity } from '@/types'
 import { cn } from '@/utils/cn'
 
 const containerVariants = {
@@ -19,9 +21,12 @@ const itemVariants = {
  * ActivityView - Full activity log and analytics
  */
 export const ActivityView: React.FC = () => {
+  const { isConnected } = useWalletStore()
   const [entries, setEntries] = useState<ActivityItem[]>([])
-  const [filter, setFilter] = useState<ActivityType | 'all'>('all')
+  const [filter, setFilter] = useState<ActivityType | 'all' | 'onchain'>('all')
   const [stats, setStats] = useState(activityLogger.getStats())
+  const [onChainActivity, setOnChainActivity] = useState<UserActivity[]>([])
+  const [onChainLoading, setOnChainLoading] = useState(false)
 
   // Subscribe to activity updates — callback receives single item, so refresh full list
   useEffect(() => {
@@ -41,11 +46,31 @@ export const ActivityView: React.FC = () => {
     return () => clearInterval(interval)
   }, [])
 
+  // Fetch on-chain activity from Polymarket API
+  useEffect(() => {
+    if (!isConnected) return
+
+    const fetchOnChain = async () => {
+      setOnChainLoading(true)
+      try {
+        const data = await dataClient.getActivity({ limit: 50 })
+        setOnChainActivity(data)
+      } catch (err) {
+        console.error('Failed to fetch on-chain activity:', err)
+      } finally {
+        setOnChainLoading(false)
+      }
+    }
+    fetchOnChain()
+  }, [isConnected])
+
   const filteredEntries = filter === 'all'
     ? entries
+    : filter === 'onchain'
+    ? [] // on-chain entries rendered separately
     : entries.filter(e => e.type === filter)
 
-  const filters: Array<{ value: ActivityType | 'all'; label: string }> = [
+  const filters: Array<{ value: ActivityType | 'all' | 'onchain'; label: string }> = [
     { value: 'all', label: 'All' },
     { value: 'trade', label: 'Trades' },
     { value: 'sell', label: 'Sells' },
@@ -54,6 +79,7 @@ export const ActivityView: React.FC = () => {
     { value: 'error', label: 'Errors' },
     { value: 'warning', label: 'Warnings' },
     { value: 'system', label: 'System' },
+    { value: 'onchain', label: 'On-Chain' },
   ]
 
   const handleClear = () => {
@@ -75,7 +101,7 @@ export const ActivityView: React.FC = () => {
     <div className="h-full flex flex-col gap-4">
       {/* Stats Row */}
       <motion.div
-        className="grid grid-cols-5 gap-4"
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4"
         initial="hidden"
         animate="show"
         variants={containerVariants}
@@ -95,9 +121,9 @@ export const ActivityView: React.FC = () => {
         className="flex-1 flex flex-col min-h-0"
       >
         {/* Toolbar */}
-        <div className="flex items-center justify-between mb-4 pb-4 border-b border-matrix-border/50">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4 pb-4 border-b border-matrix-border/50">
           {/* Filters — sliding indicator */}
-          <div className="flex items-center gap-1 relative">
+          <div className="flex items-center gap-1 relative flex-wrap">
             {filters.map(f => (
               <button
                 key={f.value}
@@ -134,7 +160,40 @@ export const ActivityView: React.FC = () => {
 
         {/* Activity List */}
         <div className="flex-1 overflow-auto">
-          {filteredEntries.length === 0 ? (
+          {filter === 'onchain' ? (
+            /* On-chain activity from Polymarket API */
+            onChainLoading ? (
+              <div className="flex justify-center py-8">
+                <MatrixLoading text="Loading on-chain activity..." />
+              </div>
+            ) : !isConnected ? (
+              <div className="text-center py-12 text-matrix-text-secondary">
+                <div className="text-4xl mb-4 opacity-30">◇</div>
+                <p className="font-sans">Wallet not connected</p>
+                <p className="text-xs mt-1 font-sans">Connect your wallet in Settings to view on-chain activity</p>
+              </div>
+            ) : onChainActivity.length === 0 ? (
+              <div className="text-center py-12 text-matrix-text-secondary">
+                <div className="text-4xl mb-4 opacity-30">◇</div>
+                <p className="font-sans">No on-chain activity</p>
+                <p className="text-xs mt-1 font-sans">Deposits, withdrawals, and claims will appear here</p>
+              </div>
+            ) : (
+              <motion.div
+                className="space-y-2"
+                variants={containerVariants}
+                initial="hidden"
+                animate="show"
+                key="onchain"
+              >
+                {onChainActivity.map((activity) => (
+                  <motion.div key={activity.id} variants={itemVariants}>
+                    <OnChainActivityRow activity={activity} />
+                  </motion.div>
+                ))}
+              </motion.div>
+            )
+          ) : filteredEntries.length === 0 ? (
             <div className="text-center py-12 text-matrix-text-secondary">
               <div className="text-4xl mb-4 opacity-30">◇</div>
               <p className="font-sans">No activity to display</p>
@@ -278,6 +337,56 @@ const ActivityEntryRow: React.FC<{ entry: ActivityItem }> = ({ entry }) => {
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  )
+}
+
+/**
+ * On-Chain Activity Row — displays deposits, withdrawals, trades, claims from Polymarket API
+ */
+const OnChainActivityRow: React.FC<{ activity: UserActivity }> = ({ activity }) => {
+  const getTypeStyles = () => {
+    switch (activity.type) {
+      case 'trade':      return { color: 'text-matrix-primary', bg: 'bg-matrix-primary/10', border: 'border-matrix-primary/30', label: 'TRADE' }
+      case 'deposit':    return { color: 'text-matrix-cyan', bg: 'bg-matrix-cyan/10', border: 'border-matrix-cyan/30', label: 'DEPOSIT' }
+      case 'withdrawal': return { color: 'text-matrix-secondary', bg: 'bg-matrix-secondary/10', border: 'border-matrix-secondary/30', label: 'WITHDRAW' }
+      case 'claim':      return { color: 'text-green-300', bg: 'bg-green-500/10', border: 'border-green-500/30', label: 'CLAIM' }
+      default:           return { color: 'text-matrix-text-secondary', bg: 'bg-matrix-border/50', border: 'border-matrix-border', label: activity.type.toUpperCase() }
+    }
+  }
+
+  const styles = getTypeStyles()
+  const amountStr = activity.amount >= 0 ? `+$${activity.amount.toFixed(2)}` : `-$${Math.abs(activity.amount).toFixed(2)}`
+  const isPositive = activity.type === 'deposit' || activity.type === 'claim'
+
+  return (
+    <div className={cn('border rounded-lg p-3', styles.bg, styles.border)}>
+      <div className="flex items-start justify-between">
+        <div className="flex items-center gap-3">
+          <MatrixBadge
+            variant={activity.type === 'trade' ? 'success' : activity.type === 'deposit' || activity.type === 'claim' ? 'info' : 'warning'}
+            size="sm"
+          >
+            {styles.label}
+          </MatrixBadge>
+          <div>
+            <p className={cn('text-sm font-mono', styles.color)}>
+              {activity.market || activity.type.charAt(0).toUpperCase() + activity.type.slice(1)}
+            </p>
+            {activity.side && (
+              <span className="text-xs text-matrix-text-secondary font-sans">{activity.side}</span>
+            )}
+          </div>
+        </div>
+        <div className="text-right">
+          <span className={cn('text-sm font-mono font-semibold', isPositive ? 'text-matrix-primary' : 'text-red-400')}>
+            {amountStr}
+          </span>
+          <p className="text-matrix-text-secondary text-xs whitespace-nowrap font-sans">
+            {new Date(activity.timestamp).toLocaleString()}
+          </p>
+        </div>
+      </div>
     </div>
   )
 }

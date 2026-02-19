@@ -74,6 +74,37 @@ async function buildPolyHmacSignature(
   return sig.replace(/\+/g, '-').replace(/\//g, '_')
 }
 
+// ─── Rounding Helpers (matching official Polymarket clob-client) ─
+
+/** Count decimal places of a number (official SDK: decimalPlaces) */
+function decimalPlaces(n: number): number {
+  if (Number.isInteger(n)) return 0
+  const arr = n.toString().split('.')
+  if (arr.length <= 1) return 0
+  return arr[1].length
+}
+
+/** Round to nearest `decimals` places with EPSILON correction (official SDK: roundNormal) */
+function roundNormal(n: number, decimals: number): number {
+  if (decimalPlaces(n) <= decimals) return n
+  return Math.round((n + Number.EPSILON) * 10 ** decimals) / 10 ** decimals
+}
+
+/** Round down to `decimals` places (official SDK: roundDown) */
+function roundDown(n: number, decimals: number): number {
+  if (decimalPlaces(n) <= decimals) return n
+  // Add EPSILON before flooring to prevent IEEE-754 drift from truncating
+  // e.g. 8.45 * 0.01 = 0.08449999... → without EPSILON, floor gives 0.0844 (wrong)
+  // With EPSILON: 0.0845000...01 → floor gives 0.0845 (correct)
+  return Math.floor((n + Number.EPSILON) * 10 ** decimals) / 10 ** decimals
+}
+
+/** Round up to `decimals` places (official SDK: roundUp) */
+function roundUp(n: number, decimals: number): number {
+  if (decimalPlaces(n) <= decimals) return n
+  return Math.ceil(n * 10 ** decimals) / 10 ** decimals
+}
+
 /**
  * CLOB API Client
  * Handles order placement, order book data, and trade execution
@@ -96,6 +127,27 @@ export class CLOBClient extends BaseApiClient {
   private _signatureType: number | null = null
   /** One-time diagnostic flag */
   private _authDiagLogged = false
+
+  // ─── Tick Size / NegRisk / Fee Rate Caches ───────────────────
+  /** Cache: tokenId → tick size string (e.g. "0.01", "0.001") */
+  private tickSizeCache = new Map<string, string>()
+  /** Cache: tokenId → negRisk boolean */
+  private negRiskCache = new Map<string, boolean>()
+  /** Cache: tokenId → fee rate in basis points (e.g. 0 or 1000) */
+  private feeRateCache = new Map<string, number>()
+
+  /**
+   * Rounding config per tick size — matches the official Polymarket clob-client exactly.
+   * price = decimal places for price snapping
+   * size  = decimal places for share quantity
+   * amount = decimal places for collateral (makerAmt for BUY, takerAmt for SELL)
+   */
+  static readonly ROUNDING_CONFIG: Record<string, { price: number; size: number; amount: number }> = {
+    '0.1':    { price: 1, size: 2, amount: 3 },
+    '0.01':   { price: 2, size: 2, amount: 4 },
+    '0.001':  { price: 3, size: 2, amount: 5 },
+    '0.0001': { price: 4, size: 2, amount: 6 },
+  }
 
   constructor() {
     // Use local proxy to avoid CORS when running in browser
@@ -350,6 +402,102 @@ export class CLOBClient extends BaseApiClient {
     return this.delete<T>(endpoint, { headers, data })
   }
 
+  // ─── Tick Size & NegRisk Queries (Public, No Auth) ──────────
+
+  /**
+   * Fetch the tick size for a token from the CLOB API.
+   * Cached per-tokenId for the lifetime of the client.
+   * Falls back to "0.01" if the API call fails.
+   */
+  async getTickSize(tokenId: string): Promise<string> {
+    const cached = this.tickSizeCache.get(tokenId)
+    if (cached) return cached
+
+    try {
+      // Official SDK: GET /tick-size?token_id={tokenId}
+      // API returns { minimum_tick_size: "0.01" } (object, not bare string)
+      const response = await this.get<string | { minimum_tick_size?: string }>(`/tick-size?token_id=${tokenId}`)
+      let tickSize: string
+      if (typeof response === 'string') {
+        tickSize = response.trim().replace(/^"|"$/g, '')
+      } else if (response && typeof response === 'object' && 'minimum_tick_size' in response) {
+        tickSize = String((response as { minimum_tick_size: string }).minimum_tick_size)
+      } else {
+        tickSize = '0.01'
+      }
+      if (CLOBClient.ROUNDING_CONFIG[tickSize]) {
+        this.tickSizeCache.set(tokenId, tickSize)
+        return tickSize
+      }
+      console.warn(`[CLOBClient] Unknown tick size "${tickSize}" for token ${tokenId.slice(0, 12)}…, defaulting to 0.01`)
+      this.tickSizeCache.set(tokenId, '0.01')
+      return '0.01'
+    } catch (error) {
+      console.warn(`[CLOBClient] Failed to fetch tick size for ${tokenId.slice(0, 12)}…:`, error instanceof Error ? error.message : error)
+      return '0.01'
+    }
+  }
+
+  /**
+   * Query whether a token belongs to a NegRisk market from the CLOB API.
+   * Cached per-tokenId for the lifetime of the client.
+   * Falls back to the caller-provided negRisk value if the API call fails.
+   */
+  async getNegRisk(tokenId: string): Promise<boolean | null> {
+    const cached = this.negRiskCache.get(tokenId)
+    if (cached !== undefined) return cached
+
+    try {
+      // Official SDK: GET /neg-risk?token_id={tokenId}
+      // API returns { neg_risk: true/false } (object, not bare boolean)
+      const response = await this.get<boolean | { neg_risk?: boolean }>(`/neg-risk?token_id=${tokenId}`)
+      let isNegRisk: boolean
+      if (typeof response === 'boolean') {
+        isNegRisk = response
+      } else if (response && typeof response === 'object' && 'neg_risk' in response) {
+        isNegRisk = Boolean((response as { neg_risk: boolean }).neg_risk)
+      } else {
+        isNegRisk = response === ('true' as unknown as boolean)
+      }
+      this.negRiskCache.set(tokenId, isNegRisk)
+      return isNegRisk
+    } catch (error) {
+      console.warn(`[CLOBClient] Failed to fetch neg-risk for ${tokenId.slice(0, 12)}…:`, error instanceof Error ? error.message : error)
+      return null // Caller should fall back to their own negRisk value
+    }
+  }
+
+  /**
+   * Query the fee rate in basis points for a given token from the CLOB API.
+   * Cached per-tokenId for the lifetime of the client.
+   * Fee-enabled markets (e.g. 15-min crypto) return 1000; others return 0.
+   * Official SDK: GET /fee-rate?token_id={tokenId} → { base_fee: number }
+   */
+  async getFeeRateBps(tokenId: string): Promise<number> {
+    const cached = this.feeRateCache.get(tokenId)
+    if (cached !== undefined) return cached
+
+    try {
+      const response = await this.get<number | { base_fee?: number; fee_rate_bps?: number }>(`/fee-rate?token_id=${tokenId}`)
+      let feeRate: number
+      if (typeof response === 'number') {
+        feeRate = response
+      } else if (response && typeof response === 'object') {
+        // Official TS SDK reads `base_fee`; docs sometimes say `fee_rate_bps`
+        feeRate = (response as { base_fee?: number }).base_fee
+          ?? (response as { fee_rate_bps?: number }).fee_rate_bps
+          ?? 0
+      } else {
+        feeRate = 0
+      }
+      this.feeRateCache.set(tokenId, feeRate)
+      return feeRate
+    } catch (error) {
+      console.warn(`[CLOBClient] Failed to fetch fee rate for ${tokenId.slice(0, 12)}…:`, error instanceof Error ? error.message : error)
+      return 0 // Default to 0 (no fee) if API fails
+    }
+  }
+
   // ─── Order Book (Public, No Auth) ────────────────────────────
 
   /** Get order book for a market */
@@ -441,26 +589,80 @@ export class CLOBClient extends BaseApiClient {
       const makerAddress = this.funderAddress || signerAddress
       const signatureType = this.getSignatureType()
 
-      // Snap price to tick size (cents)
-      const tickPrice = Math.round(request.price * 100) / 100
+      // ─── Fetch tick size, negRisk, and fee rate from CLOB API ─────────
+      // The official SDK queries these per-token to determine rounding precision,
+      // the correct EIP-712 domain, and the fee rate for fee-enabled markets.
+      const tickSize = await this.getTickSize(request.tokenId)
+      const roundConfig = CLOBClient.ROUNDING_CONFIG[tickSize] || CLOBClient.ROUNDING_CONFIG['0.01']
 
-      // Round size down to 2 decimals (matches official client's roundDown)
-      const rawSize = Math.floor(request.size * 100) / 100
+      // Verify negRisk via CLOB API — overrides caller-provided value if API responds
+      const clobNegRisk = await this.getNegRisk(request.tokenId)
+      const negRisk = clobNegRisk ?? request.negRisk ?? false
 
-      // Calculate raw amounts (BUY vs SELL)
-      // API precision rules:
-      //   BUY:  makerAmount (collateral) max 2 decimals, takerAmount (shares) max 4 decimals
-      //   SELL: makerAmount (shares) max 4 decimals, takerAmount (collateral) max 2 decimals
+      // Fee rate: fee-enabled markets (e.g. 15-min crypto) require the correct feeRateBps
+      // in both the EIP-712 signed data AND the request body. Sending 0 on a fee-enabled
+      // market returns "invalid fee rate (0), current market's taker fee: 1000".
+      const feeRateBps = await this.getFeeRateBps(request.tokenId)
+
+      // Snap price to tick grid (using official SDK's roundNormal with EPSILON correction)
+      // and clamp to CLOB valid range [tickSize, 1-tickSize]
+      const tickFloat = parseFloat(tickSize)
+      const tickPrice = Math.min(
+        1 - tickFloat,
+        Math.max(tickFloat, roundNormal(request.price, roundConfig.price)),
+      )
+
+      // Round size down to `roundConfig.size` decimals (always 2 in current config)
+      const rawSize = roundDown(request.size, roundConfig.size)
+      if (rawSize <= 0) {
+        return { success: false, error: `Order size too small after rounding: ${request.size} → ${rawSize}` }
+      }
+
+      // ─── Calculate raw amounts ───
+      // FOK orders enforce STRICT precision: maker=size dp (2), taker=amount dp (4).
+      // GTC/GTD orders are more permissive: derived field uses amount dp (4+).
+      // See: https://github.com/Polymarket/py-clob-client/issues/121
+      //
+      // For FOK BUY: anchor maker (collateral) to size dp (2), derive taker (shares).
+      // For GTC/GTD BUY: anchor taker (shares) to size dp (2), derive maker to amount dp.
+      // SELL: always anchor maker (shares) to size dp, derive taker (collateral).
+      const orderType = request.type || 'FOK'
+      const isFok = orderType === 'FOK'
       let rawMakerAmt: number
       let rawTakerAmt: number
       if (request.side === 'BUY') {
-        // BUY: maker spends collateral (size * price), taker delivers shares (size)
-        rawMakerAmt = Math.floor(rawSize * tickPrice * 100) / 100   // collateral → 2 decimals
-        rawTakerAmt = Math.floor(rawSize * 10000) / 10000           // shares → 4 decimals
+        if (isFok) {
+          // FOK BUY: maker must be ≤ size dp (2). Anchor maker, derive taker.
+          rawMakerAmt = roundDown(rawSize * tickPrice, roundConfig.size)
+          rawTakerAmt = rawMakerAmt / tickPrice
+          if (decimalPlaces(rawTakerAmt) > roundConfig.amount) {
+            rawTakerAmt = roundDown(rawTakerAmt, roundConfig.amount)
+          }
+          // Enforce CLOB minimum of 5 shares for BUY orders.
+          // rawSize itself can be <5 (e.g., $4.15 / $0.83 = 4.988) or rounding can push below.
+          if (rawTakerAmt > 0 && rawTakerAmt < 5) {
+            rawTakerAmt = 5
+            rawMakerAmt = roundDown(5 * tickPrice, roundConfig.size)
+          }
+        } else {
+          // GTC/GTD BUY: official SDK approach — anchor taker (shares), derive maker.
+          rawTakerAmt = roundDown(rawSize, roundConfig.size)
+          // Enforce CLOB minimum of 5 shares for BUY orders
+          if (rawTakerAmt > 0 && rawTakerAmt < 5) {
+            rawTakerAmt = 5
+          }
+          rawMakerAmt = rawTakerAmt * tickPrice
+          if (decimalPlaces(rawMakerAmt) > roundConfig.amount) {
+            rawMakerAmt = roundDown(rawMakerAmt, roundConfig.amount)
+          }
+        }
       } else {
-        // SELL: maker delivers shares (size), taker pays collateral (size * price)
-        rawMakerAmt = Math.floor(rawSize * 10000) / 10000           // shares → 4 decimals
-        rawTakerAmt = Math.floor(rawSize * tickPrice * 100) / 100   // collateral → 2 decimals
+        // SELL: anchor maker (shares) to size dp, derive taker (collateral) to amount dp
+        rawMakerAmt = roundDown(rawSize, roundConfig.size)
+        rawTakerAmt = rawMakerAmt * tickPrice
+        if (decimalPlaces(rawTakerAmt) > roundConfig.amount) {
+          rawTakerAmt = roundDown(rawTakerAmt, roundConfig.amount)
+        }
       }
 
       // Convert to USDC base units (6 decimals) as BigInt
@@ -482,22 +684,33 @@ export class CLOBClient extends BaseApiClient {
         takerAmount,
         expiration: request.expiration ?? 0,   // 0 = no expiry; non-zero = GTD Unix timestamp
         nonce: 0,
-        feeRateBps: 0,
+        feeRateBps,
         side: request.side === 'BUY' ? 0 : 1,
-        signatureType, // 0=EOA, 2=GNOSIS_SAFE (proxy)
+        signatureType, // 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE
       }
 
       // Sign the order (EIP-712) — NegRisk markets use a different verifyingContract
-      console.log(`[CLOBClient] Signing order: negRisk=${request.negRisk ?? false}, signatureType=${signatureType}, maker=${makerAddress}, signer=${signerAddress}`)
-      const signature = await this.signOrder(orderData, request.negRisk)
+      console.log(`[CLOBClient] Signing order: negRisk=${negRisk}, tickSize=${tickSize}, feeRateBps=${feeRateBps}, signatureType=${signatureType}, maker=${makerAddress}, signer=${signerAddress}`)
+      console.log(`[CLOBClient]   price=${tickPrice} (${roundConfig.price}dp), rawMaker=${rawMakerAmt}, rawTaker=${rawTakerAmt}, type=${orderType}`)
+      const signature = await this.signOrder(orderData, negRisk)
 
-      // Build the API request body
-      // CRITICAL: The CLOB server reconstructs the EIP-712 hash from these fields
-      // to verify the signature. Fields must match the signed data exactly.
-      // - side: must be the numeric string "0" (BUY) / "1" (SELL), NOT "BUY"/"SELL"
-      // - salt, signatureType: integers (not strings)
-      // - makerAmount, takerAmount, expiration, nonce, feeRateBps, side: strings
-      const requestBody = {
+      // Build the API request body (must match official SDK's orderToJson exactly).
+      // Field types from @polymarket/clob-order-utils Order interface:
+      //  - salt: number (integer)
+      //  - maker, signer, taker, tokenId, signature: strings
+      //  - makerAmount, takerAmount: strings (BigInt.toString())
+      //  - expiration, nonce, feeRateBps: STRINGS (not numbers!)
+      //  - side: "BUY" / "SELL" (string enum; server maps to uint8 for EIP-712)
+      //  - signatureType: number
+      // Build request body matching official SDK's orderToJson exactly:
+      //  - salt: number (parseInt from string)
+      //  - makerAmount, takerAmount, expiration, nonce, feeRateBps: strings
+      //  - side: "BUY" | "SELL" (string enum)
+      //  - signatureType: number
+      //  - deferExec: boolean (top-level, default false)
+      //  - postOnly: boolean (top-level, only for GTC/GTD)
+      const requestBody: Record<string, unknown> = {
+        deferExec: request.deferExec ?? false,
         order: {
           salt: orderData.salt,
           maker: orderData.maker,
@@ -508,13 +721,21 @@ export class CLOBClient extends BaseApiClient {
           takerAmount: takerAmount.toString(),
           expiration: String(request.expiration ?? 0),
           nonce: '0',
-          feeRateBps: '0',
-          side: String(orderData.side),   // "0" or "1", NOT "BUY"/"SELL"
+          feeRateBps: String(feeRateBps),
+          side: request.side === 'BUY' ? 'BUY' : 'SELL',
           signatureType: orderData.signatureType,
           signature,
         },
-        owner: this.creds!.key,  // API key, NOT wallet address
-        orderType: request.type || 'FOK',
+        owner: this.creds!.key,
+        orderType,
+      }
+
+      // postOnly is only valid for GTC and GTD (official SDK throws for other types)
+      if (typeof request.postOnly === 'boolean') {
+        if (orderType !== 'GTC' && orderType !== 'GTD') {
+          return { success: false, error: 'postOnly is only supported for GTC and GTD orders' }
+        }
+        requestBody.postOnly = request.postOnly
       }
 
       console.log('[CLOBClient] Submitting order:', JSON.stringify(requestBody, null, 2))
@@ -540,6 +761,19 @@ export class CLOBClient extends BaseApiClient {
         error: response.errorMsg || 'Order placement failed',
       }
     } catch (error) {
+      // Auto-rederive on 401 and retry once — API keys can expire
+      const status = (error as { status?: number }).status
+      const msg = error instanceof Error ? error.message : String(error)
+      const is401 = status === 401 || msg.includes('401')
+
+      if (is401 && !request._retried) {
+        console.warn('[CLOBClient] 401 on order — rederiving API key and retrying...')
+        const newCreds = await this.deriveApiKey()
+        if (newCreds) {
+          return this.placeOrder({ ...request, _retried: true })
+        }
+      }
+
       console.error('Failed to place order:', error)
       return {
         success: false,
@@ -580,6 +814,79 @@ export class CLOBClient extends BaseApiClient {
     } catch (error) {
       console.error('Failed to cancel orders:', error)
       return false
+    }
+  }
+
+  /**
+   * Test the full order signing pipeline against the live CLOB.
+   * Places a $1 GTC limit buy well below best ask (won't fill), then cancels it.
+   * Returns success/failure with error details.
+   */
+  async testOrderCycle(): Promise<{ success: boolean; error?: string; orderId?: string }> {
+    try {
+      if (!this.wallet || !this.creds) {
+        return { success: false, error: 'Wallet or CLOB credentials not initialized' }
+      }
+
+      // Find a liquid binary market via GammaClient
+      const { gammaClient } = await import('@/services/api/GammaClient')
+      const markets = await gammaClient.getMarkets({
+        active: true,
+        closed: false,
+        limit: 10,
+        sort: 'volume24hr',
+      })
+
+      const binary = markets.find(m =>
+        m.clobTokenIds && m.clobTokenIds.length === 2 && m.outcomes?.length === 2
+      )
+      if (!binary || !binary.clobTokenIds?.[0]) {
+        return { success: false, error: 'No active binary markets found' }
+      }
+
+      const tokenId = binary.clobTokenIds[0] // YES token
+      console.log(`[CLOBClient] Test order: using market "${binary.question}" token=${tokenId.slice(0, 10)}...`)
+
+      // Get best ask to price our order well below it
+      const prices = await this.getBestPrices(tokenId)
+      if (!prices || prices.ask <= 0) {
+        return { success: false, error: 'Could not get order book prices' }
+      }
+
+      // Use a safe low test price — this GTC limit buy won't fill; we just need a valid
+      // price to verify the signing pipeline. Avoids collateral rounding edge cases where
+      // high prices + small sizes inflate effective price to >= 1.0 (API rejects).
+      const tickSize = await this.getTickSize(tokenId)
+      const tickFloat = typeof tickSize === 'string' ? parseFloat(tickSize) : tickSize
+      const testPrice = Math.max(tickFloat, 0.01)
+
+      // Place a $1 GTC limit buy (will sit on book, not fill)
+      const result = await this.placeOrder({
+        tokenId,
+        side: 'BUY',
+        price: testPrice,
+        size: 1.0,
+        type: 'GTC',
+        negRisk: binary.negRisk ?? false,
+      })
+
+      if (!result.success || !result.orderId) {
+        return { success: false, error: result.error ?? 'Order placement failed' }
+      }
+
+      console.log(`[CLOBClient] Test order placed: ${result.orderId}, cancelling...`)
+
+      // Cancel it immediately
+      const cancelled = await this.cancelOrder(result.orderId)
+      if (!cancelled) {
+        console.warn(`[CLOBClient] Test order cancel failed — order may still be on book`)
+      }
+
+      console.log(`[CLOBClient] Test order cycle complete — signing pipeline verified`)
+      return { success: true, orderId: result.orderId }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      return { success: false, error: msg }
     }
   }
 
@@ -758,6 +1065,64 @@ export class CLOBClient extends BaseApiClient {
       if (spread) results.set(tokenId, spread)
     }
     return results
+  }
+
+  // ─── CREATE2 Proxy Address Computation ──────────────────────
+
+  /** Polymarket Proxy Wallet Factory on Polygon mainnet */
+  private static readonly PROXY_FACTORY = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052'
+
+  /** Proxy implementation (queried from factory; this is the verified deployed impl) */
+  private static readonly PROXY_IMPLEMENTATION = '0x44e999d5c2F66Ef0861317f9A4805AC2e90aEB4f'
+
+  /**
+   * Compute the deterministic Polymarket proxy wallet address for a signer EOA.
+   *
+   * Replicates the on-chain PolyProxyLib.getProxyWalletAddress() from
+   * Polymarket's ctf-exchange contracts. The factory deploys minimal proxy
+   * clones via CREATE2 with:
+   *   salt = keccak256(abi.encodePacked(signer))
+   *   creationCode = assembly-built minimal proxy + cloneConstructor("0x")
+   *
+   * If the computed proxy doesn't match the user-provided funder address,
+   * order signing will ALWAYS fail because verifyPolyProxySignature() checks:
+   *   getPolyProxyWalletAddress(signer) == maker
+   */
+  static computePolyProxyAddress(signerAddress: string): string {
+    const factory = CLOBClient.PROXY_FACTORY
+    const implementation = CLOBClient.PROXY_IMPLEMENTATION
+
+    // Salt = keccak256(abi.encodePacked(signer))
+    // On-chain: keccak256(abi.encodePacked(_addr)) where _addr is the signer
+    const salt = ethers.keccak256(ethers.solidityPacked(['address'], [signerAddress]))
+
+    // Build creation code matching PolyProxyLib._computeCreationCode assembly:
+    //   The minimal proxy bytecode embeds both `factory` (as deployer) and `implementation` (as target).
+    //   Structure:
+    //     1. Clone bytecode with factory as deployer and implementation as target
+    //     2. Appended: abi.encode of cloneConstructor(bytes) call with empty bytes
+    const factoryLower = factory.slice(2).toLowerCase()
+    const implLower = implementation.slice(2).toLowerCase()
+
+    // This is the exact bytecode pattern from PolyProxyLib._computeCreationCode
+    const bufHex =
+      '3d3d606380380380913d393d73' +
+      factoryLower +
+      '5af4602a57600080fd5b602d8060366000396000f3363d3d373d3d3d363d73' +
+      implLower +
+      '5af43d82803e903d91602b57fd5bf3'
+
+    // Append the cloneConstructor(bytes) calldata with empty bytes arg
+    const iface = new ethers.Interface(['function cloneConstructor(bytes)'])
+    const consData = iface.encodeFunctionData('cloneConstructor', ['0x'])
+
+    const creationCode = ethers.concat([
+      ethers.getBytes('0x' + bufHex),
+      ethers.getBytes(consData),
+    ])
+    const bytecodeHash = ethers.keccak256(creationCode)
+
+    return ethers.getCreate2Address(factory, salt, bytecodeHash)
   }
 
   // ─── EIP-712 Order Signing ───────────────────────────────────

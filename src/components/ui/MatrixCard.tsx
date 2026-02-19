@@ -15,8 +15,8 @@ interface MatrixCardProps {
 }
 
 /**
- * MatrixCard - Container with Matrix theme styling
- * Variants: default, terminal, stats, glass (glassmorphism), gradient (green-to-cyan border)
+ * MatrixCard - Container with agent theme styling
+ * Variants: default, terminal, stats, glass, gradient
  */
 export const MatrixCard: React.FC<MatrixCardProps> = ({
   title,
@@ -30,11 +30,11 @@ export const MatrixCard: React.FC<MatrixCardProps> = ({
   variant = 'default',
 }) => {
   const variants = {
-    default: 'bg-matrix-card border-matrix-border',
-    terminal: 'bg-matrix-bg border-matrix-primary/30',
-    stats: 'bg-gradient-to-br from-matrix-card to-matrix-bg border-matrix-primary/20',
-    glass: 'glass-card',
-    gradient: 'gradient-border bg-matrix-card/80 backdrop-blur-sm border border-transparent',
+    default: 'bg-agent-card/50 backdrop-blur-lg border-agent-green/[0.07] shadow-glass',
+    terminal: 'bg-agent-bg/80 backdrop-blur-lg border-agent-green/20',
+    stats: 'bg-agent-card/50 backdrop-blur-lg border-agent-green/[0.07] shadow-glass',
+    glass: 'bg-agent-card/40 backdrop-blur-xl border-agent-green/10 shadow-glass',
+    gradient: 'bg-agent-card/50 backdrop-blur-lg border-agent-border/30',
   }
 
   const content = (
@@ -42,17 +42,17 @@ export const MatrixCard: React.FC<MatrixCardProps> = ({
       {(title || subtitle) && (
         <div
           className={cn(
-            'px-4 py-3 border-b border-matrix-border/50',
+            'px-4 py-3 border-b border-agent-border/50',
             headerClassName
           )}
         >
           {title && (
-            <h3 className="text-matrix-primary font-mono font-semibold">
+            <h3 className="text-agent-text font-mono font-semibold">
               {title}
             </h3>
           )}
           {subtitle && (
-            <p className="text-matrix-text-secondary font-sans text-sm mt-0.5">
+            <p className="text-agent-text-muted font-sans text-sm mt-0.5">
               {subtitle}
             </p>
           )}
@@ -63,10 +63,9 @@ export const MatrixCard: React.FC<MatrixCardProps> = ({
   )
 
   const classes = cn(
-    'rounded-lg',
+    'rounded-xl',
     variant !== 'glass' && variant !== 'gradient' && 'border',
     variants[variant],
-    glow && 'shadow-[0_0_20px_rgba(0,255,0,0.1)]',
     className
   )
 

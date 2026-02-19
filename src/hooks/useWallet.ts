@@ -6,47 +6,34 @@ import { useWalletStore } from '@/stores/walletStore'
  */
 export function useWallet() {
   const {
-    address,
+    keyId,
     balance,
-    usdcBalance,
+    buyingPower,
     isConnected,
     isConnecting,
-    chainId,
     lastSync,
-    approvals,
     error,
     connect,
     disconnect,
     syncBalances,
-    checkApprovals,
-    approveUSDC,
-    approveCTF,
-    ensureApprovals,
   } = useWalletStore()
 
   return {
     // State
-    address,
+    keyId,
     balance,
-    usdcBalance,
+    buyingPower,
     isConnected,
     isConnecting,
-    chainId,
     lastSync,
-    approvals,
     error,
-    
+
     // Derived state
-    shortAddress: address ? `${address.slice(0, 6)}...${address.slice(-4)}` : null,
-    hasApprovals: approvals.usdc && approvals.ctf,
-    
+    shortKeyId: keyId ? `${keyId.slice(0, 8)}...` : null,
+
     // Actions
     connect,
     disconnect,
     syncBalances,
-    checkApprovals,
-    approveUSDC,
-    approveCTF,
-    ensureApprovals,
   }
 }

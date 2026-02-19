@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useRef, useState, useEffect } from 'react'
 import {
   LineChart,
   Line,
@@ -59,26 +59,53 @@ export const MatrixSparkline: React.FC<MatrixSparklineProps> = ({
     return [min - padding, max + padding]
   }, [normalizedData])
 
+  // Track whether the container has positive dimensions before rendering Recharts.
+  // ResponsiveContainer measures via ResizeObserver and computes (width - 1, height - 1).
+  // If the container is 0×0 (hidden tab, collapsed flex, initial layout), that yields -1×-1
+  // which triggers the "width(-1) and height(-1) should be greater than 0" warning.
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [hasSize, setHasSize] = useState(false)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    const check = () => {
+      const { width: w, height: h } = el.getBoundingClientRect()
+      setHasSize(w > 0 && h > 0)
+    }
+
+    // Initial check
+    check()
+
+    // Watch for resize (tab becoming visible, flex layout completing, etc.)
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   if (normalizedData.length === 0) {
     return null
   }
 
   return (
-    <div className={cn('inline-block', className)} style={{ width, height }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={normalizedData}>
-          <YAxis domain={[minValue, maxValue]} hide />
-          <Line
-            type="monotone"
-            dataKey="value"
-            stroke={trendColor}
-            strokeWidth={strokeWidth}
-            dot={showDot ? { r: 2, fill: trendColor } : false}
-            activeDot={false}
-            isAnimationActive={false}
-          />
-        </LineChart>
-      </ResponsiveContainer>
+    <div ref={containerRef} className={cn('block overflow-hidden', className)} style={{ width, height, minWidth: 2, minHeight: 2 }}>
+      {hasSize && (
+        <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+          <LineChart data={normalizedData}>
+            <YAxis domain={[minValue, maxValue]} hide />
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke={trendColor}
+              strokeWidth={strokeWidth}
+              dot={showDot ? { r: 2, fill: trendColor } : false}
+              activeDot={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      )}
     </div>
   )
 }

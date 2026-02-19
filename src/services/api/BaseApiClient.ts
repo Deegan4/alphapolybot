@@ -28,6 +28,11 @@ class RateLimiter {
     this.tokens -= cost
   }
 
+  getStatus(): { tokensRemaining: number; maxTokens: number } {
+    this.refill()
+    return { tokensRemaining: Math.floor(this.tokens), maxTokens: this.maxTokens }
+  }
+
   private refill(): void {
     const now = Date.now()
     const elapsed = (now - this.lastRefill) / 1000
@@ -177,13 +182,32 @@ export class BaseApiClient {
   /**
    * Calculate retry delay with exponential backoff
    */
-  private calculateRetryDelay(retryCount: number, _error: unknown): number {
+  private calculateRetryDelay(retryCount: number, error: unknown): number {
+    // Respect Retry-After header on 429 responses
+    const retryAfter = this.parseRetryAfter(error)
+    if (retryAfter > 0) return Math.min(retryAfter, 60000)
+
     let delay = this.retryDelay * Math.pow(2, retryCount)
-    
+
     // Add jitter to prevent thundering herd
     delay += Math.random() * 1000
-    
+
     return Math.min(delay, 30000) // Cap at 30 seconds
+  }
+
+  private parseRetryAfter(error: unknown): number {
+    const axiosErr = error as { config?: { headers?: Record<string, string> }; response?: { headers?: Record<string, string> } }
+    const header = axiosErr?.response?.headers?.['retry-after']
+    if (!header) return 0
+
+    // Retry-After can be seconds (integer) or HTTP-date
+    const seconds = parseInt(header, 10)
+    if (!isNaN(seconds) && seconds > 0) return seconds * 1000
+
+    const date = new Date(header).getTime()
+    if (!isNaN(date)) return Math.max(0, date - Date.now())
+
+    return 0
   }
 
   /**
@@ -222,6 +246,13 @@ export class BaseApiClient {
       console.error('Error:', error.message)
       return Promise.reject(error)
     }
+  }
+
+  /**
+   * Get current rate limiter status for monitoring.
+   */
+  getRateLimitStatus(): { tokensRemaining: number; maxTokens: number } {
+    return this.rateLimiter.getStatus()
   }
 
   /**

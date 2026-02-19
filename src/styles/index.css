@@ -2,21 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Matrix Theme Variables */
+/* Hide scrollbar but keep scrolling */
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
+
+/* Agent Theme Variables */
 :root {
-  --matrix-text-primary: #00ff00;
-  --matrix-text-secondary: #666666;
-  --matrix-bg: #000a00;
-  --matrix-card: #0a0f0a;
-  --matrix-border: #1a2f1a;
-  --matrix-primary: #00ff00;
-  --matrix-secondary: #ffa500;
+  --agent-text: #f0f6fc;
+  --agent-text-muted: #8b949e;
+  --agent-bg: #0a0e1a;
+  --agent-card: #0d1117;
+  --agent-border: #1a1f2e;
+  --agent-green: #22c55e;
+  --agent-orange: #f97316;
+
+  /* Legacy matrix vars — kept for any leftover references */
+  --matrix-text-primary: #f0f6fc;
+  --matrix-text-secondary: #8b949e;
+  --matrix-bg: #0a0e1a;
+  --matrix-card: #0d1117;
+  --matrix-border: #1a1f2e;
+  --matrix-primary: #22c55e;
+  --matrix-secondary: #f97316;
 }
 
 /* Base Styles */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--matrix-primary) var(--matrix-bg);
+  scrollbar-color: var(--agent-green) var(--agent-bg);
 }
 
 *::-webkit-scrollbar {
@@ -25,26 +40,27 @@
 }
 
 *::-webkit-scrollbar-track {
-  background: var(--matrix-bg);
+  background: var(--agent-bg);
 }
 
 *::-webkit-scrollbar-thumb {
-  background-color: var(--matrix-primary);
+  background-color: var(--agent-green);
   border-radius: 3px;
   opacity: 0.3;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background-color: var(--matrix-primary);
+  background-color: var(--agent-green);
   opacity: 0.5;
 }
 
 html {
-  background-color: var(--matrix-bg);
+  background-color: var(--agent-bg);
+  font-size: 16px;
 }
 
 body {
-  @apply bg-matrix-bg text-matrix-text-primary;
+  @apply bg-agent-bg text-agent-text;
   font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -52,13 +68,13 @@ body {
 
 /* Selection */
 ::selection {
-  background-color: rgba(0, 255, 0, 0.3);
-  color: var(--matrix-text-primary);
+  background-color: rgba(34, 197, 94, 0.3);
+  color: var(--agent-text);
 }
 
 /* Focus styles */
 :focus-visible {
-  outline: 2px solid var(--matrix-primary);
+  outline: 2px solid var(--agent-green);
   outline-offset: 2px;
 }
 
@@ -77,19 +93,19 @@ body {
 
 @keyframes glow-pulse {
   0%, 100% {
-    box-shadow: 0 0 5px rgba(0, 255, 0, 0.3);
+    box-shadow: 0 0 5px rgba(34, 197, 94, 0.3);
   }
   50% {
-    box-shadow: 0 0 20px rgba(0, 255, 0, 0.6);
+    box-shadow: 0 0 20px rgba(34, 197, 94, 0.6);
   }
 }
 
 @keyframes text-glow {
   0%, 100% {
-    text-shadow: 0 0 5px rgba(0, 255, 0, 0.5);
+    text-shadow: 0 0 5px rgba(34, 197, 94, 0.5);
   }
   50% {
-    text-shadow: 0 0 20px rgba(0, 255, 0, 0.8);
+    text-shadow: 0 0 20px rgba(34, 197, 94, 0.8);
   }
 }
 
@@ -125,18 +141,17 @@ body {
 }
 
 .card-hover:hover {
-  @apply border-matrix-primary/30;
-  box-shadow: 0 0 15px rgba(0, 255, 0, 0.1);
+  @apply border-agent-green/20 bg-agent-card/60 shadow-elevation-2;
 }
 
 /* Terminal text effect */
 .terminal-text {
-  text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+  text-shadow: 0 0 10px rgba(34, 197, 94, 0.5);
 }
 
 /* Glass effect */
 .glass {
-  @apply bg-matrix-card/80 backdrop-blur-sm;
+  @apply bg-agent-card/50 backdrop-blur-lg;
 }
 
 /* Number formatting */
@@ -154,9 +169,9 @@ body {
 
 /* Grid patterns */
 .grid-pattern {
-  background-image: 
-    linear-gradient(rgba(0, 255, 0, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 255, 0, 0.03) 1px, transparent 1px);
+  background-image:
+    linear-gradient(rgba(34, 197, 94, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 197, 94, 0.03) 1px, transparent 1px);
   background-size: 20px 20px;
 }
 
@@ -168,7 +183,7 @@ body {
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(to bottom, transparent, rgba(0, 255, 0, 0.1), transparent);
+  background: linear-gradient(to bottom, transparent, rgba(34, 197, 94, 0.1), transparent);
   animation: scan-line 8s linear infinite;
   pointer-events: none;
 }
@@ -205,8 +220,7 @@ body {
 
 /* Glassmorphism card */
 .glass-card {
-  @apply bg-matrix-card/60 backdrop-blur-md border border-matrix-border/50;
-  box-shadow: inset 0 1px 0 0 rgba(0, 255, 0, 0.05);
+  @apply bg-agent-card/50 backdrop-blur-lg border border-agent-green/[0.07] rounded-xl shadow-glass;
 }
 
 /* Gradient border (green-to-cyan pseudo-element) */
@@ -219,30 +233,67 @@ body {
   inset: 0;
   border-radius: inherit;
   padding: 1px;
-  background: linear-gradient(135deg, #00ff00, #00ffff);
+  background: linear-gradient(135deg, #22c55e, #22d3ee);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
   pointer-events: none;
-  opacity: 0.3;
+  opacity: 0.15;
   transition: opacity 0.3s;
 }
 .gradient-border:hover::before {
-  opacity: 0.6;
+  opacity: 0.4;
 }
 
 /* Shimmer skeleton */
 .skeleton-shimmer {
   background: linear-gradient(90deg,
-    rgba(0, 255, 0, 0.03) 25%,
-    rgba(0, 255, 0, 0.08) 50%,
-    rgba(0, 255, 0, 0.03) 75%
+    rgba(34, 197, 94, 0.03) 25%,
+    rgba(34, 197, 94, 0.08) 50%,
+    rgba(34, 197, 94, 0.03) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 2s infinite linear;
 }
 
+/* Dashboard utility classes */
+.card-base {
+  @apply bg-agent-card/50 backdrop-blur-lg border border-agent-green/[0.07] rounded-xl shadow-glass;
+}
+
+.section-label {
+  @apply text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium;
+}
+
+.data-value {
+  @apply font-mono font-semibold text-agent-text tabular-nums;
+}
+
+.row-hover {
+  @apply transition-colors duration-150 hover:bg-agent-elevated/40;
+}
+
+/* Activity feed entry animation */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in {
+  animation: fade-in 0.25s ease-out;
+}
+
+/* Dashboard frosted background — gives glass cards something to blur */
+.dashboard-bg {
+  background-color: var(--agent-bg);
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(34, 197, 94, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(34, 211, 238, 0.02) 0%, transparent 50%),
+    linear-gradient(rgba(34, 197, 94, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 197, 94, 0.02) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 24px 24px, 24px 24px;
+}
+
 /* Scrollbar with cyan accent */
 .scrollbar-cyan::-webkit-scrollbar-thumb {
-  background-color: rgba(0, 255, 255, 0.4);
+  background-color: rgba(34, 211, 238, 0.4);
 }

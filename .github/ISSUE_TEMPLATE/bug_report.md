@@ -23,10 +23,14 @@ What actually happened.
 ## Environment
 - Browser:
 - Node.js version:
-- Strategy affected: [LLM / DipArb / FrankWolfe / BTC / Micro / All]
+- Strategy affected: [LLM / DipArb / FrankWolfe / BtcUpDown / Micro / MeanReversion / CopyTrading / All]
 - Dry run mode: [Yes / No]
+- Network: [Polygon Mainnet / Amoy Testnet]
 
 ## Logs
 ```
 Paste relevant console output here
 ```
+
+## Screenshots
+<!-- If applicable, add screenshots to help explain the problem. -->

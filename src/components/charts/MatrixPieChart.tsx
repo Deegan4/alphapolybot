@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useRef, useState, useEffect } from 'react'
 import {
   PieChart as RechartsPieChart,
   Pie,
@@ -59,9 +59,22 @@ export const MatrixPieChart: React.FC<MatrixPieChartProps> = ({
     }
   }
 
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [hasSize, setHasSize] = useState(false)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([e]) => {
+      const { width: w, height: h } = e.contentRect
+      setHasSize(w > 0 && h > 0)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   return (
-    <div className={cn('w-full', className)}>
-      <ResponsiveContainer width="100%" height={height}>
+    <div ref={containerRef} className={cn('w-full', className)} style={{ minHeight: height }}>
+      {hasSize && <ResponsiveContainer width="100%" height={height} minWidth={1} minHeight={1}>
         <RechartsPieChart>
           {showTooltip && (
             <Tooltip
@@ -111,7 +124,7 @@ export const MatrixPieChart: React.FC<MatrixPieChartProps> = ({
             ))}
           </Pie>
         </RechartsPieChart>
-      </ResponsiveContainer>
+      </ResponsiveContainer>}
     </div>
   )
 }

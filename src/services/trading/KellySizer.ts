@@ -36,6 +36,26 @@ export class KellySizer {
   }
 
   /**
+   * Polymarket Kelly with fee adjustment: accounts for taker fee reducing payouts.
+   *
+   * Standard Kelly assumes win pays (1-price)/price. With fees, the effective
+   * payout is reduced: win pays (effectivePayout - price) / price where
+   * effectivePayout = 1.0 - (feeRateBps / 10000).
+   *
+   * For crypto markets (1000 bps = 10% fee), buying at 0.40 only nets
+   * (0.90 - 0.40) / 0.40 = 1.25x instead of 1.50x without fees.
+   *
+   * Returns 0 when model sees no edge after fees.
+   */
+  static polymarketKellyWithFee(modelProb: number, marketPrice: number, feeRateBps: number): number {
+    if (marketPrice <= 0 || marketPrice >= 1) return 0
+    const effectivePayout = 1.0 - feeRateBps / 10_000  // e.g. 0.90 for 1000 bps
+    if (effectivePayout <= marketPrice) return 0  // No possible profit after fees
+    const b = (effectivePayout - marketPrice) / marketPrice
+    return KellySizer.fullKelly(modelProb, b)
+  }
+
+  /**
    * Arb Kelly: for guaranteed-profit arbitrage (p ≈ 1.0).
    *
    * Since "guaranteed" depends on execution (slippage, partial fills),

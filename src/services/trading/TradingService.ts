@@ -1,12 +1,12 @@
-import type { Market, OrderRequest, OrderResult, Order } from '@/types'
-import { clobClient } from '@/services/api'
-import { walletService } from '@/services/wallet'
+import type { Market, OrderRequest, OrderResult, Order, PendingGtcOrder } from '@/types'
+import { polymarketUSClient } from '@/services/api'
+import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { useWalletStore } from '@/stores/walletStore'
 import { riskManager } from './RiskManager'
 import { orderBookDepth } from './OrderBookDepth'
-import { gasOracle } from './GasOracle'
 import { tradeLogger } from './TradeLogger'
+import { rejectionTracker } from './RejectionTracker'
+import { activityLogger } from './ActivityLogger'
 
 export interface TradingConfig {
   maxSlippage: number
@@ -40,15 +40,12 @@ export class TradingService {
 
   constructor(config: Partial<TradingConfig> = {}) {
     // Read persisted dryRun from Zustand store (synchronous — safe in non-React code)
-    // This ensures TradingService respects the user's saved preference at boot,
-    // before React's useEffect can sync it.
     const persistedDryRun = useSettingsStore.getState().dryRun
     this.config = { ...DEFAULT_CONFIG, dryRun: persistedDryRun, ...config }
 
     console.log(`[TradingService] Mode: ${this.config.dryRun ? 'DRY RUN 🟡' : 'LIVE 🟢'}`)
 
     // Register in-flight capital reservation with RiskManager
-    // so concurrent trades don't double-spend the same balance
     riskManager.addCapitalReservationFn(() => this.getInFlightValue())
   }
 
@@ -78,38 +75,31 @@ export class TradingService {
     market: Market,
     outcome: 'yes' | 'no',
     amount: number,
-    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number }
+    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number }
   ): Promise<OrderResult> {
-    // Ensure approvals (skip actual transactions in dry run mode)
-    const approvalResult = await walletService.ensureApprovals(this.config.dryRun)
-    if (!approvalResult.success) {
-      console.warn(`[TradingService] BLOCKED by approvals: ${approvalResult.error}`)
-      return { success: false, error: approvalResult.error ?? 'Failed to ensure token approvals' }
-    }
-
-    // Risk management gate (pass conditionId for per-market concentration check)
-    const riskCheck = riskManager.validateTrade(amount, market.conditionId)
+    // Risk management gate (pass marketSlug for per-market concentration check)
+    const riskCheck = riskManager.validateTrade(amount, market.slug)
     if (!riskCheck.allowed) {
       console.warn(`[TradingService] BLOCKED by risk check: ${riskCheck.reason}`)
+      rejectionTracker.record('risk', 'system', riskCheck.reason)
+      activityLogger.logWarning(`Trade blocked by risk manager: ${riskCheck.reason}`)
       return { success: false, error: `Risk check failed: ${riskCheck.reason}` }
     }
 
     // Apply execution cooldown
     await this.waitForCooldown()
 
-    // Determine which token to buy
-    // For multi-outcome markets, explicit outcomeIndex overrides the yes/no mapping
+    // Determine outcome price from market data
     const outcomeIndex = options?.outcomeIndex ?? (outcome === 'yes' ? 0 : 1)
-    const tokenId = market.clobTokenIds[outcomeIndex]
     const currentPrice = market.outcomePrices[outcomeIndex]
 
-    if (!tokenId || !currentPrice) {
+    if (!currentPrice) {
       return { success: false, error: 'Invalid market data' }
     }
 
     // Order book depth check — cap order size to available liquidity
     try {
-      const depthCheck = await orderBookDepth.checkBuyDepth(tokenId, amount, this.config.maxSlippage)
+      const depthCheck = await orderBookDepth.checkBuyDepth(market.slug, amount, this.config.maxSlippage)
       if (!depthCheck.sufficient && depthCheck.maxFillableUSD > 0) {
         const capped = Math.min(amount, depthCheck.maxFillableUSD * 0.9) // 10% safety margin
         if (capped < 1.00) {
@@ -128,24 +118,31 @@ export class TradingService {
     // Apply slippage tolerance
     const maxPrice = currentPrice * (1 + this.config.maxSlippage)
 
+    // Determine order type: caller can override (e.g., DipArb uses GTD), otherwise use config default
+    const resolvedOrderType = options?.orderType ?? (this.config.fokOnly ? 'FOK' : 'GTC')
+    const gtdExpiration = resolvedOrderType === 'GTD'
+      ? Math.floor((Date.now() + (options?.gtdExpiryMs ?? this.config.gtcExpiryMs)) / 1000)
+      : undefined
+
     const orderRequest: OrderRequest = {
-      tokenId,
+      marketSlug: market.slug,
+      outcome,
       side: 'BUY',
       price: maxPrice,
       size: shares,
-      type: this.config.fokOnly ? 'FOK' : 'GTC',
-      conditionId: market.conditionId,
-      negRisk: market.negRisk,
+      type: resolvedOrderType,
+      expiration: gtdExpiration,
     }
 
     // GTD fallback metadata — passed through to executeOrder for use if FOK is killed
     const gtdMeta = !options?.skipGtcFallback ? {
-      marketId: market.id,
+      marketSlug: market.slug,
       outcome,
       question: market.question,
       costBasis: amount,
       stopLossPercent: options?.stopLossPercent ?? 0.15,
       takeProfitPercent: options?.takeProfitPercent ?? 0.30,
+      strategy: options?.strategy ?? 'llm',
     } : undefined
 
     return this.executeOrder(orderRequest, gtdMeta)
@@ -155,43 +152,65 @@ export class TradingService {
    * Place a sell order
    */
   async placeSell(
-    tokenId: string,
+    slug: string,
+    outcome: 'yes' | 'no',
     shares: number,
     price?: number,
-    negRisk?: boolean
+    orderType?: 'FOK' | 'GTC' | 'GTD'
   ): Promise<OrderResult> {
-    // Ensure CTF approval for selling (skip actual transactions in dry run mode)
-    const approvalResult = await walletService.ensureApprovals(this.config.dryRun)
-    if (!approvalResult.success) {
-      return { success: false, error: approvalResult.error ?? 'Failed to ensure token approvals' }
-    }
-
     // Apply execution cooldown
     await this.waitForCooldown()
 
-    // Get current price if not provided
+    // Get current price if not provided — use best bid
     let sellPrice = price
     if (!sellPrice) {
-      const midPrice = await clobClient.getMidPrice(tokenId)
-      if (!midPrice) {
-        return { success: false, error: 'Could not determine market price' }
+      const priceData = realtimeService.getPrice(slug)
+      if (priceData?.bid && priceData.bid > 0.01) {
+        sellPrice = priceData.bid
+      } else {
+        const bestPrices = await polymarketUSClient.getBestPrices(slug)
+        if (bestPrices?.bid && bestPrices.bid > 0.01) {
+          sellPrice = bestPrices.bid
+        } else {
+          return { success: false, error: `Could not determine market price` }
+        }
       }
-      sellPrice = midPrice * (1 - this.config.maxSlippage) // Sell slightly below mid
     }
 
-    // Cancel any existing orders for this token first
-    await clobClient.cancelAllOrders(tokenId)
+    // Clamp sell price to valid range (0.01, 0.99)
+    sellPrice = Math.min(0.99, Math.max(0.01, Math.round(sellPrice * 100) / 100))
+
+    // Cancel any existing orders for this slug first
+    await polymarketUSClient.cancelAllOrders([slug])
 
     const orderRequest: OrderRequest = {
-      tokenId,
+      marketSlug: slug,
+      outcome,
       side: 'SELL',
       price: sellPrice,
       size: shares,
-      type: this.config.fokOnly ? 'FOK' : 'GTC',
-      negRisk,
+      type: orderType ?? (this.config.fokOnly ? 'FOK' : 'GTC'),
     }
 
     return this.executeOrder(orderRequest)
+  }
+
+  /**
+   * Close an entire position via the US API's close-position endpoint.
+   * This is the preferred way to exit positions on PM US — the exchange
+   * handles order routing and fills automatically.
+   */
+  async closePosition(slug: string, slippageBips = 200): Promise<OrderResult> {
+    if (this.config.dryRun) {
+      console.log(`[DRY RUN] Would close position: ${slug}`)
+      return { success: true, orderId: `dry-run-close-${Date.now()}` }
+    }
+
+    try {
+      return await polymarketUSClient.closePosition(slug, slippageBips)
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Close position failed' }
+    }
   }
 
   /**
@@ -208,18 +227,19 @@ export class TradingService {
   private async executeOrder(
     request: OrderRequest,
     gtdMeta?: {
-      marketId: string
+      marketSlug: string
       outcome: 'yes' | 'no'
       question: string
       costBasis: number
       stopLossPercent: number
       takeProfitPercent: number
+      strategy?: string
     },
   ): Promise<OrderResult> {
-    // Pre-flight: Polymarket CLOB requires $1 minimum for marketable orders.
-    // Catch this before signing and submitting to avoid wasted API calls.
+    // Pre-flight: PM US requires $1 minimum for marketable orders.
     const orderDollarValue = request.price * request.size
     if (request.side === 'BUY' && orderDollarValue < 1.00) {
+      rejectionTracker.record('order_too_small', 'system', `$${orderDollarValue.toFixed(2)} < $1.00 minimum`)
       return {
         success: false,
         error: `Order too small: $${orderDollarValue.toFixed(2)} (Polymarket minimum is $1.00)`,
@@ -227,7 +247,7 @@ export class TradingService {
     }
 
     // Track in-flight trade value so concurrent trades don't overdraw balance
-    const tradeId = `${request.tokenId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    const tradeId = `${request.marketSlug}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     if (request.side === 'BUY') {
       this.inFlightTrades.set(tradeId, orderDollarValue)
     }
@@ -236,8 +256,10 @@ export class TradingService {
 
     // DRY RUN MODE: Simulate order without executing
     if (this.config.dryRun) {
+      rejectionTracker.record('dry_run', 'system', `Simulated ${request.side} $${orderDollarValue.toFixed(2)}`)
       console.log('[DRY RUN] Would execute order:', {
-        tokenId: request.tokenId,
+        marketSlug: request.marketSlug,
+        outcome: request.outcome,
         side: request.side,
         price: request.price,
         size: request.size,
@@ -250,21 +272,21 @@ export class TradingService {
       this.inFlightTrades.delete(tradeId)
       riskManager.recordTradeResult(true)
       // Track per-market exposure for concentration limits (dry run too)
-      if (request.side === 'BUY' && request.conditionId) {
-        riskManager.recordMarketExposure(request.conditionId, orderDollarValue)
+      if (request.side === 'BUY') {
+        riskManager.recordMarketExposure(request.marketSlug, orderDollarValue)
       }
 
       const dryRunOrderId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
       // Log trade for backtest framework (dry run included for analysis)
       tradeLogger.logEntry({
-        marketId: request.conditionId ?? '',
-        conditionId: request.conditionId ?? '',
+        marketId: request.marketSlug,
+        conditionId: request.marketSlug,
         question: '',
         outcomes: [],
         strategy: 'llm',
         side: request.side,
-        outcome: '',
+        outcome: request.outcome ?? '',
         marketPrice: request.price,
         kellyFraction: 0,
         kellyBetSize: orderDollarValue,
@@ -278,67 +300,29 @@ export class TradingService {
         orderId: dryRunOrderId,
       })
 
-      // Return simulated success
       return {
         success: true,
         orderId: dryRunOrderId,
-        txHash: `0x${'0'.repeat(64)}`,
         filledSize: request.size,
         avgPrice: request.price,
       }
     }
 
-    // Pre-flight: check CLOB-side balance before wasting API calls & retries.
-    // The exchange pulls USDC.e (bridged) via transferFrom — if the CLOB sees
-    // zero balance, no retry or size reduction will help.
-    //
-    // IMPORTANT: Pre-flight failures are structural (wallet config / approval issue),
-    // NOT trade execution failures. Do NOT record them via riskManager.recordTradeResult()
-    // or the circuit breaker will fire after 5 markets despite no actual trade attempts.
+    // Pre-flight: check buying power before submitting
     if (request.side === 'BUY') {
-      let clobBal = await clobClient.getBalanceAllowance()
-      // If cached balance is zero, refresh from on-chain before giving up.
-      // The CLOB caches balance — after deriving new creds or depositing,
-      // the cache may be stale until updateBalanceAllowance is called.
-      if (clobBal && clobBal.balance === 0) {
-        console.log('[TradingService] CLOB cached balance is $0 — refreshing from on-chain...')
-        const refreshed = await clobClient.updateBalanceAllowance()
-        if (refreshed) clobBal = refreshed
-      }
-      if (clobBal) {
+      try {
+        const balances = await polymarketUSClient.getBalances()
         const requiredAmount = request.price * request.size
-        if (clobBal.balance < requiredAmount) {
-          // CLOB says insufficient — check on-chain balance as fallback.
-          // The CLOB balance-allowance API is a cache that may return $0 if the
-          // server lacks a signer→proxy mapping. Since Polymarket uses transferFrom
-          // directly, the trade can succeed if on-chain funds + approvals are present.
-          const onChainBalance = useWalletStore.getState().usdcBridgedBalance
-          if (onChainBalance >= requiredAmount) {
-            console.warn(
-              `[TradingService] CLOB reports $${clobBal.balance.toFixed(2)} but on-chain shows ` +
-              `$${onChainBalance.toFixed(2)} USDC.e — proceeding with trade (exchange uses transferFrom directly)`
-            )
-            // Fall through — don't block the trade
-          } else {
-            const msg = `Insufficient balance: CLOB sees $${clobBal.balance.toFixed(2)}, ` +
-              `on-chain $${onChainBalance.toFixed(2)} USDC.e (need $${requiredAmount.toFixed(2)}). ` +
-              `Your funds may be in native USDC — Polymarket requires bridged USDC.e (0x2791…Aa84174)`
-            console.error(`[TradingService] ${msg}`)
-            this.inFlightTrades.delete(tradeId)
-            return { success: false, error: msg }
-          }
-        }
-        // Only block on allowance if the API actually returned the field.
-        // Some signature types / API versions omit `allowance` entirely —
-        // in that case we let the order through and rely on the exchange
-        // to reject it if allowance is actually insufficient.
-        if (clobBal.allowance != null && clobBal.allowance < requiredAmount) {
-          const msg = `Insufficient CLOB allowance: $${clobBal.allowance.toFixed(2)} ` +
-            `(need $${requiredAmount.toFixed(2)}). Re-approve USDC.e for the exchange contract.`
+        if (balances.buyingPower < requiredAmount) {
+          const msg = `Insufficient buying power: $${balances.buyingPower.toFixed(2)} (need $${requiredAmount.toFixed(2)})`
           console.error(`[TradingService] ${msg}`)
+          rejectionTracker.record('balance', 'system', msg)
+          activityLogger.logWarning(`Trade blocked: insufficient buying power`)
           this.inFlightTrades.delete(tradeId)
           return { success: false, error: msg }
         }
+      } catch {
+        // Balance check failed — proceed anyway (best-effort pre-flight)
       }
     }
 
@@ -351,26 +335,39 @@ export class TradingService {
         request.price = this.adjustForTickSize(request.price)
 
         // Place the order
-        const result = await clobClient.placeOrder(request)
+        const result = await polymarketUSClient.placeOrder(request)
 
         if (result.success) {
           this.lastOrderTime = Date.now()
           this.inFlightTrades.delete(tradeId)
           riskManager.recordTradeResult(true)
           // Track per-market exposure for concentration limits
-          if (request.side === 'BUY' && request.conditionId) {
-            riskManager.recordMarketExposure(request.conditionId, orderDollarValue)
+          if (request.side === 'BUY') {
+            riskManager.recordMarketExposure(request.marketSlug, orderDollarValue)
+          }
+
+          // Query actual fill data if not in response
+          if (result.orderId && !result.filledSize) {
+            try {
+              const orderDetails = await polymarketUSClient.getOrder(result.orderId)
+              if (orderDetails) {
+                result.filledSize = orderDetails.filledSize ?? result.filledSize
+                result.avgPrice = orderDetails.price ?? result.avgPrice
+              }
+            } catch {
+              // Best-effort
+            }
           }
 
           // Log trade for backtest framework
           tradeLogger.logEntry({
-            marketId: request.conditionId ?? '',
-            conditionId: request.conditionId ?? '',
+            marketId: request.marketSlug,
+            conditionId: request.marketSlug,
             question: '',
             outcomes: [],
             strategy: 'llm',
             side: request.side,
-            outcome: '',
+            outcome: request.outcome ?? '',
             marketPrice: request.price,
             kellyFraction: 0,
             kellyBetSize: orderDollarValue,
@@ -389,38 +386,32 @@ export class TradingService {
 
         lastError = result.error
 
-        // "not enough balance" is NOT transient — don't waste retries.
-        // The exchange contract's transferFrom will always fail if the wallet
-        // doesn't hold USDC.e.
-        if (lastError?.includes('not enough balance')) {
+        // "not enough balance" is NOT transient — don't waste retries
+        if (lastError?.includes('not enough balance') || lastError?.includes('insufficient')) {
           console.error(`[TradingService] Balance error is not retryable — aborting immediately`)
           failureReason = 'structural'
           break
         }
 
-        // "min size" errors are structural — order amount is below CLOB minimum ($1).
-        // Retrying the same amount will always fail.
-        if (lastError?.includes('min size')) {
+        // Min size errors are structural
+        if (lastError?.includes('min size') || lastError?.includes('lower than the minimum')) {
           console.error(`[TradingService] Order below minimum size — aborting immediately`)
           failureReason = 'structural'
           break
         }
 
-        // FOK (Fill-or-Kill) rejection means insufficient liquidity at this
-        // price/size. The order book won't change in 1 second — retrying the
-        // exact same order is wasteful. Break immediately.
+        // FOK rejection — insufficient liquidity, don't retry
         if (lastError?.includes("couldn't be fully filled") || lastError?.includes('FOK')) {
           console.warn(`[TradingService] FOK order killed (no liquidity at this price/size) — not retrying`)
+          failureReason = 'structural'
           break
         }
 
         if (lastError?.includes('tick size') && attempt < this.config.maxRetries - 1) {
-          // Adjust price
           request.price = this.adjustPriceForTick(request.price, request.side)
           continue
         }
 
-        // If order just failed (not due to specific errors), wait and retry
         if (attempt < this.config.maxRetries - 1) {
           await new Promise(r => setTimeout(r, 1000))
         }
@@ -428,15 +419,10 @@ export class TradingService {
         lastError = error instanceof Error ? error.message : 'Unknown error'
         console.error(`Order attempt ${attempt + 1} failed:`, error)
 
-        // Don't retry balance errors surfaced as exceptions either
-        if (lastError.includes('not enough balance')) { failureReason = 'structural'; break }
-
-        // Don't retry min size errors surfaced as exceptions
-        if (lastError.includes('min size')) { failureReason = 'structural'; break }
-
-        // Don't retry FOK liquidity failures surfaced as exceptions
+        if (lastError.includes('not enough balance') || lastError.includes('insufficient')) { failureReason = 'structural'; break }
+        if (lastError.includes('min size') || lastError.includes('lower than the minimum')) { failureReason = 'structural'; break }
         if (lastError.includes("couldn't be fully filled") || lastError.includes('FOK')) {
-          console.warn(`[TradingService] FOK order killed (no liquidity) — not retrying`)
+          failureReason = 'structural'
           break
         }
 
@@ -447,9 +433,6 @@ export class TradingService {
     }
 
     // ── GTD Fallback ──────────────────────────────────────────────
-    // If FOK was killed due to liquidity AND fallback is enabled,
-    // resubmit as a GTD (Good-Til-Date) limit order that sits on
-    // the order book with server-enforced expiry.
     const isFokKill = lastError?.includes("couldn't be fully filled") ||
                       lastError?.includes('FOK')
 
@@ -468,7 +451,7 @@ export class TradingService {
         }
 
         console.log(`[TradingService] FOK killed → submitting GTD fallback (expires in ${this.config.gtcExpiryMs / 60000}m)`)
-        const gtdResult = await clobClient.placeOrder(gtdRequest)
+        const gtdResult = await polymarketUSClient.placeOrder(gtdRequest)
 
         if (gtdResult.success && gtdResult.orderId) {
           this.lastOrderTime = Date.now()
@@ -478,17 +461,14 @@ export class TradingService {
           import('./GtcOrderManager').then(({ gtcOrderManager }) => {
             gtcOrderManager.trackOrder({
               orderId: gtdResult.orderId!,
-              tokenId: request.tokenId,
-              marketId: gtdMeta.marketId,
-              conditionId: request.conditionId ?? '',
+              marketSlug: request.marketSlug,
               outcome: gtdMeta.outcome,
               question: gtdMeta.question,
               side: request.side,
               price: request.price,
               size: request.size,
               costBasis: gtdMeta.costBasis,
-              strategy: 'llm',
-              negRisk: request.negRisk,
+              strategy: gtdMeta.strategy as PendingGtcOrder['strategy'],
               stopLossPercent: gtdMeta.stopLossPercent,
               takeProfitPercent: gtdMeta.takeProfitPercent,
               placedAt: Date.now(),
@@ -497,8 +477,6 @@ export class TradingService {
             })
           }).catch(err => console.warn('[TradingService] Failed to track GTD order:', err))
 
-          // Return success with pending flag — do NOT record trade result yet
-          // (GtcOrderManager will record it when the order fills or expires)
           return {
             success: true,
             orderId: gtdResult.orderId,
@@ -506,7 +484,6 @@ export class TradingService {
           }
         }
 
-        // GTD placement also failed — fall through to normal failure path
         console.warn(`[TradingService] GTD fallback also failed: ${gtdResult.error}`)
       } catch (error) {
         console.warn('[TradingService] GTD fallback error:', error)
@@ -525,22 +502,22 @@ export class TradingService {
   /**
    * Cancel an order
    */
-  async cancelOrder(orderId: string): Promise<boolean> {
-    return clobClient.cancelOrder(orderId)
+  async cancelOrder(orderId: string, marketSlug: string): Promise<boolean> {
+    return polymarketUSClient.cancelOrder(orderId, marketSlug)
   }
 
   /**
-   * Cancel all orders for a token
+   * Cancel all orders for given slugs (or all orders if no slugs)
    */
-  async cancelAllOrders(tokenId?: string): Promise<boolean> {
-    return clobClient.cancelAllOrders(tokenId)
+  async cancelAllOrders(slugs?: string[]): Promise<string[]> {
+    return polymarketUSClient.cancelAllOrders(slugs)
   }
 
   /**
    * Get open orders
    */
-  async getOpenOrders(tokenId?: string): Promise<Order[]> {
-    return clobClient.getOpenOrders(tokenId)
+  async getOpenOrders(slugs?: string[]): Promise<Order[]> {
+    return polymarketUSClient.getOpenOrders(slugs)
   }
 
   /**
@@ -559,9 +536,8 @@ export class TradingService {
   }
 
   /**
-   * Confirm order settlement via user channel push (primary) or CLOB polling (fallback).
+   * Confirm order settlement via user channel push (primary) or API polling (fallback).
    * Returns true if the order is matched/filled, false if cancelled/expired/failed/timeout.
-   * Best-effort — failure here doesn't invalidate the trade.
    */
   async confirmOrderSettlement(orderId: string, timeoutMs = 10000): Promise<boolean> {
     // Primary: Try push-based confirmation via UserChannelService
@@ -574,13 +550,12 @@ export class TradingService {
       // UserChannel not available — fall through to polling
     }
 
-    // Fallback: Poll CLOB order status
+    // Fallback: Poll API order status
     return this.confirmViaPolling(orderId, timeoutMs)
   }
 
   /**
    * Listen for trade/order events from user channel WebSocket.
-   * Resolves as soon as a matching CONFIRMED/FAILED event arrives.
    */
   private confirmViaUserChannel(orderId: string, timeoutMs: number): Promise<boolean> {
     return new Promise(async (resolve) => {
@@ -593,10 +568,8 @@ export class TradingService {
         unsubOrder()
       }
 
-      // Listen for trade fill events
       const unsubTrade = userChannelService.onTrade((msg) => {
         if (resolved) return
-        // Match on maker_orders containing our orderId, or by checking associate trades
         const matchesMaker = msg.maker_orders?.some(o => o.order_id === orderId)
         if (!matchesMaker) return
 
@@ -609,10 +582,8 @@ export class TradingService {
           cleanup()
           resolve(false)
         }
-        // MINED/RETRYING — keep waiting
       })
 
-      // Listen for order cancellation events
       const unsubOrder = userChannelService.onOrder((msg) => {
         if (resolved) return
         if (msg.order_id !== orderId) return
@@ -624,7 +595,6 @@ export class TradingService {
         }
       })
 
-      // Timeout fallback — if no push event within timeoutMs, try polling
       setTimeout(async () => {
         if (resolved) return
         cleanup()
@@ -635,7 +605,7 @@ export class TradingService {
   }
 
   /**
-   * Original polling-based confirmation (fallback when user channel unavailable).
+   * Polling-based confirmation (fallback when user channel unavailable).
    */
   private async confirmViaPolling(orderId: string, timeoutMs: number): Promise<boolean> {
     const pollIntervalMs = 2000
@@ -643,16 +613,14 @@ export class TradingService {
 
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        const order = await clobClient.getOrder(orderId)
+        const order = await polymarketUSClient.getOrder(orderId)
         if (!order) return false
 
-        // Order statuses: 'pending', 'open', 'filled', 'cancelled', 'expired', 'failed'
         if (order.status === 'filled') return true
         if (order.status === 'cancelled' || order.status === 'expired' || order.status === 'failed') return false
 
         await new Promise(r => setTimeout(r, pollIntervalMs))
       } catch {
-        // API error — keep trying
         await new Promise(r => setTimeout(r, pollIntervalMs))
       }
     }
