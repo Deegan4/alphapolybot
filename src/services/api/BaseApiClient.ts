@@ -224,6 +224,10 @@ export class BaseApiClient {
           `POLY_ADDRESS likely does not match the API key's signer, or credentials are revoked/expired. ` +
           `Fix: Settings → API Keys → "Derive from Wallet" to generate matching credentials.`,
         )
+      } else if (status === 402) {
+        // Payment required / credits exhausted — not a bug, suppress noisy logging.
+        // Callers already handle this gracefully (circuit breakers, empty enrichment, etc.)
+        console.debug(`API 402 (credits exhausted): ${error.config?.url}`)
       } else {
         console.error(`API Error ${status}:`, data)
       }

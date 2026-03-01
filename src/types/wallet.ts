@@ -1,39 +1,41 @@
 // ==========================================
-// POLYMARKET US — WALLET & AUTH TYPES
+// POLYMARKET — WALLET & AUTH TYPES
 // ==========================================
 
 export interface WalletState {
-  /** PM US API Key ID (UUID from developer portal) */
-  keyId: string | null
-  /** Whether credentials have been validated */
+  /** Wallet address (signer EOA) */
+  address: string | null
+  /** Whether wallet and CLOB credentials are validated */
   isConnected: boolean
   isConnecting: boolean
   /** USD cash balance */
   balance: number
   /** Available buying power (balance minus open orders) */
   buyingPower: number
+  /** Computed Polymarket proxy address */
+  proxyAddress: string | null
   lastSync: Date | null
   error: string | null
 }
 
 /**
- * Polymarket US Ed25519 API credentials.
- * Created at polymarket.us/developer.
+ * CLOB API credentials (HMAC-SHA256).
+ * Derived at runtime from wallet private key via /auth/derive-api-key.
  */
-export interface PMUSCredentials {
-  keyId: string      // UUID — X-PM-Access-Key header
-  secretKey: string  // Base64-encoded Ed25519 private key
+export interface CLOBCredentials {
+  key: string         // API key
+  secret: string      // HMAC secret (base64)
+  passphrase: string  // passphrase
 }
 
 /**
  * Multi-wallet registry entry (persisted in settingsStore).
- * Secret key is stored separately in secureStorage, never in Zustand.
  */
 export interface WalletEntry {
   /** Unique wallet ID (crypto.randomUUID()) */
   id: string
   /** User-facing label (e.g., "Main", "Trading Bot #2") */
   label: string
-  /** PM US API Key ID (UUID) — maps to credentials */
-  keyId: string
+  /** Wallet address (signer EOA) */
+  address: string
 }

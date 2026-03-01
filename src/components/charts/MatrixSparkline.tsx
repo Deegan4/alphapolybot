@@ -2,7 +2,6 @@ import React, { useMemo, useRef, useState, useEffect } from 'react'
 import {
   LineChart,
   Line,
-  ResponsiveContainer,
   YAxis,
 } from 'recharts'
 import { cn } from '../../utils'
@@ -59,27 +58,26 @@ export const MatrixSparkline: React.FC<MatrixSparklineProps> = ({
     return [min - padding, max + padding]
   }, [normalizedData])
 
-  // Track whether the container has positive dimensions before rendering Recharts.
-  // ResponsiveContainer measures via ResizeObserver and computes (width - 1, height - 1).
-  // If the container is 0×0 (hidden tab, collapsed flex, initial layout), that yields -1×-1
-  // which triggers the "width(-1) and height(-1) should be greater than 0" warning.
+  // Measure actual pixel dimensions via ResizeObserver instead of ResponsiveContainer.
+  // ResponsiveContainer internally subtracts 1 from measured dims, yielding -1×-1 when
+  // the container is 0×0 during flex layout settling — causing console spam.
   const containerRef = useRef<HTMLDivElement>(null)
-  const [hasSize, setHasSize] = useState(false)
+  const [measuredWidth, setMeasuredWidth] = useState(0)
+  const [measuredHeight, setMeasuredHeight] = useState(0)
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
 
-    const check = () => {
+    const measure = () => {
       const { width: w, height: h } = el.getBoundingClientRect()
-      setHasSize(w > 0 && h > 0)
+      setMeasuredWidth(Math.floor(w))
+      setMeasuredHeight(Math.floor(h))
     }
 
-    // Initial check
-    check()
+    measure()
 
-    // Watch for resize (tab becoming visible, flex layout completing, etc.)
-    const ro = new ResizeObserver(check)
+    const ro = new ResizeObserver(measure)
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
@@ -90,21 +88,19 @@ export const MatrixSparkline: React.FC<MatrixSparklineProps> = ({
 
   return (
     <div ref={containerRef} className={cn('block overflow-hidden', className)} style={{ width, height, minWidth: 2, minHeight: 2 }}>
-      {hasSize && (
-        <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-          <LineChart data={normalizedData}>
-            <YAxis domain={[minValue, maxValue]} hide />
-            <Line
-              type="monotone"
-              dataKey="value"
-              stroke={trendColor}
-              strokeWidth={strokeWidth}
-              dot={showDot ? { r: 2, fill: trendColor } : false}
-              activeDot={false}
-              isAnimationActive={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
+      {measuredWidth > 0 && measuredHeight > 0 && (
+        <LineChart width={measuredWidth} height={measuredHeight} data={normalizedData}>
+          <YAxis domain={[minValue, maxValue]} hide />
+          <Line
+            type="monotone"
+            dataKey="value"
+            stroke={trendColor}
+            strokeWidth={strokeWidth}
+            dot={showDot ? { r: 2, fill: trendColor } : false}
+            activeDot={false}
+            isAnimationActive={false}
+          />
+        </LineChart>
       )}
     </div>
   )

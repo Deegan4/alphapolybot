@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime/RealtimeService'
 import {
   parseReferencePrice,
@@ -52,15 +52,15 @@ const emptyState: PolymarketAssetState = {
 // INTERNAL HELPERS
 // ==========================================
 
-interface SlugMapping {
+interface TokenIdMapping {
   asset: AssetKey
   isUp: boolean
 }
 
 interface DiscoveredMarket {
   market: Market
-  upSlug: string      // slug for Up outcome's individual market
-  downSlug: string    // slug for Down outcome's individual market
+  upTokenId: string   // CLOB token ID for Up outcome
+  downTokenId: string // CLOB token ID for Down outcome
   upIndex: number
   windowEnd: number
   duration: WindowDuration
@@ -101,7 +101,7 @@ function findUpIndex(outcomes: string[]): number {
 /**
  * Central hook for live Polymarket prediction market prices.
  *
- * Discovers active BTC/ETH/SOL Up/Down markets via PolymarketUSClient slug lookup,
+ * Discovers active BTC/ETH/SOL Up/Down markets via Gamma API slug lookup,
  * subscribes to RealtimeService for real-time bid/ask, and auto-rotates
  * when market windows expire.
  *
@@ -109,6 +109,20 @@ function findUpIndex(outcomes: string[]): number {
  * that hook for Binance spot prices.
  */
 export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
+  // Read per-asset enable toggles from settings
+  const enableBtc = useSettingsStore((s) => s.btcEnableBtc)
+  const enableEth = useSettingsStore((s) => s.btcEnableEth)
+  const enableSol = useSettingsStore((s) => s.btcEnableSol)
+  const enableXrp = useSettingsStore((s) => s.btcEnableXrp)
+  const enabledAssets = useMemo<AssetKey[]>(() => {
+    const a: AssetKey[] = []
+    if (enableBtc) a.push('BTC')
+    if (enableEth) a.push('ETH')
+    if (enableSol) a.push('SOL')
+    if (enableXrp) a.push('XRP')
+    return a
+  }, [enableBtc, enableEth, enableSol, enableXrp])
+
   // Read enabled durations from settings — shortest first so sparklines
   // track the most active/relevant market window
   const enable5m = useSettingsStore((s) => s.btcEnable5m)
@@ -130,7 +144,7 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
   })
 
   // Reverse map: slug → { asset, isUp }
-  const slugMap = useRef<Map<string, SlugMapping>>(new Map())
+  const tokenIdMap = useRef<Map<string, TokenIdMapping>>(new Map())
   // Sparkline buffers per asset
   const sparklineBuffers = useRef<Map<AssetKey, number[]>>(new Map())
   // Initial Up price per asset (for % change calculation)
@@ -156,11 +170,11 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
           }
 
           try {
-            const event = await polymarketUSClient.getEventBySlug(eventSlug)
+            const event = await polymarketClient.getEventBySlug(eventSlug)
             if (!event || !event.markets?.length) continue
 
-            // US API: each market in the event is a single outcome.
-            // Need at least 2 outcomes (Up + Down) for binary markets.
+            // Gamma API: each market in the event has outcomes.
+            // Need at least 2 markets (Up + Down) for binary events.
             const activeMarkets = event.markets.filter(m => m.active && !m.closed)
             if (activeMarkets.length < 2) continue
 
@@ -169,9 +183,9 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
             const upIndex = findUpIndex(outcomeNames)
             const downIndex = upIndex === 0 ? 1 : 0
 
-            // Each outcome market has its own slug
-            const upSlug = activeMarkets[upIndex].slug
-            const downSlug = activeMarkets[downIndex].slug
+            // Each outcome market has its own CLOB token ID
+            const upTokenId = activeMarkets[upIndex].clobTokenIds?.[0] ?? activeMarkets[upIndex].slug
+            const downTokenId = activeMarkets[downIndex].clobTokenIds?.[0] ?? activeMarkets[downIndex].slug
 
             // Parse window end from endDate
             const windowEnd = event.endTime
@@ -200,8 +214,8 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
 
             const discovered: DiscoveredMarket = {
               market,
-              upSlug,
-              downSlug,
+              upTokenId,
+              downTokenId,
               upIndex,
               windowEnd,
               duration,
@@ -228,7 +242,18 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
       // Ensure RealtimeService is connected (idempotent)
       await realtimeService.connect()
 
+      // Reset disabled assets to empty state
       for (const asset of ASSETS) {
+        if (!enabledAssets.includes(asset)) {
+          setState((prev) => ({
+            ...prev,
+            [asset]: { ...emptyState },
+          }))
+          windowEnds.current.delete(asset)
+        }
+      }
+
+      for (const asset of enabledAssets) {
         const discovered = await discoverMarket(asset)
 
         if (!discovered) {
@@ -240,15 +265,15 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
           continue
         }
 
-        const { market, upSlug, downSlug, upIndex, windowEnd, duration } = discovered
-        const downIndex = upIndex === 0 ? 1 : 0
+        const { market, upTokenId, downTokenId, upIndex, windowEnd, duration } = discovered
+        const _downIndex = upIndex === 0 ? 1 : 0
 
-        // Register slug → asset mapping
-        slugMap.current.set(upSlug, { asset, isUp: true })
-        slugMap.current.set(downSlug, { asset, isUp: false })
+        // Register tokenId → asset mapping
+        tokenIdMap.current.set(upTokenId, { asset, isUp: true })
+        tokenIdMap.current.set(downTokenId, { asset, isUp: false })
 
-        // Subscribe to both outcome slugs (additive, idempotent)
-        realtimeService.subscribeMarket([upSlug, downSlug])
+        // Subscribe to both outcome token IDs (additive, idempotent)
+        realtimeService.subscribeMarket([upTokenId, downTokenId])
 
         // Store window end for rotation check
         windowEnds.current.set(asset, windowEnd)
@@ -282,18 +307,18 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
     } finally {
       discovering.current = false
     }
-  }, [discoverMarket])
+  }, [discoverMarket, enabledAssets])
 
   // ── Clear stale data when duration preference changes ────────────────
   useEffect(() => {
     // Reset buffers so sparklines start fresh for the new window duration
-    slugMap.current.clear()
+    tokenIdMap.current.clear()
     sparklineBuffers.current.clear()
     initialUpPrices.current.clear()
     discoveryCache.current.clear()
     windowEnds.current.clear()
     discoverAll()
-  }, [durationPreference]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [durationPreference, enabledAssets]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Initial discovery on mount ────────────────────────────────────────
   useEffect(() => {
@@ -345,8 +370,8 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
     }
 
     const unsub = realtimeService.onPriceUpdate(
-      (slug: string, priceData: PriceData) => {
-        const mapping = slugMap.current.get(slug)
+      (tokenId: string, priceData: PriceData) => {
+        const mapping = tokenIdMap.current.get(tokenId)
         if (!mapping) return
 
         const { asset, isUp } = mapping
@@ -386,7 +411,7 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
       const now = Date.now()
       let needsRediscovery = false
 
-      for (const asset of ASSETS) {
+      for (const asset of enabledAssets) {
         const windowEnd = windowEnds.current.get(asset)
         if (windowEnd && now > windowEnd) {
           // Window expired — clear stale data and reset initial price for new window
@@ -402,7 +427,7 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
     }, ROTATION_CHECK_MS)
 
     return () => clearInterval(id)
-  }, [discoverAll])
+  }, [discoverAll, enabledAssets])
 
   // ── Connection status tracking ────────────────────────────────────────
   useEffect(() => {

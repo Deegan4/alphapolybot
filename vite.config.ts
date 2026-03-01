@@ -19,7 +19,7 @@ function binanceWsProxy() {
         if (req.url?.startsWith('/ws/binance')) {
           wss.handleUpgrade(req, socket, head, (clientWs) => {
             const targetPath = req.url!.replace(/^\/ws\/binance/, '')
-            const targetUrl = `wss://stream.binance.us:9443${targetPath}`
+            const targetUrl = `wss://stream.binance.com:9443${targetPath}`
 
             let upstream: WS | null = null
             let pingInterval: ReturnType<typeof setInterval> | null = null
@@ -32,8 +32,9 @@ function binanceWsProxy() {
               if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
               if (upstream) {
                 upstream.removeAllListeners()
-                // Use terminate() instead of close() — close() throws on CONNECTING sockets
-                upstream.terminate()
+                // Attach a no-op error handler so terminate() doesn't crash the process
+                upstream.on('error', () => {})
+                try { upstream.terminate() } catch { /* already closing */ }
                 upstream = null
               }
             }
@@ -134,16 +135,10 @@ export default defineConfig(({ mode }) => {
       host: '0.0.0.0',
       open: true,
       proxy: {
-        '/api/pm-us': {
-          target: 'https://api.polymarket.us',
+        '/api/clob': {
+          target: 'https://clob.polymarket.com',
           changeOrigin: true,
-          rewrite: path => path.replace(/^\/api\/pm-us/, ''),
-          secure: true,
-        },
-        '/api/pm-gateway': {
-          target: 'https://gateway.polymarket.us',
-          changeOrigin: true,
-          rewrite: path => path.replace(/^\/api\/pm-gateway/, ''),
+          rewrite: path => path.replace(/^\/api\/clob/, ''),
           secure: true,
         },
         '/api/coinbase': {
@@ -165,7 +160,7 @@ export default defineConfig(({ mode }) => {
           secure: true,
         },
         '/api/binance': {
-          target: 'https://api.binance.us',
+          target: 'https://api.binance.com',
           changeOrigin: true,
           rewrite: path => path.replace(/^\/api\/binance/, ''),
           secure: true,
@@ -176,12 +171,11 @@ export default defineConfig(({ mode }) => {
           rewrite: path => path.replace(/^\/api\/coingecko/, ''),
           secure: true,
         },
-        // Polymarket US SDK constructs URLs via new URL('/v1/...', origin),
-        // stripping any path prefix. Proxy /v1/ directly to api.polymarket.us in dev.
-        '/v1/': {
-          target: 'https://api.polymarket.us',
+        '/api/ollama': {
+          target: 'http://localhost:5272',
           changeOrigin: true,
-          secure: true,
+          rewrite: path => path.replace(/^\/api\/ollama/, ''),
+          secure: false,
         },
       },
     },
@@ -190,8 +184,28 @@ export default defineConfig(({ mode }) => {
       sourcemap: true,
       rollupOptions: {
         output: {
-          manualChunks: {
-            'vendor-charts': ['recharts'],
+          manualChunks(id) {
+            // Ethers.js (~450 kB) with its own crypto, ABI coder, ENS resolver.
+            // Consolidate into one chunk (was split across two by Rollup).
+            if (id.includes('node_modules/ethers') || id.includes('node_modules/@adraffy/ens-normalize') || id.includes('node_modules/aes-js')) {
+              return 'vendor-ethers'
+            }
+            // D3 ecosystem — used by Recharts but large enough to cache separately
+            if (id.includes('node_modules/d3-')) {
+              return 'vendor-d3'
+            }
+            // Recharts core + supporting libs (es-toolkit, @reduxjs/toolkit)
+            if (id.includes('node_modules/recharts') || id.includes('node_modules/es-toolkit') || id.includes('node_modules/@reduxjs/toolkit')) {
+              return 'vendor-charts'
+            }
+            // Framer Motion — animation library, only needed for page transitions
+            if (id.includes('node_modules/framer-motion') || id.includes('node_modules/motion-dom') || id.includes('node_modules/motion-utils')) {
+              return 'vendor-motion'
+            }
+            // React DOM + scheduler — stable, rarely changes, great cache hit rate
+            if (id.includes('node_modules/react-dom') || id.includes('node_modules/scheduler')) {
+              return 'vendor-react'
+            }
           },
         },
       },

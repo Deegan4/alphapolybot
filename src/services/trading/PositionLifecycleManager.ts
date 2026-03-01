@@ -5,10 +5,12 @@ import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
 import { tradeLogger } from './TradeLogger'
 
-// Default Polymarket US taker fee (flat 10 bps = 0.1%)
+// Default Polymarket taker fee for standard markets (100 bps = 1%).
+// Crypto markets use dynamic fees up to ~156 bps — strategies should set per-position
+// takerFeeBps to override this default (e.g. via DynamicFeeService).
 // Used to adjust take-profit threshold so NET profit matches user's configured percentage.
 // SL doesn't need adjustment (a loss is a loss regardless of fee).
-const DEFAULT_TAKER_FEE_PERCENT = 0.001
+const DEFAULT_TAKER_FEE_PERCENT = 0.01
 
 // ==========================================
 // TYPES
@@ -24,8 +26,9 @@ export interface TrackedPosition {
   entryTime: number           // Date.now() at entry
   stopLossPercent: number     // e.g. 0.15 = 15%
   takeProfitPercent: number   // e.g. 0.30 = 30%
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
-  takerFeeBps?: number        // per-position taker fee in bps (default 10 for PM US). Falls back to DEFAULT_TAKER_FEE_PERCENT if absent.
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool'
+  takerFeeBps?: number        // per-position taker fee in bps (default 100). Falls back to DEFAULT_TAKER_FEE_PERCENT if absent.
+  tokenId?: string            // CLOB token ID for this outcome (used for WS subscribe/getPrice)
   // Trailing stop-loss fields
   trailingStopPercent?: number  // e.g. 0.10 = 10% trail from peak
   peakPrice?: number            // highest price seen while in profit
@@ -66,11 +69,12 @@ type PositionChangeCallback = (positions: TrackedPosition[]) => void
  * This is the CRITICAL safety layer — without it, stop-loss/take-profit
  * config values are decorative.
  *
- * Polymarket US version: No on-chain operations. PM US handles settlement
+ * CLOB version: No on-chain operations. Polymarket handles settlement
  * and resolution automatically via centralized clearing.
  */
 export class PositionLifecycleManager {
   private positions = new Map<string, TrackedPosition>()
+  private tokenIdToSlug = new Map<string, string>()  // reverse map: tokenId → marketSlug
   private unsubscribePrice: (() => void) | null = null
   private unsubscribeUserChannel: (() => void) | null = null
   private callbacks = new Set<PositionChangeCallback>()
@@ -89,7 +93,11 @@ export class PositionLifecycleManager {
     this.initialized = true
 
     this.unsubscribePrice = realtimeService.onPriceUpdate(
-      (slug, priceData) => this.handlePriceUpdate(slug, priceData)
+      (id, priceData) => {
+        // id is now a CLOB token ID — resolve to market slug via reverse map
+        const slug = this.tokenIdToSlug.get(id) ?? id
+        this.handlePriceUpdate(slug, priceData)
+      }
     )
 
     // Subscribe to UserChannel trade events to update position size from actual fills
@@ -139,15 +147,13 @@ export class PositionLifecycleManager {
           continue
         }
 
-        // Check live position balance via API — if 0, position was already closed
+        // Check if market is still active — CLOB has no positions endpoint
+        // If market resolved, skip hydration (position settled on-chain)
         try {
-          const { polymarketUSClient } = await import('@/services/api')
-          const positions = await polymarketUSClient.getPositions(position.marketSlug)
-          const matchingPos = positions.find(p =>
-            p.marketSlug === position.marketSlug && p.outcome === position.outcome
-          )
-          if (!matchingPos || (matchingPos.netPosition ?? 0) <= 0) {
-            console.log(`[PLM] Hydration: zero position for ${position.question.substring(0, 40)}... — skipping`)
+          const { polymarketClient } = await import('@/services/api')
+          const market = await polymarketClient.getMarketBySlug(position.marketSlug)
+          if (market && (market.closed || !market.active)) {
+            console.log(`[PLM] Hydration: market resolved for ${position.question.substring(0, 40)}... — skipping`)
             indexedDBService.removePosition(position.marketSlug).catch(() => {})
             // Close TradeLogger record if still open
             const openRecord = tradeLogger.findOpenRecord(position.marketSlug, position.strategy, position.outcome)
@@ -167,7 +173,12 @@ export class PositionLifecycleManager {
         }
 
         this.positions.set(position.marketSlug, position)
-        realtimeService.subscribeMarket(position.marketSlug)
+        // Subscribe using tokenId (CLOB WS expects token IDs, not slugs)
+        const subId = position.tokenId ?? position.marketSlug
+        realtimeService.subscribeMarket(subId)
+        if (position.tokenId) {
+          this.tokenIdToSlug.set(position.tokenId, position.marketSlug)
+        }
         hydrated++
       }
 
@@ -186,8 +197,8 @@ export class PositionLifecycleManager {
    */
   private async validateHydratedPosition(position: TrackedPosition): Promise<boolean> {
     try {
-      const { polymarketUSClient } = await import('@/services/api')
-      const market = await polymarketUSClient.getMarketBySlug(position.marketSlug)
+      const { polymarketClient } = await import('@/services/api')
+      const market = await polymarketClient.getMarketBySlug(position.marketSlug)
 
       if (!market) {
         // Market not found — keep position (user can manually close)
@@ -195,7 +206,7 @@ export class PositionLifecycleManager {
         return true
       }
 
-      // Skip if market is closed or inactive — PM US auto-settles resolved markets
+      // Skip if market is closed or inactive — Polymarket auto-settles resolved markets
       if (market.closed || !market.active) {
         console.log(`[PLM] Market ${position.marketSlug} is ${market.closed ? 'closed' : 'inactive'} — cleaning up`)
         this.handleResolvedPosition(position, market.outcomePrices).catch(() => {})
@@ -266,6 +277,7 @@ export class PositionLifecycleManager {
       clearInterval(this.resolutionIntervalId)
       this.resolutionIntervalId = null
     }
+    this.tokenIdToSlug.clear()
     this.initialized = false
   }
 
@@ -276,8 +288,12 @@ export class PositionLifecycleManager {
   trackPosition(position: TrackedPosition): void {
     this.positions.set(position.marketSlug, position)
 
-    // Subscribe to real-time price updates for this market
-    realtimeService.subscribeMarket(position.marketSlug)
+    // Subscribe to real-time price updates using CLOB token ID
+    const subId = position.tokenId ?? position.marketSlug
+    realtimeService.subscribeMarket(subId)
+    if (position.tokenId) {
+      this.tokenIdToSlug.set(position.tokenId, position.marketSlug)
+    }
 
     activityLogger.logInfo(
       `Tracking ${position.outcome.toUpperCase()} position — SL: ${(position.stopLossPercent * 100).toFixed(0)}%, TP: ${(position.takeProfitPercent * 100).toFixed(0)}%`,
@@ -309,8 +325,12 @@ export class PositionLifecycleManager {
     this.sellInProgress.delete(slug)
     this.sellRetries.delete(slug)
 
-    // Unsubscribe from price updates if no other positions use this market
-    realtimeService.unsubscribeMarket(slug)
+    // Unsubscribe from price updates using CLOB token ID
+    const unsubId = pos.tokenId ?? slug
+    realtimeService.unsubscribeMarket(unsubId)
+    if (pos.tokenId) {
+      this.tokenIdToSlug.delete(pos.tokenId)
+    }
 
     // Remove from IndexedDB (fire-and-forget)
     import('@/services/storage').then(({ indexedDBService }) => {
@@ -325,7 +345,9 @@ export class PositionLifecycleManager {
   /**
    * Force-close a single position (manual override from UI)
    */
-  async forceClosePosition(slug: string): Promise<boolean> {
+  async forceClosePosition(idOrSlug: string): Promise<boolean> {
+    // Accept either marketSlug or tokenId — resolve via reverse map if needed
+    const slug = this.positions.has(idOrSlug) ? idOrSlug : (this.tokenIdToSlug.get(idOrSlug) ?? idOrSlug)
     const position = this.positions.get(slug)
     if (!position) return false
 
@@ -358,14 +380,28 @@ export class PositionLifecycleManager {
   }
 
   /**
-   * Abandon a position without selling — removes from tracking and IndexedDB.
-   * Use for zombie positions that can't be sold (resolved markets, empty books, etc.)
+   * Abandon a position — checks market resolution first to record correct PnL.
+   * If market is resolved, delegates to handleResolvedPosition() for accurate tracking.
+   * Falls back to total-loss write-off only if API unavailable or market still open.
    */
-  abandonPosition(slug: string): boolean {
+  async abandonPosition(slug: string): Promise<boolean> {
     const pos = this.positions.get(slug)
     if (!pos) return false
 
-    const pnlUsd = -pos.costBasis // Assume total loss
+    // Try to detect resolution before assuming total loss
+    try {
+      const { polymarketClient } = await import('@/services/api')
+      const market = await polymarketClient.getMarketBySlug(slug)
+      if (market && (market.closed || !market.active)) {
+        console.log(`[PLM] Abandon → market ${slug} is resolved, using actual outcome`)
+        return await this.handleResolvedPosition(pos, market.outcomePrices)
+      }
+    } catch {
+      // API error — fall through to write-off
+    }
+
+    // Market still open or API unavailable — assume total loss
+    const pnlUsd = -pos.costBasis
     activityLogger.logWarning(
       `ABANDONED: ${pos.question.substring(0, 40)}... (write-off $${pos.costBasis.toFixed(2)})`,
       { marketSlug: slug, strategy: pos.strategy, costBasis: pos.costBasis }
@@ -390,11 +426,11 @@ export class PositionLifecycleManager {
   /**
    * Abandon ALL tracked positions without selling.
    */
-  abandonAll(): number {
+  async abandonAll(): Promise<number> {
     const slugs = Array.from(this.positions.keys())
     let count = 0
     for (const slug of slugs) {
-      if (this.abandonPosition(slug)) count++
+      if (await this.abandonPosition(slug)) count++
     }
     return count
   }
@@ -416,7 +452,7 @@ export class PositionLifecycleManager {
       if (!pos) continue
 
       const age = now - pos.entryTime
-      const priceData = realtimeService.getPrice(slug)
+      const priceData = realtimeService.getPrice(pos.tokenId ?? slug)
       const hasLivePrice = priceData && (now - priceData.timestamp.getTime()) < 10 * 60 * 1000 // 10 min
       const isResolved = priceData && (priceData.mid >= 0.95 || priceData.mid <= 0.05)
 
@@ -428,7 +464,7 @@ export class PositionLifecycleManager {
           `Auto-cleaned ${reason}: ${pos.question.substring(0, 40)}...`,
           { marketSlug: slug, strategy: pos.strategy, age: Math.round(age / 3600000) + 'h' }
         )
-        this.abandonPosition(slug)
+        this.abandonPosition(slug).catch(() => {})
         cleaned++
       }
     }
@@ -440,14 +476,32 @@ export class PositionLifecycleManager {
   }
 
   /**
+   * Trigger an immediate resolution sweep (non-blocking).
+   * Called by UI components when they detect expired positions
+   * to avoid waiting for the 15s periodic sweep.
+   */
+  triggerSweep(): void {
+    this.sweepResolvedPositions().catch(() => {})
+  }
+
+  /**
    * Get all tracked positions with current P&L
    */
   getPositions(): PositionStatus[] {
     const fiveMinAgo = Date.now() - 5 * 60 * 1000
+    const now = Date.now()
 
     return Array.from(this.positions.values()).map(pos => {
-      const priceData = realtimeService.getPrice(pos.marketSlug)
-      const currentPrice = priceData?.mid ?? pos.entryPrice
+      const priceData = realtimeService.getPrice(pos.tokenId ?? pos.marketSlug)
+
+      // For expired resolution-hold positions (past maxHoldMs), the CLOB token
+      // is deactivated and WS stops updating. Use last known price if available,
+      // otherwise fall back to entry price. The actual resolution will be handled
+      // by sweepResolvedPositions() when the market settles.
+      const isExpired = pos.maxHoldMs && pos.maxHoldMs > 0
+        && (now - pos.entryTime) > pos.maxHoldMs
+
+      const currentPrice = priceData?.mid ?? (isExpired ? pos.entryPrice : pos.entryPrice)
       // Show GROSS unrealized P&L (matches Polymarket display).
       // Fees are only deducted at sell time — pre-subtracting them makes
       // dashboard numbers look wrong compared to Polymarket's portfolio page.
@@ -459,7 +513,7 @@ export class PositionLifecycleManager {
         currentPrice,
         pnlPercent,
         pnlUsd,
-        isStale: priceData ? priceData.timestamp.getTime() < fiveMinAgo : true,
+        isStale: isExpired || (priceData ? priceData.timestamp.getTime() < fiveMinAgo : true),
       }
     })
   }
@@ -471,7 +525,7 @@ export class PositionLifecycleManager {
   getUnrealizedPnl(): { totalUsd: number; positionCount: number } {
     let totalUsd = 0
     for (const pos of this.positions.values()) {
-      const priceData = realtimeService.getPrice(pos.marketSlug)
+      const priceData = realtimeService.getPrice(pos.tokenId ?? pos.marketSlug)
       const currentPrice = priceData?.mid ?? pos.entryPrice
       totalUsd += pos.size * (currentPrice - pos.entryPrice)
     }
@@ -511,7 +565,8 @@ export class PositionLifecycleManager {
     if (position.sellFailed) return
 
     // Skip stale prices — don't trigger SL/TP on outdated data
-    if (realtimeService.isStale(slug)) {
+    const priceKey = position.tokenId ?? slug
+    if (realtimeService.isStale(priceKey)) {
       return
     }
 
@@ -708,7 +763,7 @@ export class PositionLifecycleManager {
       const result = await tradingService.placeSell(marketSlug, outcome, position.size, undefined, 'GTC')
 
       if (result.success) {
-        const priceData = realtimeService.getPrice(marketSlug)
+        const priceData = realtimeService.getPrice(position.tokenId ?? marketSlug)
         const exitPrice = priceData?.mid ?? position.entryPrice
         const pnlUsd = (exitPrice - position.entryPrice) * size
 
@@ -774,9 +829,9 @@ export class PositionLifecycleManager {
       })
 
       const errorMsg = (result.error ?? '').toLowerCase()
-      if (errorMsg.includes('not enough balance') || errorMsg.includes('no position')) {
-        // Position gone — market likely resolved. Remove immediately.
-        console.log(`[PLM] No position held — removing stale position and triggering resolution sweep`)
+      if (errorMsg.includes('not enough balance') || errorMsg.includes('no position') || errorMsg.includes('could not determine market price')) {
+        // Position gone or no order book — market likely resolved. Remove and sweep.
+        console.log(`[PLM] Market illiquid/resolved — removing stale position and triggering resolution sweep`)
         this.removePosition(marketSlug)
         this.sweepResolvedPositions().catch(() => {})
       } else {
@@ -808,7 +863,7 @@ export class PositionLifecycleManager {
       const result = await tradingService.placeSell(marketSlug, outcome, size, undefined, 'GTC')
 
       if (result.success) {
-        const priceData = realtimeService.getPrice(marketSlug)
+        const priceData = realtimeService.getPrice(position.tokenId ?? marketSlug)
         const exitPrice = priceData?.mid ?? position.entryPrice
         const pnlUsd = (exitPrice - position.entryPrice) * size
 
@@ -853,8 +908,8 @@ export class PositionLifecycleManager {
       })
 
       const errorMsg = (result.error ?? '').toLowerCase()
-      if (errorMsg.includes('not enough balance') || errorMsg.includes('no position')) {
-        console.log(`[PLM] No position held — removing stale position and triggering resolution sweep`)
+      if (errorMsg.includes('not enough balance') || errorMsg.includes('no position') || errorMsg.includes('could not determine market price')) {
+        console.log(`[PLM] Market illiquid/resolved — removing stale position and triggering resolution sweep`)
         this.removePosition(marketSlug)
         this.sweepResolvedPositions().catch(() => {})
       } else {
@@ -877,21 +932,23 @@ export class PositionLifecycleManager {
   /**
    * Start periodic sweep for resolved positions.
    * Checks every 60s if any tracked position's market has resolved.
-   * PM US handles settlement automatically — we just clean up tracking.
+   * Polymarket handles settlement automatically — we just clean up tracking.
    */
   private startResolutionSweep(): void {
     if (this.resolutionIntervalId) return
 
+    // Use 15s interval — resolution-hold strategies (BTC, Gabagool) need
+    // prompt cleanup after window expiry to keep the dashboard accurate.
     this.resolutionIntervalId = setInterval(() => {
       this.sweepResolvedPositions()
       this.sweepStalePositions()
-    }, 60_000)
+    }, 15_000)
   }
 
   /**
    * Scan all tracked positions, check if their market has resolved,
    * and clean up tracking for any that have.
-   * PM US auto-settles resolved markets — we just compute PnL and remove tracking.
+   * Polymarket auto-settles resolved markets — we just compute PnL and remove tracking.
    */
   private async sweepResolvedPositions(): Promise<void> {
     if (this.positions.size === 0) return
@@ -903,8 +960,8 @@ export class PositionLifecycleManager {
       if (this.sellInProgress.has(position.marketSlug)) continue
 
       try {
-        const { polymarketUSClient } = await import('@/services/api')
-        const market = await polymarketUSClient.getMarketBySlug(position.marketSlug)
+        const { polymarketClient } = await import('@/services/api')
+        const market = await polymarketClient.getMarketBySlug(position.marketSlug)
 
         if (market && (market.closed || !market.active)) {
           console.log(`[PLM] Sweep: market ${position.marketSlug} resolved — cleaning up`)
@@ -938,14 +995,14 @@ export class PositionLifecycleManager {
       if (staleDuration < STALE_ABANDON_MS) continue
 
       try {
-        const { polymarketUSClient } = await import('@/services/api')
-        const market = await polymarketUSClient.getMarketBySlug(position.marketSlug)
+        const { polymarketClient } = await import('@/services/api')
+        const market = await polymarketClient.getMarketBySlug(position.marketSlug)
 
         if (market && (market.closed || !market.active)) {
           console.log(`[PLM] Auto-abandoning stale resolved position: ${position.question?.substring(0, 40)}...`)
           const handled = await this.handleResolvedPosition(position, market.outcomePrices)
           if (!handled) {
-            this.abandonPosition(position.marketSlug)
+            await this.abandonPosition(position.marketSlug)
           }
         }
         // If market still active but stale, leave it — WS may reconnect
@@ -960,7 +1017,7 @@ export class PositionLifecycleManager {
   /**
    * Handle a resolved position — compute PnL from outcome prices and clean up.
    *
-   * PM US handles settlement automatically via centralized clearing.
+   * Polymarket handles settlement automatically via centralized clearing.
    * This method just:
    * 1. Computes PnL from resolved outcome prices
    * 2. Records result with riskManager and tradeLogger

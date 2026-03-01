@@ -122,6 +122,70 @@ export class EdgeTracker {
     return result
   }
 
+  /**
+   * Detect edge decay — compare recent performance to historical.
+   *
+   * Splits closed trades into two halves (first half vs second half) and
+   * checks if the win rate is declining. A strategy whose edge is fading
+   * should be throttled or paused before it starts losing money.
+   *
+   * @returns decay info with recentWinRate, historicalWinRate, and isDecaying flag
+   */
+  detectEdgeDecay(strategy: string): {
+    isDecaying: boolean
+    historicalWinRate: number
+    recentWinRate: number
+    sampleSize: number
+    decayMagnitude: number  // how much win rate dropped (0-1)
+  } {
+    const closed = this.getClosedTrades(strategy)
+
+    if (closed.length < MIN_RELIABLE * 2) {
+      // Not enough data to split — can't detect decay
+      return { isDecaying: false, historicalWinRate: 0, recentWinRate: 0, sampleSize: closed.length, decayMagnitude: 0 }
+    }
+
+    // Sort by exit timestamp (oldest first)
+    const sorted = [...closed].sort((a, b) => (a.exitTimestamp ?? 0) - (b.exitTimestamp ?? 0))
+    const midpoint = Math.floor(sorted.length / 2)
+
+    const firstHalf = sorted.slice(0, midpoint)
+    const secondHalf = sorted.slice(midpoint)
+
+    const historicalWins = firstHalf.filter(r => (r.pnlUSD ?? 0) > 0).length
+    const recentWins = secondHalf.filter(r => (r.pnlUSD ?? 0) > 0).length
+
+    const historicalWinRate = historicalWins / firstHalf.length
+    const recentWinRate = recentWins / secondHalf.length
+
+    // Decay detected if recent win rate dropped by >15 percentage points
+    const decayMagnitude = historicalWinRate - recentWinRate
+    const isDecaying = decayMagnitude > 0.15
+
+    return {
+      isDecaying,
+      historicalWinRate,
+      recentWinRate,
+      sampleSize: closed.length,
+      decayMagnitude,
+    }
+  }
+
+  /**
+   * Get comprehensive strategy health: edge stats + decay detection.
+   */
+  getStrategyHealth(strategy: string, feeRateBps: number): {
+    edge: StrategyEdge
+    shouldTrade: { allowed: boolean; reason?: string }
+    decay: ReturnType<EdgeTracker['detectEdgeDecay']>
+  } {
+    return {
+      edge: this.getStrategyEdge(strategy),
+      shouldTrade: this.shouldTrade(strategy, feeRateBps),
+      decay: this.detectEdgeDecay(strategy),
+    }
+  }
+
   private getClosedTrades(strategy: string): TradeRecord[] {
     return tradeLogger
       .getRecords()

@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -61,7 +63,7 @@ html {
 
 body {
   @apply bg-agent-bg text-agent-text;
-  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+  font-family: 'Geist Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -132,7 +134,7 @@ body {
 
 /* Utility Classes */
 .font-mono {
-  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+  font-family: 'Geist Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
 }
 
 /* Card hover effects */
@@ -220,7 +222,8 @@ body {
 
 /* Glassmorphism card */
 .glass-card {
-  @apply bg-agent-card/50 backdrop-blur-lg border border-agent-green/[0.07] rounded-xl shadow-glass;
+  @apply bg-agent-card/60 backdrop-blur-md border border-agent-green/[0.07] rounded-xl shadow-glass;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
 /* Gradient border (green-to-cyan pseudo-element) */
@@ -258,15 +261,16 @@ body {
 
 /* Dashboard utility classes */
 .card-base {
-  @apply bg-agent-card/50 backdrop-blur-lg border border-agent-green/[0.07] rounded-xl shadow-glass;
+  @apply bg-agent-card/60 backdrop-blur-md border border-agent-green/[0.07] rounded-xl;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
 .section-label {
-  @apply text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium;
+  @apply text-[11px] uppercase tracking-[0.08em] text-agent-text-muted font-sans font-medium;
 }
 
 .data-value {
-  @apply font-mono font-semibold text-agent-text tabular-nums;
+  @apply font-mono font-bold text-agent-text tabular-nums;
 }
 
 .row-hover {

@@ -52,15 +52,15 @@ export interface RiskManagerStatus {
 // ==========================================
 
 const DEFAULT_CONFIG: RiskManagerConfig = {
-  dailyLossLimit: 3,
-  weeklyLossLimit: 10,
-  maxTradesPerHour: 20,
-  consecutiveFailureLimit: 5,
-  minBalanceForTrade: 1.00,
+  dailyLossLimit: 2,        // $2/day = 20% of $10 bankroll
+  weeklyLossLimit: 5,       // $5/week = 50% max weekly drawdown
+  maxTradesPerHour: 15,     // Fewer trades = less fee drag at small size
+  consecutiveFailureLimit: 3, // Trip faster — preserve capital
+  minBalanceForTrade: 1,    // $1 CLOB minimum
   minMaticForGas: 0.01,
   maxDrawdownPercent: 0.30,       // 30% drawdown triggers emergency stop
-  maxPerMarketExposure: 0.20,     // 20% of capital max per market
-  maxCategoryExposure: 0.40,      // 40% of capital max per category
+  maxPerMarketExposure: 0.50,     // 50% of capital max per market (was 20% — too tight for small bankrolls)
+  maxCategoryExposure: 0.70,      // 70% of capital max per category (was 40% — BTC markets are same category)
   enabled: true,
 }
 
@@ -87,14 +87,22 @@ export class RiskManager {
   private marketExposure = new Map<string, number>() // conditionId → USD exposure
   private categoryExposure = new Map<string, number>() // category → USD exposure
   private marketToCategory = new Map<string, string>() // conditionId → category
+  // Cross-strategy: per-underlying-asset exposure (BTC, ETH, SOL, XRP)
+  private assetExposure = new Map<string, number>() // asset → total USD across all strategies
+  private strategyExposure = new Map<string, number>() // strategyId → total USD exposure
+  // Drawdown throttle: reduce scan frequency after consecutive losses
+  private recentLosses = 0
+  private lastThrottleReset = Date.now()
 
   /**
    * Scale an absolute dollar limit for penny trader mode.
-   * Penny mode uses 20% of normal limits (e.g. $10 daily → $2).
+   * Penny mode uses 60% of normal limits so a $2 daily limit becomes $1.20
+   * (survives at least one $1 losing trade before circuit-breaking).
+   * Previous 20% scaling made $2 → $0.40 which was below the $1 CLOB minimum.
    */
   private getPennyScaledLimit(baseLimit: number): number {
     const pennyMode = useSettingsStore.getState().pennyTraderMode ?? false
-    return pennyMode ? baseLimit * 0.2 : baseLimit
+    return pennyMode ? baseLimit * 0.6 : baseLimit
   }
 
   constructor(config?: Partial<RiskManagerConfig>) {
@@ -452,6 +460,118 @@ export class RiskManager {
    */
   get emergencyStopped(): boolean {
     return this._emergencyStopped
+  }
+
+  // ==========================================
+  // CROSS-STRATEGY EXPOSURE TRACKING
+  // ==========================================
+
+  /**
+   * Record exposure for an underlying asset (BTC, ETH, SOL, XRP).
+   * Multiple strategies trading BTC-derived markets all contribute to the
+   * same asset bucket. This catches correlated risk that per-market limits miss.
+   *
+   * @param asset Underlying asset symbol (e.g., 'BTC')
+   * @param strategyId Strategy placing the trade (e.g., 'btc-updown')
+   * @param amountUSDC Dollar amount of the position
+   */
+  recordAssetExposure(asset: string, strategyId: string, amountUSDC: number): void {
+    const existing = this.assetExposure.get(asset) ?? 0
+    this.assetExposure.set(asset, existing + amountUSDC)
+    const stratExisting = this.strategyExposure.get(strategyId) ?? 0
+    this.strategyExposure.set(strategyId, stratExisting + amountUSDC)
+  }
+
+  /**
+   * Reduce exposure for an underlying asset when a position closes.
+   */
+  reduceAssetExposure(asset: string, strategyId: string, amountUSDC: number): void {
+    const remaining = (this.assetExposure.get(asset) ?? 0) - amountUSDC
+    if (remaining <= 0) this.assetExposure.delete(asset)
+    else this.assetExposure.set(asset, remaining)
+
+    const stratRemaining = (this.strategyExposure.get(strategyId) ?? 0) - amountUSDC
+    if (stratRemaining <= 0) this.strategyExposure.delete(strategyId)
+    else this.strategyExposure.set(strategyId, stratRemaining)
+  }
+
+  /**
+   * Check if a new trade would exceed per-asset correlation limits.
+   * Default cap: 80% of capital can be exposed to any single underlying asset.
+   */
+  checkAssetConcentration(asset: string, amountUSDC: number, maxAssetExposure = 0.80): RiskCheckResult {
+    if (!this.config.enabled) return { allowed: true }
+
+    const { balance: currentBalance } = useWalletStore.getState()
+    if (currentBalance <= 0) return { allowed: true }
+
+    const existingExposure = this.assetExposure.get(asset) ?? 0
+    const newRatio = (existingExposure + amountUSDC) / currentBalance
+
+    if (newRatio > maxAssetExposure) {
+      return {
+        allowed: false,
+        reason: `Asset '${asset}' concentration: $${(existingExposure + amountUSDC).toFixed(2)} ` +
+          `would be ${(newRatio * 100).toFixed(0)}% of capital (max ${(maxAssetExposure * 100).toFixed(0)}%)`,
+        riskCode: 'CATEGORY_CONCENTRATION',
+      }
+    }
+    return { allowed: true }
+  }
+
+  /**
+   * Get total exposure per underlying asset (for UI display).
+   */
+  getAssetExposures(): Record<string, number> {
+    return Object.fromEntries(this.assetExposure)
+  }
+
+  /**
+   * Get total exposure per strategy (for UI display).
+   */
+  getStrategyExposures(): Record<string, number> {
+    return Object.fromEntries(this.strategyExposure)
+  }
+
+  // ==========================================
+  // DRAWDOWN-BASED THROTTLING
+  // ==========================================
+
+  /**
+   * Get a throttle multiplier for scan intervals based on recent losses.
+   * After consecutive losses, strategies should scan less frequently to
+   * avoid panic-trading. Returns a multiplier (1.0 = normal, 2.0 = 2x slower).
+   *
+   * Resets after 30 minutes of no new losses.
+   */
+  getThrottleMultiplier(): number {
+    // Reset if 30 minutes since last loss
+    if (Date.now() - this.lastThrottleReset > 30 * 60 * 1000) {
+      this.recentLosses = 0
+    }
+
+    // Exponential backoff: 1x, 1.5x, 2x, 3x, 4x
+    if (this.recentLosses <= 0) return 1.0
+    if (this.recentLosses === 1) return 1.5
+    if (this.recentLosses === 2) return 2.0
+    if (this.recentLosses === 3) return 3.0
+    return 4.0
+  }
+
+  /**
+   * Record a loss for throttle tracking (called alongside recordTradeResult).
+   */
+  recordLossForThrottle(): void {
+    this.recentLosses++
+    this.lastThrottleReset = Date.now()
+  }
+
+  /**
+   * Reset throttle (called on successful trade).
+   */
+  resetThrottle(): void {
+    this.recentLosses = 0
+    this.lastThrottleReset = Date.now()
   }
 
   /**

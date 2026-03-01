@@ -1,5 +1,5 @@
 import type { Market } from '@/types'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 import { calibrationTracker } from './CalibrationTracker'
 
 export interface ScanResult {
@@ -55,8 +55,8 @@ export class MarketScanner {
    */
   async scan(): Promise<ScanResult[]> {
     try {
-      // Fetch all active markets from US API
-      const markets = await polymarketUSClient.getMarkets({ active: true })
+      // Fetch all active markets from Gamma API
+      const markets = await polymarketClient.getMarkets({ active: true })
 
       this.scanResults = markets.map(market => this.evaluateMarket(market))
       this.lastScanTime = new Date()

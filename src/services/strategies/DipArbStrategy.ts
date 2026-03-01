@@ -5,7 +5,6 @@ import { gammaClient } from '@/services/api/GammaClient'
 import { clobClient } from '@/services/api/CLOBClient'
 import { realtimeService } from '@/services/realtime'
 import { tradingService } from '@/services/trading/TradingService'
-import { walletService } from '@/services/wallet'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
@@ -630,7 +629,8 @@ export class DipArbStrategy extends BaseStrategy {
             // Sell Leg 1 back
             const leg1Shares = leg1Result.filledSize || tradeAmount / event.currentPrice
             const sellResult = await tradingService.placeSell(
-              event.market.clobTokenIds[dippedIndex],
+              event.market.slug,
+              event.outcome as 'yes' | 'no',
               leg1Shares
             )
 
@@ -644,9 +644,8 @@ export class DipArbStrategy extends BaseStrategy {
                 import('@/services/api').then(api => api.clobClient.getFeeRateBps(slipTokenId)).catch(() => undefined),
               ]).then(([m, feeRate]) => {
                 m.positionLifecycleManager.trackPosition({
+                  marketSlug: event.market.slug,
                   tokenId: slipTokenId,
-                  marketId: event.market.id,
-                  conditionId: event.market.conditionId,
                   outcome: event.outcome,
                   question: event.market.question,
                   entryPrice: event.currentPrice,
@@ -656,7 +655,6 @@ export class DipArbStrategy extends BaseStrategy {
                   stopLossPercent: this.dipConfig.stopLossPercent ?? 0.20,
                   takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
                   strategy: 'dip',
-                  negRisk: event.market.negRisk,
                   takerFeeBps: feeRate,
                 })
               }).catch(err => console.warn('[DipArb] Failed to track slippage fallback position:', err))
@@ -692,7 +690,8 @@ export class DipArbStrategy extends BaseStrategy {
 
         const leg1Shares = leg1Result.filledSize || tradeAmount / event.currentPrice
         const sellResult = await tradingService.placeSell(
-          event.market.clobTokenIds[dippedIndex],
+          event.market.slug,
+          event.outcome as 'yes' | 'no',
           leg1Shares
         )
 
@@ -707,9 +706,8 @@ export class DipArbStrategy extends BaseStrategy {
             import('@/services/api').then(api => api.clobClient.getFeeRateBps(fbTokenId)).catch(() => undefined),
           ]).then(([m, feeRate]) => {
             m.positionLifecycleManager.trackPosition({
+              marketSlug: event.market.slug,
               tokenId: fbTokenId,
-              marketId: event.market.id,
-              conditionId: event.market.conditionId,
               outcome: event.outcome,
               question: event.market.question,
               entryPrice: event.currentPrice,
@@ -719,7 +717,6 @@ export class DipArbStrategy extends BaseStrategy {
               stopLossPercent: this.dipConfig.stopLossPercent ?? 0.20,
               takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
               strategy: 'dip',
-              negRisk: event.market.negRisk,
               takerFeeBps: feeRate,
             })
           }).catch(err => console.warn('[DipArb] Failed to track fallback position:', err))
@@ -798,9 +795,17 @@ export class DipArbStrategy extends BaseStrategy {
         let lastMergeError = ''
 
         for (let attempt = 1; attempt <= MAX_MERGE_RETRIES; attempt++) {
-          const mergeResult = await walletService.mergePositions(
+          // Use MergeService for on-chain CTF merge (lazy-init from wallet)
+          const { mergeService } = await import('@/services/trading/MergeService')
+          if (!mergeService.isReady()) {
+            const { walletService: ws } = await import('@/services/wallet')
+            const wallet = ws.getWallet()
+            if (wallet) mergeService.initialize(wallet)
+          }
+          const mergeAmountUnits = mergeService.computeMergeAmount(leg1Shares, leg2Shares)
+          const mergeResult = await mergeService.merge(
             event.market.conditionId,
-            mergeAmount
+            mergeAmountUnits
           )
 
           if (mergeResult.success) {
@@ -817,6 +822,12 @@ export class DipArbStrategy extends BaseStrategy {
 
           lastMergeError = mergeResult.error ?? 'unknown'
           this.log(`Merge attempt ${attempt}/${MAX_MERGE_RETRIES} failed: ${lastMergeError}`)
+
+          // Bail immediately on non-transient errors (auth, gas, balance)
+          if (lastMergeError.includes('not transient') || lastMergeError.includes('MATIC') || lastMergeError.includes('Insufficient token')) {
+            this.log('Non-transient merge error — skipping retries')
+            break
+          }
 
           if (attempt < MAX_MERGE_RETRIES) {
             const delayMs = 2000 * Math.pow(2, attempt - 1) // 2s, 4s, 8s
@@ -836,9 +847,8 @@ export class DipArbStrategy extends BaseStrategy {
             import('@/services/api').then(api => api.clobClient.getFeeRateBps(mergeToken1)).catch(() => undefined),
           ]).then(([m, feeRate]) => {
             m.positionLifecycleManager.trackPosition({
+              marketSlug: event.market.slug,
               tokenId: mergeToken1,
-              marketId: event.market.id,
-              conditionId: event.market.conditionId,
               outcome: event.outcome,
               question: event.market.question,
               entryPrice: event.currentPrice,
@@ -848,13 +858,11 @@ export class DipArbStrategy extends BaseStrategy {
               stopLossPercent: this.dipConfig.stopLossPercent ?? 0.20,
               takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
               strategy: 'dip',
-              negRisk: event.market.negRisk,
               takerFeeBps: feeRate,
             })
             m.positionLifecycleManager.trackPosition({
+              marketSlug: event.market.slug,
               tokenId: mergeToken2,
-              marketId: event.market.id,
-              conditionId: event.market.conditionId,
               outcome: complementOutcome,
               question: event.market.question,
               entryPrice: complementPrice,
@@ -864,7 +872,6 @@ export class DipArbStrategy extends BaseStrategy {
               stopLossPercent: this.dipConfig.stopLossPercent ?? 0.20,
               takeProfitPercent: this.dipConfig.takeProfitPercent ?? 0.10,
               strategy: 'dip',
-              negRisk: event.market.negRisk,
               takerFeeBps: feeRate, // same market, same fee
             })
           }).catch(err => console.warn('[DipArb] Failed to track unmerged positions:', err))

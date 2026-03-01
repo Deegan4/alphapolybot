@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { Market, ArbRound, DipArbConfig } from '@/types'
+import type { Market } from '@/types'
 import type { DipEvent } from '../DipDetector'
 
 // ==========================================
@@ -17,13 +17,24 @@ vi.mock('@/services/trading/TradingService', () => ({
   },
 }))
 
-// Mock walletService
-const mockMergePositions = vi.fn()
+// Mock walletService (dynamic import for merge init)
 vi.mock('@/services/wallet', () => ({
   walletService: {
-    mergePositions: (...args: unknown[]) => mockMergePositions(...args),
+    getWallet: vi.fn().mockReturnValue({ address: '0xtest' }),
     ensureApprovals: vi.fn().mockResolvedValue(true),
     subscribe: vi.fn(),
+  },
+}))
+
+// Mock MergeService (dynamic import used by DipArb for on-chain merge)
+const mockMerge = vi.fn()
+const mockComputeMergeAmount = vi.fn().mockReturnValue(1000000n) // $1.00 in USDC.e units
+vi.mock('@/services/trading/MergeService', () => ({
+  mergeService: {
+    isReady: vi.fn().mockReturnValue(true),
+    initialize: vi.fn(),
+    merge: (...args: unknown[]) => mockMerge(...args),
+    computeMergeAmount: (...args: unknown[]) => mockComputeMergeAmount(...args),
   },
 }))
 
@@ -34,6 +45,25 @@ vi.mock('@/services/api/GammaClient', () => ({
     getCryptoMarkets: vi.fn().mockResolvedValue([]),
     getMarket: (...args: unknown[]) => mockGetMarket(...args),
   },
+}))
+
+// Mock clobClient (used by DipArb for getOrderBook + dynamic import for getFeeRateBps)
+const mockClobClient = {
+  getOrderBook: vi.fn().mockResolvedValue({ bids: [], asks: [] }),
+  getFeeRateBps: vi.fn().mockResolvedValue(100),
+}
+vi.mock('@/services/api/CLOBClient', () => ({
+  clobClient: mockClobClient,
+}))
+
+// Mock barrel (dynamic import('@/services/api') used in PLM tracking paths)
+vi.mock('@/services/api', () => ({
+  clobClient: mockClobClient,
+  gammaClient: {
+    getCryptoMarkets: vi.fn().mockResolvedValue([]),
+    getMarket: (...args: unknown[]) => mockGetMarket(...args),
+  },
+  polymarketClient: { hasCredentials: vi.fn().mockReturnValue(true) },
 }))
 
 // Mock realtimeService
@@ -115,6 +145,7 @@ vi.mock('@/services/trading/OrderBookDepth', () => ({
 function createTestMarket(overrides?: Partial<Market>): Market {
   return {
     id: 'market-001',
+    slug: 'btc-above-100k-315pm',
     question: 'Will BTC be above $100k at 3:15 PM UTC?',
     outcomes: ['Yes', 'No'],
     clobTokenIds: ['token-yes-001', 'token-no-001'],
@@ -168,7 +199,7 @@ describe('DipArbStrategy', () => {
     })
 
     // Default: merge succeeds
-    mockMergePositions.mockResolvedValue({
+    mockMerge.mockResolvedValue({
       success: true,
       txHash: '0xmerge123',
     })
@@ -224,17 +255,17 @@ describe('DipArbStrategy', () => {
 
       await dipCallback!(event)
 
-      // Leg 1: Buy YES — penny mode: max(1, 5 * maxLegPrice) = max(1, 5*0.60) = 3
+      // Leg 1: Buy YES — Kelly: arbKelly(0.05)=0.10, sizeBet(0.20, 100, 0.10) = $2
       expect(mockPlaceBet).toHaveBeenCalledTimes(2)
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 2, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
 
       // Leg 2: Buy NO
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 2, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
 
-      // Merge positions
-      expect(mockMergePositions).toHaveBeenCalledWith(
+      // Merge positions (conditionId + bigint USDC.e units from computeMergeAmount)
+      expect(mockMerge).toHaveBeenCalledWith(
         event.market.conditionId,
-        expect.any(Number)
+        expect.any(BigInt)
       )
 
       // Arb round should be recorded
@@ -265,11 +296,11 @@ describe('DipArbStrategy', () => {
       const event = createDipEvent()
       await dipCallback!(event)
 
-      // Should try to sell leg 1 back
-      expect(mockPlaceSell).toHaveBeenCalledWith('token-yes-001', 10)
+      // Should try to sell leg 1 back (placeSell now takes slug, outcome, shares)
+      expect(mockPlaceSell).toHaveBeenCalledWith('btc-above-100k-315pm', 'yes', 10)
 
       // Merge should NOT be called
-      expect(mockMergePositions).not.toHaveBeenCalled()
+      expect(mockMerge).not.toHaveBeenCalled()
 
       // Round should show leg 2 failed
       const rounds = strategy.getArbRounds()
@@ -313,7 +344,7 @@ describe('DipArbStrategy', () => {
 
       // Only 1 call (leg 1), no leg 2 attempt
       expect(mockPlaceBet).toHaveBeenCalledTimes(1)
-      expect(mockMergePositions).not.toHaveBeenCalled()
+      expect(mockMerge).not.toHaveBeenCalled()
     })
 
     it('aborts Leg 2 and sells Leg 1 when prices move (slippage protection)', async () => {
@@ -331,14 +362,14 @@ describe('DipArbStrategy', () => {
 
       // Leg 1 should execute (uses original price)
       expect(mockPlaceBet).toHaveBeenCalledTimes(1)
-      expect(mockPlaceBet).toHaveBeenCalledWith(event.market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenCalledWith(event.market, 'yes', 2, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
 
       // Leg 2 should NOT execute — slippage check aborted
-      // Instead, Leg 1 should be sold back
-      expect(mockPlaceSell).toHaveBeenCalledWith('token-yes-001', 10)
+      // Instead, Leg 1 should be sold back (placeSell now takes slug, outcome, shares)
+      expect(mockPlaceSell).toHaveBeenCalledWith('btc-above-100k-315pm', 'yes', 10)
 
       // Merge should NOT be called
-      expect(mockMergePositions).not.toHaveBeenCalled()
+      expect(mockMerge).not.toHaveBeenCalled()
 
       // Round recorded as leg2 failed
       const rounds = strategy.getArbRounds()
@@ -361,7 +392,7 @@ describe('DipArbStrategy', () => {
       // Both legs should execute
       expect(mockPlaceBet).toHaveBeenCalledTimes(2)
       // Merge should be called
-      expect(mockMergePositions).toHaveBeenCalled()
+      expect(mockMerge).toHaveBeenCalled()
     })
 
     it('proceeds with original price when slippage check API fails', async () => {
@@ -373,11 +404,11 @@ describe('DipArbStrategy', () => {
 
       // Both legs should still execute (best effort)
       expect(mockPlaceBet).toHaveBeenCalledTimes(2)
-      expect(mockMergePositions).toHaveBeenCalled()
+      expect(mockMerge).toHaveBeenCalled()
     })
 
     it('tracks both positions when merge fails', async () => {
-      mockMergePositions.mockResolvedValue({ success: false, error: 'Gas estimation failed' })
+      mockMerge.mockResolvedValue({ success: false, error: 'Gas estimation failed' })
 
       const event = createDipEvent()
       // Start the arb (don't await yet — it will block on merge retries)
@@ -391,7 +422,7 @@ describe('DipArbStrategy', () => {
       expect(mockPlaceBet).toHaveBeenCalledTimes(2)
 
       // Merge attempted 3 times (with retry)
-      expect(mockMergePositions).toHaveBeenCalledTimes(3)
+      expect(mockMerge).toHaveBeenCalledTimes(3)
 
       // PLM tracks via dynamic import().then() — flush microtasks
       await new Promise(r => setTimeout(r, 0))
@@ -530,8 +561,8 @@ describe('DipArbStrategy', () => {
       await dipCallback!(event)
 
       // Leg 1 = YES, Leg 2 = NO
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, event.market, 'yes', 2, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, event.market, 'no', 2, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
     })
 
     it('buys YES when NO dips', async () => {
@@ -549,8 +580,8 @@ describe('DipArbStrategy', () => {
       await dipCallback!(event)
 
       // Leg 1 = NO, Leg 2 = YES
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, market, 'no', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
-      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, market, 'yes', 3, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(1, market, 'no', 2, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
+      expect(mockPlaceBet).toHaveBeenNthCalledWith(2, market, 'yes', 2, { skipGtcFallback: true, orderType: 'GTD', gtdExpiryMs: 120_000 })
     })
   })
 })

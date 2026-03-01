@@ -54,10 +54,10 @@ const navItems: NavItem[] = [
  * SidebarContent — the inner content, reused in both desktop and mobile drawer
  */
 const SidebarContent: React.FC<{ onNavigate?: () => void }> = ({ onNavigate }) => {
-  const { isConnected, keyId, balance, buyingPower } = useWalletStore()
+  const { isConnected, address, balance, buyingPower } = useWalletStore()
 
-  const formatKeyId = (id: string) => {
-    return `${id.slice(0, 8)}...`
+  const formatAddress = (addr: string) => {
+    return `${addr.slice(0, 6)}...${addr.slice(-4)}`
   }
 
   return (
@@ -95,7 +95,7 @@ const SidebarContent: React.FC<{ onNavigate?: () => void }> = ({ onNavigate }) =
               <span className="text-matrix-primary text-sm font-mono">Connected</span>
             </div>
             <div className="text-matrix-text-secondary text-xs font-mono">
-              {keyId ? formatKeyId(keyId) : 'Unknown'}
+              {address ? formatAddress(address) : 'Not connected'}
             </div>
             <div className="gradient-border bg-matrix-bg rounded px-2 py-1.5">
               <span className="text-matrix-text-muted text-xs font-sans">Balance: </span>

@@ -37,7 +37,6 @@ const DEFAULT_CONFIG: BtcUpDownConfig = {
   enable15m: true,
   enableHourly: false,
   enableDaily: false,
-  enable9pm: false,
   tradeSize: 2.0,
   useKellySizing: false,  // Backtest uses fixed size for consistency
   minConfidence: 0.55,

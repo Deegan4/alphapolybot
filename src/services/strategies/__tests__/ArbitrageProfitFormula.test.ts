@@ -22,6 +22,12 @@ const DEFAULT_OPTIMIZER_CONFIG: FWOptimizerConfig = {
 }
 
 function makeScanner(overrides?: Partial<ScannerConfig>) {
+  const {
+    maxConcurrency,
+    maxOpportunitiesPerScan,
+    ...restOverrides
+  } = overrides || {}
+
   const config: ScannerConfig = {
     minLiquidity: 50,
     minVolume24h: 10,
@@ -31,8 +37,18 @@ function makeScanner(overrides?: Partial<ScannerConfig>) {
     gasEstimateUSD: 0.01,
     enableMultiOutcome: false,
     tradeSize: 100,
-    ...overrides,
+    ...restOverrides,
+    maxConcurrency: 0,
+    maxOpportunitiesPerScan: 0
   }
+
+  if (typeof maxConcurrency === 'number') {
+    config.maxConcurrency = maxConcurrency
+  }
+  if (typeof maxOpportunitiesPerScan === 'number') {
+    config.maxOpportunitiesPerScan = maxOpportunitiesPerScan
+  }
+
   return new ArbitrageScanner(DEFAULT_OPTIMIZER_CONFIG, config)
 }
 
@@ -282,7 +298,9 @@ describe('computeVWAP — depth-aware pricing', () => {
   })
 
   it('null/undefined levels returns null', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(ArbitrageScanner.computeVWAP(null as any, 100)).toBeNull()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(ArbitrageScanner.computeVWAP(undefined as any, 100)).toBeNull()
   })
 

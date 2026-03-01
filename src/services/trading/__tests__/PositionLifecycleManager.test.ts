@@ -62,10 +62,9 @@ vi.mock('@/stores', () => ({
   },
 }))
 
-// Mock US client (PLM fetches positions/markets via dynamic import)
+// Mock CLOB client (PLM fetches markets via dynamic import)
 vi.mock('@/services/api', () => ({
-  polymarketUSClient: {
-    getPositions: vi.fn().mockResolvedValue([]),
+  polymarketClient: {
     getMarketBySlug: vi.fn().mockResolvedValue(null),
   },
 }))

@@ -13,6 +13,7 @@ import { FrankWolfeOptimizer } from './FrankWolfeOptimizer'
 import { gammaClient } from '@/services/api/GammaClient'
 import { clobClient } from '@/services/api/CLOBClient'
 import { realtimeService } from '@/services/realtime'
+import { dynamicFeeService } from '@/services/trading/DynamicFeeService'
 
 export interface ScannerConfig {
   minLiquidity: number
@@ -288,7 +289,12 @@ export class ArbitrageScanner {
       const maxFee = Math.max(...feeRates)
       if (maxFee > 0) marketFeeBps = maxFee
     } catch {
-      // Fee fetch failed — use static config default
+      // Fee API failed — estimate from mid-price via DynamicFeeService
+      // (more accurate than static fallback for crypto markets near 50%)
+      const midPrice = snapshot.prices.reduce((s, p) => s + p, 0) / snapshot.prices.length
+      const isCrypto = market.slug?.includes('crypto') || market.slug?.includes('btc') || market.slug?.includes('eth')
+      const estimate = dynamicFeeService.estimateDynamicFee(midPrice, !!isCrypto)
+      marketFeeBps = Math.max(marketFeeBps, estimate.feeRateBps)
     }
 
     // ── Paper formula: π_i(t) = max(0, |y_i| − N_i·γ_i) ──
@@ -435,9 +441,8 @@ export class ArbitrageScanner {
     }
 
     // Fetch event groups (cached internally by EventAnalyzer)
-    let groups
     try {
-      groups = await this.eventAnalyzer.getMarketGroups()
+      await this.eventAnalyzer.getMarketGroups()
     } catch (error) {
       console.warn('[ArbitrageScanner] Failed to fetch market groups:', error)
       return opportunities.map(opp => ({
@@ -563,7 +568,11 @@ export class ArbitrageScanner {
       const maxFee = Math.max(...feeRates)
       if (maxFee > 0) marketFeeBps = maxFee
     } catch {
-      // Fee fetch failed — use static config default
+      // Fee API failed — estimate from mid-price via DynamicFeeService
+      const midPrice = snapshot.prices.reduce((s, p) => s + p, 0) / snapshot.prices.length
+      const isCrypto = market.slug?.includes('crypto') || market.slug?.includes('btc') || market.slug?.includes('eth')
+      const estimate = dynamicFeeService.estimateDynamicFee(midPrice, !!isCrypto)
+      marketFeeBps = Math.max(marketFeeBps, estimate.feeRateBps)
     }
 
     // PATH 1: Underpriced — buy all, merge for $1

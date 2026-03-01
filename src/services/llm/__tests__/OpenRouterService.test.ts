@@ -93,9 +93,10 @@ describe('OpenRouterService', () => {
       expect(() => svc.setApiKey('new-key')).not.toThrow()
     })
 
-    it('throws if API key is empty on analyzeMarket', async () => {
+    it('returns low-confidence fallback when API key is empty', async () => {
       const svc = new OpenRouterService('')
-      await expect(svc.analyzeMarket(makeMarket())).rejects.toThrow('API key not configured')
+      const result = await svc.analyzeMarket(makeMarket())
+      expect(result.confidence).toBeLessThanOrEqual(0.1)
     })
   })
 
@@ -270,15 +271,15 @@ describe('OpenRouterService', () => {
   })
 
   describe('error handling', () => {
-    it('returns low-confidence fallback on network error', async () => {
+    it('returns zero-confidence fallback on network error', async () => {
       mockFetch.mockRejectedValue(new Error('Network error'))
 
       const result = await service.analyzeMarket(makeMarket())
-      expect(result.confidence).toBe(0.1)
+      expect(result.confidence).toBe(0.0)
       expect(result.reasoning).toContain('Network error')
     })
 
-    it('returns low-confidence fallback on HTTP 429', async () => {
+    it('returns zero-confidence fallback on HTTP 429', async () => {
       mockFetch.mockResolvedValue({
         ok: false,
         status: 429,
@@ -287,7 +288,7 @@ describe('OpenRouterService', () => {
       })
 
       const result = await service.analyzeMarket(makeMarket())
-      expect(result.confidence).toBe(0.1)
+      expect(result.confidence).toBe(0.0)
       expect(result.reasoning).toContain('Rate limited')
     })
   })

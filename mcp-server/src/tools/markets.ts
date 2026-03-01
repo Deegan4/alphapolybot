@@ -7,7 +7,6 @@ import { gammaClient, type Market } from '../clients/gamma.js';
 import { HttpClient } from '../clients/http.js';
 import { appConfig } from '../config.js';
 import { ROUNDING_CONFIG } from '../utils/rounding.js';
-import { formatCompact, formatPrice, truncate } from '../utils/format.js';
 
 // CLOB client for order book queries (public, no auth)
 const clobHttp = new HttpClient({
@@ -150,7 +149,8 @@ export async function handleGetMarketDetail(args: {
       const val = feeRes.value;
       if (typeof val === 'number') feeRateBps = val;
       else if (val && typeof val === 'object') {
-        feeRateBps = (val as any).base_fee ?? (val as any).fee_rate_bps ?? 0;
+        const feeObj = val as Record<string, unknown>;
+        feeRateBps = (feeObj.base_fee as number) ?? (feeObj.fee_rate_bps as number) ?? 0;
       }
     }
   }

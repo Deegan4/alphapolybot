@@ -35,6 +35,7 @@ export const PerformancePanel: React.FC = () => {
   const [summary, setSummary] = useState<BacktestSummary>(tradeLogger.getSummary())
   const [edges, setEdges] = useState<Record<string, StrategyEdge>>({})
   const [cumulativePnl, setCumulativePnl] = useState<{ time: string; pnl: number }[]>([])
+  const lastTradeCount = useRef(0)
 
   useEffect(() => {
     const refresh = () => {
@@ -42,22 +43,27 @@ export const PerformancePanel: React.FC = () => {
       setSummary(s)
       setEdges(edgeTracker.getAllEdges())
 
-      // Build cumulative P&L curve from closed trades
-      const records = tradeLogger
-        .getRecords()
-        .filter(r => r.exitTimestamp)
-        .sort((a, b) => a.timestamp - b.timestamp)
+      // Only rebuild cumulative P&L when a new trade has closed.
+      // This avoids sorting 5000+ records every 10s for identical data.
+      if (s.totalTrades !== lastTradeCount.current) {
+        lastTradeCount.current = s.totalTrades
 
-      let cum = 0
-      const points = records.map(r => {
-        cum += r.pnlUSD ?? 0
-        const d = new Date(r.exitTimestamp!)
-        return {
-          time: `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`,
-          pnl: Math.round(cum * 100) / 100,
-        }
-      })
-      setCumulativePnl(points)
+        const records = tradeLogger
+          .getRecords()
+          .filter(r => r.exitTimestamp)
+          .sort((a, b) => a.timestamp - b.timestamp)
+
+        let cum = 0
+        const points = records.map(r => {
+          cum += r.pnlUSD ?? 0
+          const d = new Date(r.exitTimestamp!)
+          return {
+            time: `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`,
+            pnl: Math.round(cum * 100) / 100,
+          }
+        })
+        setCumulativePnl(points)
+      }
     }
     refresh()
     const id = setInterval(refresh, 10_000)
@@ -89,13 +95,13 @@ export const PerformancePanel: React.FC = () => {
           <div className="grid grid-cols-4 gap-2">
             <StatCell
               label="Total P&L"
-              value={`${summary.totalPnlUSD >= 0 ? '+' : ''}$${summary.totalPnlUSD.toFixed(2)}`}
-              color={summary.totalPnlUSD >= 0 ? 'text-agent-green' : 'text-agent-red'}
+              value={`${(summary.totalPnlUSD ?? 0) >= 0 ? '+' : ''}$${(summary.totalPnlUSD ?? 0).toFixed(2)}`}
+              color={(summary.totalPnlUSD ?? 0) >= 0 ? 'text-agent-green' : 'text-agent-red'}
             />
             <StatCell
               label="Win Rate"
-              value={`${(summary.winRate * 100).toFixed(1)}%`}
-              color={summary.winRate >= 0.52 ? 'text-agent-green' : summary.winRate >= 0.48 ? 'text-yellow-400' : 'text-agent-red'}
+              value={`${((summary.winRate ?? 0) * 100).toFixed(1)}%`}
+              color={(summary.winRate ?? 0) >= 0.52 ? 'text-agent-green' : (summary.winRate ?? 0) >= 0.48 ? 'text-yellow-400' : 'text-agent-red'}
             />
             <StatCell
               label="Sharpe"
@@ -109,8 +115,8 @@ export const PerformancePanel: React.FC = () => {
             />
             <StatCell
               label="Max DD"
-              value={`${(summary.maxDrawdownPercent * 100).toFixed(1)}%`}
-              color={summary.maxDrawdownPercent < 0.1 ? 'text-agent-green' : summary.maxDrawdownPercent < 0.25 ? 'text-yellow-400' : 'text-agent-red'}
+              value={`${((summary.maxDrawdownPercent ?? 0) * 100).toFixed(1)}%`}
+              color={(summary.maxDrawdownPercent ?? 0) < 0.1 ? 'text-agent-green' : (summary.maxDrawdownPercent ?? 0) < 0.25 ? 'text-yellow-400' : 'text-agent-red'}
             />
           </div>
 
@@ -159,14 +165,14 @@ export const PerformancePanel: React.FC = () => {
                       <tr key={key} className="border-b border-agent-border/30 hover:bg-agent-border/10">
                         <td className="py-1 text-agent-text">{STRATEGY_LABELS[key] ?? key}</td>
                         <td className="py-1 text-right text-agent-text">{s.trades}</td>
-                        <td className={`py-1 text-right ${s.winRate >= 0.52 ? 'text-agent-green' : s.winRate >= 0.48 ? 'text-yellow-400' : 'text-agent-red'}`}>
-                          {(s.winRate * 100).toFixed(0)}%
+                        <td className={`py-1 text-right ${(s.winRate ?? 0) >= 0.52 ? 'text-agent-green' : (s.winRate ?? 0) >= 0.48 ? 'text-yellow-400' : 'text-agent-red'}`}>
+                          {((s.winRate ?? 0) * 100).toFixed(0)}%
                         </td>
-                        <td className={`py-1 text-right ${s.avgPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
-                          {s.avgPnl >= 0 ? '+' : ''}{s.avgPnl.toFixed(2)}
+                        <td className={`py-1 text-right ${(s.avgPnl ?? 0) >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
+                          {(s.avgPnl ?? 0) >= 0 ? '+' : ''}{(s.avgPnl ?? 0).toFixed(2)}
                         </td>
-                        <td className={`py-1 text-right ${s.totalPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
-                          {s.totalPnl >= 0 ? '+' : ''}${s.totalPnl.toFixed(2)}
+                        <td className={`py-1 text-right ${(s.totalPnl ?? 0) >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
+                          {(s.totalPnl ?? 0) >= 0 ? '+' : ''}${(s.totalPnl ?? 0).toFixed(2)}
                         </td>
                         <td className="py-1 text-right">
                           {edge ? <EdgeBadge edge={edge} /> : <span className="text-agent-text-muted">—</span>}

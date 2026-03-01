@@ -1,9 +1,10 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import { AssetCard } from './AssetCard'
 import { usePolymarketPrices } from '@/hooks/usePolymarketPrices'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { btcUpDownStrategy } from '@/services/strategies/BtcUpDownStrategy'
 import { tradeLogger, positionLifecycleManager } from '@/services/trading'
+import { useSettingsStore } from '@/stores/settingsStore'
 import type { TradeRecord } from '@/services/trading/TradeLogger'
 
 type AssetKey = 'BTC' | 'ETH' | 'SOL' | 'XRP'
@@ -31,6 +32,18 @@ const emptyStats: AssetStats = {
 export const AssetCardsRow: React.FC = () => {
   const polyPrices = usePolymarketPrices()
   const cryptoPrices = useCryptoPrices()
+  const enableBtc = useSettingsStore((s) => s.btcEnableBtc)
+  const enableEth = useSettingsStore((s) => s.btcEnableEth)
+  const enableSol = useSettingsStore((s) => s.btcEnableSol)
+  const enableXrp = useSettingsStore((s) => s.btcEnableXrp)
+  const enabledAssets = useMemo<AssetKey[]>(() => {
+    const a: AssetKey[] = []
+    if (enableBtc) a.push('BTC')
+    if (enableEth) a.push('ETH')
+    if (enableSol) a.push('SOL')
+    if (enableXrp) a.push('XRP')
+    return a
+  }, [enableBtc, enableEth, enableSol, enableXrp])
   const [stats, setStats] = useState<Record<AssetKey, AssetStats>>({
     BTC: { ...emptyStats },
     ETH: { ...emptyStats },
@@ -104,9 +117,16 @@ export const AssetCardsRow: React.FC = () => {
     return off
   }, [refresh])
 
+  if (enabledAssets.length === 0) return null
+
+  const gridCols = enabledAssets.length === 1 ? 'grid-cols-1' :
+    enabledAssets.length === 2 ? 'grid-cols-2' :
+    enabledAssets.length === 3 ? 'grid-cols-2 lg:grid-cols-3' :
+    'grid-cols-2 lg:grid-cols-4'
+
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      {(['BTC', 'ETH', 'SOL', 'XRP'] as AssetKey[]).map((asset) => (
+    <div className={`grid ${gridCols} gap-4`}>
+      {enabledAssets.map((asset) => (
         <AssetCard
           key={asset}
           symbol={asset}

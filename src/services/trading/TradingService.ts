@@ -1,5 +1,5 @@
 import type { Market, OrderRequest, OrderResult, Order, PendingGtcOrder } from '@/types'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { riskManager } from './RiskManager'
@@ -7,6 +7,7 @@ import { orderBookDepth } from './OrderBookDepth'
 import { tradeLogger } from './TradeLogger'
 import { rejectionTracker } from './RejectionTracker'
 import { activityLogger } from './ActivityLogger'
+import { orderRegistry } from './oms'
 
 export interface TradingConfig {
   maxSlippage: number
@@ -75,7 +76,7 @@ export class TradingService {
     market: Market,
     outcome: 'yes' | 'no',
     amount: number,
-    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number }
+    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number; postOnly?: boolean; limitPrice?: number }
   ): Promise<OrderResult> {
     // Risk management gate (pass marketSlug for per-market concentration check)
     const riskCheck = riskManager.validateTrade(amount, market.slug)
@@ -112,11 +113,14 @@ export class TradingService {
       // Depth check is best-effort — proceed if it fails
     }
 
-    // Calculate shares (amount / price)
-    const shares = amount / currentPrice
+    // Apply slippage tolerance (or use explicit limit price for maker orders)
+    const orderPrice = options?.limitPrice ?? currentPrice * (1 + this.config.maxSlippage)
 
-    // Apply slippage tolerance
-    const maxPrice = currentPrice * (1 + this.config.maxSlippage)
+    // Calculate shares from the effective price so the order's dollar value
+    // equals the intended amount.  For maker orders with a limit price below
+    // market, this allocates more shares so we don't undershoot the $1.00
+    // Polymarket minimum.  For taker orders nothing changes (limitPrice is undefined).
+    const shares = amount / (options?.limitPrice ?? currentPrice)
 
     // Determine order type: caller can override (e.g., DipArb uses GTD), otherwise use config default
     const resolvedOrderType = options?.orderType ?? (this.config.fokOnly ? 'FOK' : 'GTC')
@@ -128,10 +132,11 @@ export class TradingService {
       marketSlug: market.slug,
       outcome,
       side: 'BUY',
-      price: maxPrice,
+      price: orderPrice,
       size: shares,
       type: resolvedOrderType,
       expiration: gtdExpiration,
+      postOnly: options?.postOnly,
     }
 
     // GTD fallback metadata — passed through to executeOrder for use if FOK is killed
@@ -164,13 +169,18 @@ export class TradingService {
     // Get current price if not provided — use best bid
     let sellPrice = price
     if (!sellPrice) {
-      const priceData = realtimeService.getPrice(slug)
+      // Resolve token ID for WS price lookup (RealtimeService is token-ID-based)
+      const tokenId = polymarketClient.tokens.get(slug, outcome)
+      const priceData = tokenId ? realtimeService.getPrice(tokenId) : null
       if (priceData?.bid && priceData.bid > 0.01) {
         sellPrice = priceData.bid
       } else {
-        const bestPrices = await polymarketUSClient.getBestPrices(slug)
+        const bestPrices = await polymarketClient.getBestPricesBySlug(slug)
         if (bestPrices?.bid && bestPrices.bid > 0.01) {
           sellPrice = bestPrices.bid
+        } else if (this.config.dryRun) {
+          // Dry run: simulate sell at mid-price so PLM can close the position
+          sellPrice = 0.50
         } else {
           return { success: false, error: `Could not determine market price` }
         }
@@ -181,7 +191,7 @@ export class TradingService {
     sellPrice = Math.min(0.99, Math.max(0.01, Math.round(sellPrice * 100) / 100))
 
     // Cancel any existing orders for this slug first
-    await polymarketUSClient.cancelAllOrders([slug])
+    await polymarketClient.cancelAllOrdersBySlug(slug)
 
     const orderRequest: OrderRequest = {
       marketSlug: slug,
@@ -196,18 +206,17 @@ export class TradingService {
   }
 
   /**
-   * Close an entire position via the US API's close-position endpoint.
-   * This is the preferred way to exit positions on PM US — the exchange
-   * handles order routing and fills automatically.
+   * Close a position by selling at best bid minus slippage.
+   * CLOB has no server-side close — we place a FOK sell order.
    */
-  async closePosition(slug: string, slippageBips = 200): Promise<OrderResult> {
+  async closePosition(slug: string, outcome: 'yes' | 'no', shares: number, slippageBips = 200): Promise<OrderResult> {
     if (this.config.dryRun) {
       console.log(`[DRY RUN] Would close position: ${slug}`)
       return { success: true, orderId: `dry-run-close-${Date.now()}` }
     }
 
     try {
-      return await polymarketUSClient.closePosition(slug, slippageBips)
+      return await polymarketClient.closePosition(slug, outcome, shares, slippageBips)
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Close position failed' }
     }
@@ -236,7 +245,7 @@ export class TradingService {
       strategy?: string
     },
   ): Promise<OrderResult> {
-    // Pre-flight: PM US requires $1 minimum for marketable orders.
+    // Pre-flight: CLOB requires $1 minimum for marketable orders.
     const orderDollarValue = request.price * request.size
     if (request.side === 'BUY' && orderDollarValue < 1.00) {
       rejectionTracker.record('order_too_small', 'system', `$${orderDollarValue.toFixed(2)} < $1.00 minimum`)
@@ -251,6 +260,22 @@ export class TradingService {
     if (request.side === 'BUY') {
       this.inFlightTrades.set(tradeId, orderDollarValue)
     }
+
+    // OMS: Create managed order for lifecycle tracking
+    const omsOrder = orderRegistry.createOrder({
+      strategyId: gtdMeta?.strategy ?? 'unknown',
+      marketSlug: request.marketSlug,
+      tokenId: '',
+      outcome: request.outcome ?? 'yes',
+      side: request.side,
+      orderType: request.type ?? 'FOK',
+      price: request.price,
+      size: request.size,
+      intent: request.side === 'BUY' ? 'open' : 'close',
+      takerFeeBps: 0,
+      stopLossPercent: gtdMeta?.stopLossPercent,
+      takeProfitPercent: gtdMeta?.takeProfitPercent,
+    })
 
     riskManager.recordTradeAttempt()
 
@@ -311,7 +336,7 @@ export class TradingService {
     // Pre-flight: check buying power before submitting
     if (request.side === 'BUY') {
       try {
-        const balances = await polymarketUSClient.getBalances()
+        const balances = await polymarketClient.getBalances()
         const requiredAmount = request.price * request.size
         if (balances.buyingPower < requiredAmount) {
           const msg = `Insufficient buying power: $${balances.buyingPower.toFixed(2)} (need $${requiredAmount.toFixed(2)})`
@@ -335,7 +360,7 @@ export class TradingService {
         request.price = this.adjustForTickSize(request.price)
 
         // Place the order
-        const result = await polymarketUSClient.placeOrder(request)
+        const result = await polymarketClient.placeOrder(request)
 
         if (result.success) {
           this.lastOrderTime = Date.now()
@@ -349,7 +374,7 @@ export class TradingService {
           // Query actual fill data if not in response
           if (result.orderId && !result.filledSize) {
             try {
-              const orderDetails = await polymarketUSClient.getOrder(result.orderId)
+              const orderDetails = await polymarketClient.getOrder(result.orderId)
               if (orderDetails) {
                 result.filledSize = orderDetails.filledSize ?? result.filledSize
                 result.avgPrice = orderDetails.price ?? result.avgPrice
@@ -381,6 +406,15 @@ export class TradingService {
             orderId: result.orderId,
           })
 
+          // OMS: Track submitted → filled lifecycle
+          try {
+            orderRegistry.markSubmitted(omsOrder.id, result.orderId ?? tradeId)
+            orderRegistry.markAccepted(omsOrder.id)
+            if (result.filledSize && result.filledSize > 0) {
+              orderRegistry.markFilled(omsOrder.id, result.filledSize, result.avgPrice ?? request.price)
+            }
+          } catch { /* OMS tracking is best-effort */ }
+
           return result
         }
 
@@ -407,6 +441,21 @@ export class TradingService {
           break
         }
 
+        // Post-only rejection — order would cross spread as taker, not retryable
+        // Exchange returns "invalid post-only order: order crosses book" (hyphenated)
+        if (lastError?.includes('post only') || lastError?.includes('post_only') || lastError?.includes('postOnly') || lastError?.includes('post-only') || lastError?.includes('crosses book')) {
+          console.warn(`[TradingService] Post-only order rejected (would cross spread) — not retrying`)
+          failureReason = 'structural'
+          break
+        }
+
+        // Invalid amounts — rounding mismatch with exchange, not retryable
+        if (lastError?.includes('invalid amounts')) {
+          console.error(`[TradingService] Amount rounding mismatch — aborting immediately`)
+          failureReason = 'structural'
+          break
+        }
+
         if (lastError?.includes('tick size') && attempt < this.config.maxRetries - 1) {
           request.price = this.adjustPriceForTick(request.price, request.side)
           continue
@@ -425,6 +474,11 @@ export class TradingService {
           failureReason = 'structural'
           break
         }
+        if (lastError.includes('post only') || lastError.includes('post_only') || lastError.includes('postOnly') || lastError.includes('post-only') || lastError.includes('crosses book')) {
+          failureReason = 'structural'
+          break
+        }
+        if (lastError.includes('invalid amounts')) { failureReason = 'structural'; break }
 
         if (attempt < this.config.maxRetries - 1) {
           await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
@@ -451,13 +505,14 @@ export class TradingService {
         }
 
         console.log(`[TradingService] FOK killed → submitting GTD fallback (expires in ${this.config.gtcExpiryMs / 60000}m)`)
-        const gtdResult = await polymarketUSClient.placeOrder(gtdRequest)
+        const gtdResult = await polymarketClient.placeOrder(gtdRequest)
 
         if (gtdResult.success && gtdResult.orderId) {
           this.lastOrderTime = Date.now()
           this.inFlightTrades.delete(tradeId)
 
           // Hand off to GtcOrderManager for fill tracking (dynamic import avoids circular dep)
+          // If tracking fails, cancel the order to prevent orphaned capital on the exchange
           import('./GtcOrderManager').then(({ gtcOrderManager }) => {
             gtcOrderManager.trackOrder({
               orderId: gtdResult.orderId!,
@@ -475,7 +530,10 @@ export class TradingService {
               expiresAt: expirationSec,
               status: 'pending',
             })
-          }).catch(err => console.warn('[TradingService] Failed to track GTD order:', err))
+          }).catch(err => {
+            console.error('[TradingService] Failed to track GTD order — cancelling orphaned order:', err)
+            polymarketClient.cancelOrder(gtdResult.orderId!).catch(() => {})
+          })
 
           return {
             success: true,
@@ -493,6 +551,11 @@ export class TradingService {
     this.inFlightTrades.delete(tradeId)
     riskManager.recordTradeResult(false, 0, failureReason)
 
+    // OMS: Mark order as rejected
+    try {
+      orderRegistry.markRejected(omsOrder.id, lastError || 'Order failed')
+    } catch { /* OMS tracking is best-effort */ }
+
     return {
       success: false,
       error: lastError || `Order failed after ${this.config.maxRetries} attempts`,
@@ -502,22 +565,22 @@ export class TradingService {
   /**
    * Cancel an order
    */
-  async cancelOrder(orderId: string, marketSlug: string): Promise<boolean> {
-    return polymarketUSClient.cancelOrder(orderId, marketSlug)
+  async cancelOrder(orderId: string): Promise<boolean> {
+    return polymarketClient.cancelOrder(orderId)
   }
 
   /**
-   * Cancel all orders for given slugs (or all orders if no slugs)
+   * Cancel all orders (optionally filtered by tokenId)
    */
-  async cancelAllOrders(slugs?: string[]): Promise<string[]> {
-    return polymarketUSClient.cancelAllOrders(slugs)
+  async cancelAllOrders(tokenId?: string): Promise<boolean> {
+    return polymarketClient.cancelAllOrders(tokenId)
   }
 
   /**
-   * Get open orders
+   * Get open orders (optionally filtered by tokenId)
    */
-  async getOpenOrders(slugs?: string[]): Promise<Order[]> {
-    return polymarketUSClient.getOpenOrders(slugs)
+  async getOpenOrders(tokenId?: string): Promise<Order[]> {
+    return polymarketClient.getOpenOrders(tokenId)
   }
 
   /**
@@ -615,7 +678,7 @@ export class TradingService {
 
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        const order = await polymarketUSClient.getOrder(orderId)
+        const order = await polymarketClient.getOrder(orderId)
         if (!order) return false
 
         if (order.status === 'filled') return true

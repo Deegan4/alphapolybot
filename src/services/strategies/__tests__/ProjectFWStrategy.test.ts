@@ -157,7 +157,7 @@ describe('ProjectFWStrategy', () => {
       expect(config.tradeSize).toBe(5)
       expect(config.minProfitBps).toBe(30)
       expect(config.maxConcurrentArbs).toBe(2)
-      expect(config.takerFeeBps).toBe(100)
+      expect(config.takerFeeBps).toBe(0)
     })
 
     it('updates config via setFWConfig', () => {
@@ -244,7 +244,9 @@ describe('ProjectFWStrategy', () => {
   describe('cooldown', () => {
     it('respects market cooldown', () => {
       // Access private method through prototype for testing
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const isOnCooldown = (strategy as any).isOnCooldown.bind(strategy)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const lastTradeTimes = (strategy as any).lastTradeTimes as Map<string, number>
 
       // No cooldown for unknown market

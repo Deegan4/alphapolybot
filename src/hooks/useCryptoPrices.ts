@@ -98,21 +98,25 @@ export function useCryptoPrices(): Record<AssetKey, CryptoAssetState> {
 
   // ── Source 3: HTTP polling fallback (only when both WS are stale) ───
   useEffect(() => {
-    // Immediate fetch to populate cards before any WS connects.
+    // Fetch prices via HTTP, but delay 3s to let RTDS/BinanceWS connect first.
+    // If WS has already delivered for an asset (within 2s), skip the HTTP call.
     // Sequential with 500ms stagger to avoid CoinGecko 429 if Binance is down.
     const fetchAll = async () => {
       for (const asset of ASSETS) {
+        const lastWs = lastUpdateTimes.current.get(asset) ?? 0
+        if (Date.now() - lastWs < 2000) continue  // WS already delivered — skip
         try {
           const p = await priceOracleService.getPrice(asset)
-          const lastWs = lastUpdateTimes.current.get(asset) ?? 0
-          if (Date.now() - lastWs > 2000) {
+          // Re-check after await — WS may have delivered while we waited
+          const lastWs2 = lastUpdateTimes.current.get(asset) ?? 0
+          if (Date.now() - lastWs2 > 2000) {
             ingestPrice(asset, p.priceUSD)
           }
         } catch { /* retry next interval */ }
         await new Promise(r => setTimeout(r, 500))
       }
     }
-    fetchAll()
+    const initTimeout = setTimeout(fetchAll, 3000)  // Give WS 3s head start
 
     const id = setInterval(async () => {
       const now = Date.now()
@@ -126,7 +130,7 @@ export function useCryptoPrices(): Record<AssetKey, CryptoAssetState> {
       }
     }, POLL_INTERVAL_MS)
 
-    return () => clearInterval(id)
+    return () => { clearTimeout(initTimeout); clearInterval(id) }
   }, [ingestPrice])
 
   return state

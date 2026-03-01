@@ -46,7 +46,7 @@ const STREAM_PATH = `/stream?streams=${STREAMS.join('/')}`
 const BINANCE_WS_BASE = import.meta.env.VITE_BINANCE_WS_URL
   || (import.meta.env.DEV
     ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/binance`
-    : 'wss://stream.binance.us:9443')
+    : 'wss://stream.binance.com:9443')
 const WS_URL = `${BINANCE_WS_BASE}${STREAM_PATH}`
 
 const PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL' | 'XRP'> = {
@@ -63,7 +63,9 @@ export class BinanceWSService {
   private reconnectDelay = 1000
   private reconnectTimeout: number | null = null
   private stableResetTimeout: number | null = null
+  private stalenessInterval: number | null = null
   private lastConnectTime = 0
+  private lastMessageTime = 0
 
   private prices = new Map<string, BinancePriceUpdate>()
   private priceCallbacks = new Set<PriceCallback>()
@@ -98,12 +100,14 @@ export class BinanceWSService {
         this.ws.onopen = () => {
           console.log('[BinanceWS] Connected — streaming BTC/ETH/SOL mini tickers')
           this.lastConnectTime = Date.now()
+          this.lastMessageTime = Date.now()
           // Only reset attempts after connection stays up for 5s
           // This prevents rapid connect/disconnect loops from resetting the backoff
           if (this.stableResetTimeout) clearTimeout(this.stableResetTimeout)
           this.stableResetTimeout = window.setTimeout(() => {
             this.reconnectAttempts = 0
           }, 5_000)
+          this.startStalenessCheck()
           this.notifyConnection('connected')
           resolve(true)
         }
@@ -149,6 +153,7 @@ export class BinanceWSService {
       clearTimeout(this.stableResetTimeout)
       this.stableResetTimeout = null
     }
+    this.stopStalenessCheck()
     if (this.ws) {
       this.ws.onclose = null // Prevent reconnect on intentional close
       this.ws.close()
@@ -181,6 +186,7 @@ export class BinanceWSService {
   // ─── Internal ────────────────────────────────────────────────
 
   private handleMessage(raw: string): void {
+    this.lastMessageTime = Date.now()
     try {
       // Combined stream wraps each event: { stream: "ethusdt@miniTicker", data: { ... } }
       const envelope = JSON.parse(raw)
@@ -215,9 +221,33 @@ export class BinanceWSService {
     }
   }
 
+  /** Binance mini tickers arrive ~1s. If no data for 15s, connection is dead. */
+  private startStalenessCheck(): void {
+    this.stopStalenessCheck()
+    this.stalenessInterval = window.setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN && this.lastMessageTime > 0) {
+        const silenceDuration = Date.now() - this.lastMessageTime
+        if (silenceDuration > 15_000) {
+          console.warn(`[BinanceWS] No data for ${Math.round(silenceDuration / 1000)}s — force-reconnecting`)
+          this.ws.close() // triggers onclose → attemptReconnect
+        }
+      }
+    }, 5_000)
+  }
+
+  private stopStalenessCheck(): void {
+    if (this.stalenessInterval) {
+      clearInterval(this.stalenessInterval)
+      this.stalenessInterval = null
+    }
+  }
+
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[BinanceWS] Max reconnect attempts reached')
+      console.error('[BinanceWS] Max reconnect attempts reached — triggering emergency stop')
+      import('@/services/trading/RiskManager').then(({ riskManager }) => {
+        riskManager.emergencyStop('BinanceWS died after max reconnect attempts')
+      }).catch(() => {})
       return
     }
 

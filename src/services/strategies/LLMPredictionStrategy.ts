@@ -1,5 +1,5 @@
 import { BaseStrategy } from './BaseStrategy'
-import type { StrategyStats, LLMPredictionConfig, Market } from '@/types'
+import type { LLMPredictionConfig, Market } from '@/types'
 import { marketScanner } from '@/services/trading/MarketScanner'
 import { tradingService } from '@/services/trading/TradingService'
 import { openRouterService, OpenRouterService } from '@/services/llm'
@@ -9,29 +9,29 @@ import { useWalletStore, useSettingsStore } from '@/stores'
 import { KellySizer } from '@/services/trading/KellySizer'
 import { edgeTracker } from '@/services/trading/EdgeTracker'
 import { calibrationTracker } from '@/services/trading/CalibrationTracker'
-import { microstructureAnalyzer } from '@/services/trading/MicrostructureAnalyzer'
 import { tradeLogger } from '@/services/trading/TradeLogger'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
 
 const DEFAULT_CONFIG: LLMPredictionConfig = {
-  baseSize: 0.05, // 5% of capital
+  baseSize: 0.10, // 10% of capital ($1 on $10 bankroll)
   confidenceMultiplier: 2.0,
-  maxPositionSize: 0.10, // 10% max
-  maxTradeSize: 2.00, // Hard cap per trade (must be >= $1.00 Polymarket minimum)
+  maxPositionSize: 0.15, // 15% max — small bankroll needs room for minimum trades
+  maxTradeSize: 1.00, // Hard cap per trade ($10 bankroll)
   minOdds: 0.15, // Widened: was 0.40, too tight — filtered out everything
   maxOdds: 0.85, // Widened: was 0.60, too tight — filtered out everything
   minLiquidity: 1000, // Lowered: was 2000
   minVolume24h: 500, // Lowered: was 1000
   maxSpread: 0.05,
   maxCreatedHours: 0, // 0 = no age limit — scan ALL active markets (was 24h, too restrictive)
-  orderType: 'FOK',
+  orderType: 'GTD',      // GTD-first: fill as maker (0% fees) instead of taker (up to 1.56%)
+  gtdExpiryMinutes: 10,  // 10 min — LLM signals stable over 5-30 min
   maxSlippage: 0.02,
   executionCooldown: 5000,
   stopLossPercent: 0.15,
   takeProfitPercent: 0.30, // Realistic TP that fires before 4h time-exit (was 0.85 — never triggered)
   maxOpenPositions: 7,
   maxCapitalExposure: 0.25,
-  minConfidence: 0.52, // Lowered from 0.55 — captures ~20% more borderline trades
+  minConfidence: 0.48, // Lowered from 0.52 — GTD-first mode eliminates taker fees, lowering break-even
   excludedCategories: ['Crypto Price', 'Crypto'], // Exclude all crypto-price markets (category naming varies)
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
@@ -257,6 +257,10 @@ export class LLMPredictionStrategy extends BaseStrategy {
       let trendBudget = 5
       for (const market of eligible.slice(0, 15)) {
         if (!this._enabled) break
+        if (openRouterService.isCircuitBreakerActive()) {
+          this.log('OpenRouter circuit breaker active — skipping remaining markets')
+          break
+        }
 
         await this.analyzeAndTrade(market, trendBudget > 0)
         trendBudget--
@@ -276,7 +280,6 @@ export class LLMPredictionStrategy extends BaseStrategy {
       activityLogger.logAnalysis(`Analyzing: ${market.question.substring(0, 50)}...`)
 
       // Gather enrichment context from in-memory singletons (synchronous, no API calls)
-      const outcomeIdx0 = 0
       const slugForContext = market.slug
       let context = gatherMarketContext(market, slugForContext, 'llm')
 
@@ -356,35 +359,18 @@ export class LLMPredictionStrategy extends BaseStrategy {
         }
       }
 
-      // Microstructure confirmation — penalize confidence if order book disagrees (soft gate)
-      const outcomeIdx = prediction.predictedOutcome === 'yes' ? 0 : 1
-      const slugForMicro = market.slug
-      if (slugForMicro) {
-        const isBullish = prediction.predictedOutcome === 'yes' ? outcomeIdx === 0 : outcomeIdx === 1
-        const confirmed = isBullish
-          ? microstructureAnalyzer.confirmsBullish(slugForMicro)
-          : microstructureAnalyzer.confirmsBearish(slugForMicro)
-        if (!confirmed) {
-          // Soft gate: reduce confidence by 15% instead of hard block
-          const penalizedConfidence = finalConfidence * 0.85
-          this.log(`Microstructure disagrees — confidence penalized: ${(finalConfidence * 100).toFixed(1)}% → ${(penalizedConfidence * 100).toFixed(1)}%`)
-          finalConfidence = penalizedConfidence
-          if (finalConfidence < effectiveMinConfidence) {
-            console.warn(`[LLM Strategy] Microstructure penalty dropped confidence below threshold (market: ${market.question.substring(0, 50)})`)
-            activityLogger.logInfo(`Microstructure penalty rejection: ${market.question.substring(0, 40)}...`)
-            rejectionTracker.record('microstructure', 'llm', `penalized to ${(finalConfidence * 100).toFixed(1)}%`)
-            return
-          }
-        }
-      }
-
       // Calculate position size using FUSED/CALIBRATED confidence
+      const outcomeIdx = prediction.predictedOutcome === 'yes' ? 0 : 1
       const marketPrice = market.outcomePrices[outcomeIdx]
       const positionSize = this.calculatePositionSize(finalConfidence, marketPrice)
       
       // Place the trade
       this.log(`Placing ${prediction.predictedOutcome.toUpperCase()} bet: $${positionSize.toFixed(2)}`)
       
+      // GTD-first: place limit order 1¢ below market to fill as maker (0% fees).
+      // Falls back to FOK if config says so (user toggle).
+      const isGtd = this.llmConfig.orderType === 'GTD'
+      const limitPrice = isGtd ? Math.max(0.01, marketPrice - 0.01) : undefined
       const result = await tradingService.placeBet(
         market,
         prediction.predictedOutcome,
@@ -392,6 +378,12 @@ export class LLMPredictionStrategy extends BaseStrategy {
         {
           stopLossPercent: this.llmConfig.stopLossPercent,
           takeProfitPercent: this.llmConfig.takeProfitPercent,
+          ...(isGtd && {
+            orderType: 'GTD' as const,
+            gtdExpiryMs: this.llmConfig.gtcExpiryMinutes * 60 * 1000,
+            limitPrice,
+            skipGtcFallback: true, // already GTD — no double-fallback
+          }),
         },
       )
 
@@ -426,6 +418,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
               stopLossPercent: this.llmConfig.stopLossPercent,
               takeProfitPercent: this.llmConfig.takeProfitPercent,
               strategy: 'llm',
+              tokenId: market.clobTokenIds?.[outcomeIndex],
               maxHoldMs: 4 * 60 * 60 * 1000, // 4 hour max hold for LLM positions
               partialCloseAt: this.llmConfig.takeProfitPercent * 0.6, // partial close at 60% of TP target
             })
@@ -625,6 +618,8 @@ export class LLMPredictionStrategy extends BaseStrategy {
             { confidence: prediction.confidence, reasoning: prediction.reasoning.substring(0, 100) },
           )
 
+          const cryptoIsGtd = this.llmConfig.orderType === 'GTD'
+          const cryptoLimitPrice = cryptoIsGtd ? Math.max(0.01, marketPrice - 0.01) : undefined
           const result = await tradingService.placeBet(
             market,
             prediction.predictedOutcome,
@@ -632,6 +627,12 @@ export class LLMPredictionStrategy extends BaseStrategy {
             {
               stopLossPercent: this.llmConfig.stopLossPercent,
               takeProfitPercent: this.llmConfig.takeProfitPercent,
+              ...(cryptoIsGtd && {
+                orderType: 'GTD' as const,
+                gtdExpiryMs: this.llmConfig.gtcExpiryMinutes * 60 * 1000,
+                limitPrice: cryptoLimitPrice,
+                skipGtcFallback: true,
+              }),
             },
           )
 
@@ -659,6 +660,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
                 stopLossPercent: this.llmConfig.stopLossPercent,
                 takeProfitPercent: this.llmConfig.takeProfitPercent,
                 strategy: 'llm',
+                tokenId: market.clobTokenIds?.[prediction.predictedOutcome === 'yes' ? 0 : 1],
                 maxHoldMs: 4 * 60 * 60 * 1000,
               })
             }).catch(err => console.warn('[LLM Crypto] PLM track failed:', err))

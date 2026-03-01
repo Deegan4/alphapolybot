@@ -8,18 +8,19 @@ const svc = new DynamicFeeService()
 // ==========================================
 
 describe('DynamicFeeService — fee curve model', () => {
-  it('peaks near 315 bps at price 0.50 for crypto markets', () => {
+  it('peaks near 156 bps at price 0.50 for crypto markets', () => {
     const est = svc.estimateDynamicFee(0.50, true)
-    expect(est.feeRateBps).toBe(315) // 50 base + 265 surcharge * 1.0
+    // 2500 × (0.50 × 0.50)² = 2500 × 0.0625 = 156.25 → 156
+    expect(est.feeRateBps).toBe(156)
     expect(est.isDynamic).toBe(true)
     expect(est.source).toBe('model')
   })
 
-  it('tapers toward base fee at extreme prices', () => {
+  it('tapers toward near-zero at extreme prices', () => {
     const atTen = svc.estimateDynamicFee(0.10, true)
     const atNinety = svc.estimateDynamicFee(0.90, true)
-    // At p=0.10: distanceFactor = 1 - 4*(0.1-0.5)^2 = 1 - 0.64 = 0.36
-    expect(atTen.feeRateBps).toBe(Math.round(50 + 265 * 0.36)) // ~145 bps
+    // At p=0.10: 2500 × (0.09)² = 2500 × 0.0081 = 20.25 → 20
+    expect(atTen.feeRateBps).toBe(20)
     expect(atNinety.feeRateBps).toBe(atTen.feeRateBps) // symmetric
   })
 
@@ -50,14 +51,24 @@ describe('DynamicFeeService — fee curve model', () => {
   it('handles edge case prices gracefully', () => {
     const atZero = svc.estimateDynamicFee(0.001, true)
     const atOne = svc.estimateDynamicFee(0.999, true)
-    expect(atZero.feeRateBps).toBeGreaterThan(0)
-    expect(atOne.feeRateBps).toBeGreaterThan(0)
-    expect(atZero.feeRateBps).toBeLessThan(315)
+    // Clamped to 0.01/0.99 → 2500 × (0.0099)² ≈ 0
+    expect(atZero.feeRateBps).toBeGreaterThanOrEqual(0)
+    expect(atOne.feeRateBps).toBeGreaterThanOrEqual(0)
+    expect(atZero.feeRateBps).toBeLessThan(156)
   })
 
   it('feePercent is consistent with feeRateBps', () => {
     const est = svc.estimateDynamicFee(0.40, true)
     expect(est.feePercent).toBeCloseTo(est.feeRateBps / 10_000, 6)
+  })
+
+  it('matches known calibration points', () => {
+    // At p=0.30: 2500 × (0.21)² = 2500 × 0.0441 = 110.25 → 110
+    expect(svc.estimateDynamicFee(0.30, true).feeRateBps).toBe(110)
+    // At p=0.40: 2500 × (0.24)² = 2500 × 0.0576 = 144
+    expect(svc.estimateDynamicFee(0.40, true).feeRateBps).toBe(144)
+    // At p=0.20: 2500 × (0.16)² = 2500 × 0.0256 = 64
+    expect(svc.estimateDynamicFee(0.20, true).feeRateBps).toBe(64)
   })
 })
 
@@ -71,11 +82,11 @@ describe('DynamicFeeService — computeTradeEV', () => {
       modelProb: 0.80,
       marketPrice: 0.40,
       tradeSize: 10,
-      feeRateBps: 315,   // ~3.15% dynamic fee at 50/50
+      feeRateBps: 156,   // ~1.56% dynamic fee at 50/50
       isResolutionHold: true,
     })
-    // netEV = 0.80 * (1 - 0.0315) - 0.40 = 0.80 * 0.9685 - 0.40 = 0.7748 - 0.40 = 0.3748
-    expect(ev.netEV).toBeGreaterThan(0.35)
+    // netEV = 0.80 * (1 - 0.0156) - 0.40 = 0.80 * 0.9844 - 0.40 = 0.7875 - 0.40 = 0.3875
+    expect(ev.netEV).toBeGreaterThan(0.38)
     expect(ev.isViable).toBe(true)
     expect(ev.grossEV).toBeCloseTo(0.40, 2) // 0.80 - 0.40
   })
@@ -111,11 +122,11 @@ describe('DynamicFeeService — computeTradeEV', () => {
       modelProb: 0.50,
       marketPrice: 0.40,
       tradeSize: 10,
-      feeRateBps: 315,
+      feeRateBps: 156,
       isResolutionHold: true,
     })
-    // breakEvenProb = 0.40 / (1 - 0.0315) = 0.40 / 0.9685 ≈ 0.413
-    expect(ev.breakEvenProb).toBeCloseTo(0.413, 2)
+    // breakEvenProb = 0.40 / (1 - 0.0156) = 0.40 / 0.9844 ≈ 0.4063
+    expect(ev.breakEvenProb).toBeCloseTo(0.4063, 2)
   })
 
   it('returns zero EV for invalid inputs', () => {
@@ -123,7 +134,7 @@ describe('DynamicFeeService — computeTradeEV', () => {
       modelProb: 0,
       marketPrice: 0.40,
       tradeSize: 10,
-      feeRateBps: 315,
+      feeRateBps: 156,
       isResolutionHold: true,
     })
     expect(ev.netEV).toBe(0)
@@ -180,19 +191,19 @@ describe('DynamicFeeService — computeDualSideEV', () => {
     expect(ev.isViable).toBe(false)
   })
 
-  it('unprofitable with dynamic fee (~3.15%) at 50/50', () => {
+  it('unprofitable with dynamic fee (~1.56%) at 50/50', () => {
     const ev = svc.computeDualSideEV({
       yesPrice: 0.50,
       noPrice: 0.48,
-      yesFeeRateBps: 315,
-      noFeeRateBps: 315,
+      yesFeeRateBps: 156,
+      noFeeRateBps: 156,
       winProbability: 0.60,
     })
-    // Payout: 0.60 * (1-0.0315) + 0.40 * (1-0.0315) = 1.0 * 0.9685 = 0.9685
+    // Payout: 0.60 * (1-0.0156) + 0.40 * (1-0.0156) = 1.0 * 0.9844 = 0.9844
     // Outlay: 0.98
-    // Net: 0.9685 - 0.98 = -0.0115
-    expect(ev.netEV).toBeLessThan(0)
-    expect(ev.isViable).toBe(false)
+    // Net: 0.9844 - 0.98 = 0.0044 — barely +EV (was -EV with old 315 bps)
+    expect(ev.netEV).toBeGreaterThan(0)
+    expect(ev.isViable).toBe(true)
   })
 
   it('winProbability does not matter when fees are equal (symmetric)', () => {
@@ -243,28 +254,27 @@ describe('DynamicFeeService — computeDualSideEV', () => {
 
 describe('DynamicFeeService — feeAdjustedKelly', () => {
   it('returns positive fraction when edge exceeds fee', () => {
-    const f = svc.feeAdjustedKelly(0.70, 0.40, 315)
+    const f = svc.feeAdjustedKelly(0.70, 0.40, 156)
     expect(f).toBeGreaterThan(0)
   })
 
   it('returns 0 when fee kills edge', () => {
     // modelProb barely above marketPrice, fee kills it
     const f = svc.feeAdjustedKelly(0.42, 0.40, 1000)
-    // effectivePayout = 0.90, 0.90 < 0.40 is false, b = (0.90-0.40)/0.40 = 1.25
-    // Kelly = (1.25 * 0.42 - 0.58) / 1.25 = (0.525 - 0.58) / 1.25 = -0.044
-    // Clamped to 0
+    // effectivePayout = 0.90, b = (0.90-0.40)/0.40 = 1.25
+    // Kelly = (1.25 * 0.42 - 0.58) / 1.25 = -0.044 → clamped to 0
     expect(f).toBe(0)
   })
 
   it('returns higher fraction with lower fees', () => {
-    const fHighFee = svc.feeAdjustedKelly(0.60, 0.40, 315)
-    const fLowFee = svc.feeAdjustedKelly(0.60, 0.40, 50)
+    const fHighFee = svc.feeAdjustedKelly(0.60, 0.40, 156)
+    const fLowFee = svc.feeAdjustedKelly(0.60, 0.40, 20)
     expect(fLowFee).toBeGreaterThan(fHighFee)
   })
 
   it('returns 0 for zero or negative probability', () => {
-    expect(svc.feeAdjustedKelly(0, 0.40, 315)).toBe(0)
-    expect(svc.feeAdjustedKelly(-0.5, 0.40, 315)).toBe(0)
+    expect(svc.feeAdjustedKelly(0, 0.40, 156)).toBe(0)
+    expect(svc.feeAdjustedKelly(-0.5, 0.40, 156)).toBe(0)
   })
 })
 
@@ -276,7 +286,7 @@ describe('DynamicFeeService — isTradeViable', () => {
   it('returns true for positive EV trades', () => {
     const ev = svc.computeTradeEV({
       modelProb: 0.70, marketPrice: 0.40, tradeSize: 10,
-      feeRateBps: 315, isResolutionHold: true,
+      feeRateBps: 156, isResolutionHold: true,
     })
     expect(svc.isTradeViable(ev)).toBe(true)
   })

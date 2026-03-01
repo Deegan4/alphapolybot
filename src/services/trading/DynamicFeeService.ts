@@ -3,8 +3,8 @@
  * and provides fee-aware trade viability calculations.
  *
  * Polymarket introduced dynamic taker fees on crypto prediction markets
- * in January 2026: fee scales by distance from 50/50 odds, peaking at
- * ~3.15% (315 bps) on 50¢ contracts and tapering toward the edges.
+ * in January 2026: fee = C × 0.25 × (p(1-p))², peaking at
+ * ~1.56% (156 bps) on 50¢ contracts and dropping steeply toward the edges.
  *
  * This service:
  * 1. Models the fee curve for pre-trade filtering (before API call)
@@ -50,32 +50,29 @@ export interface DualSideEV {
 // ==========================================
 
 /**
- * Polymarket dynamic fee curve for crypto prediction markets.
+ * Polymarket dynamic fee curve for crypto prediction markets (Feb 2026).
  *
- * The fee is highest near 50/50 odds (price=0.50) and tapers toward the
- * edges. Modeled as quadratic: fee = baseFee + peakSurcharge * (1 - 4*(p-0.5)^2)
+ * The official formula is quartic, not quadratic:
+ *   fee = C × 0.25 × (p × (1 − p))²
  *
- * Calibrated against observed fee rates:
- * - At price 0.50: ~315 bps (3.15%)
- * - At price 0.30 or 0.70: ~235 bps (~2.35%)
- * - At price 0.10 or 0.90: ~75 bps (~0.75%)
+ * Where C is a scaling constant (default 1.0, yielding fees in fraction form).
+ * In basis points: feeBps = DYNAMIC_FEE_MULTIPLIER × (p × (1 − p))²
  *
- * The baseFee accounts for the minimum fee at extreme prices.
- * The peakSurcharge adds the variable component near 50/50.
+ * Calibrated values:
+ * - At price 0.50: ~156 bps (1.56%) — max fee
+ * - At price 0.30 or 0.70: ~110 bps (~1.10%)
+ * - At price 0.10 or 0.90: ~20 bps (~0.20%)
+ *
+ * The curve drops steeply toward the edges, making extreme-price trades
+ * much cheaper than mid-price trades.
  */
-const DYNAMIC_FEE_BASE_BPS = 50       // ~0.5% minimum fee at edges
-const DYNAMIC_FEE_PEAK_SURCHARGE = 265 // Additional bps at price=0.50 (total ~315 at center)
+const DYNAMIC_FEE_MULTIPLIER = 2500   // C × 0.25 × 10000 = 1.0 × 0.25 × 10000
 
 /**
  * Standard (non-crypto) market fee — flat rate, no dynamic scaling.
  */
 const STANDARD_MARKET_FEE_BPS = 100    // 1% flat on standard markets
 
-/**
- * Legacy flat crypto fee (pre-Jan 2026). Used as fallback if dynamic
- * model seems miscalibrated vs API response.
- */
-const LEGACY_CRYPTO_FEE_BPS = 1000     // 10% flat on old crypto markets
 
 // ==========================================
 // DYNAMIC FEE SERVICE
@@ -106,10 +103,11 @@ export class DynamicFeeService {
     // Clamp price to valid range
     const p = Math.max(0.01, Math.min(0.99, marketPrice))
 
-    // Quadratic curve: peak at 0.50, tapering to baseFee at edges
-    // 1 - 4*(p - 0.5)^2 = 1 at p=0.5, 0 at p=0.0 and p=1.0
-    const distanceFactor = 1 - 4 * (p - 0.5) ** 2
-    const feeBps = Math.round(DYNAMIC_FEE_BASE_BPS + DYNAMIC_FEE_PEAK_SURCHARGE * distanceFactor)
+    // Quartic curve: fee = 2500 × (p × (1-p))²
+    // Peaks at p=0.50 → 2500 × 0.0625 = 156.25 bps
+    // Falls steeply at edges → ~20 bps at p=0.10
+    const pq = p * (1 - p)
+    const feeBps = Math.round(DYNAMIC_FEE_MULTIPLIER * pq * pq)
 
     return {
       feeRateBps: feeBps,
@@ -142,7 +140,7 @@ export class DynamicFeeService {
     feeRateBps: number
     isResolutionHold: boolean
   }): TradeEV {
-    const { modelProb, marketPrice, tradeSize, feeRateBps, isResolutionHold } = params
+    const { modelProb, marketPrice, tradeSize: _tradeSize, feeRateBps, isResolutionHold } = params
     const feePercent = feeRateBps / 10_000
 
     if (modelProb <= 0 || modelProb >= 1 || marketPrice <= 0 || marketPrice >= 1) {

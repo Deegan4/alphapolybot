@@ -1,5 +1,6 @@
 export { BaseApiClient } from './BaseApiClient'
-export { PolymarketUSClient, polymarketUSClient, normalizeEventToMarkets } from './PolymarketUSClient'
+export { CLOBClient, clobClient } from './CLOBClient'
+export { GammaClient, gammaClient } from './GammaClient'
+export { PolymarketClient, polymarketClient } from './PolymarketClient'
 export { PriceOracleService, priceOracleService, type AssetPrice } from './PriceOracleService'
-export { CoinbaseClient, coinbaseClient, CANDLE_GRANULARITY } from './CoinbaseClient'
 export { PolyBacktestClient, polyBacktestClient } from './PolyBacktestClient'

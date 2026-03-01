@@ -3,9 +3,9 @@ import { LLMPredictionStrategy, llmPredictionStrategy } from './LLMPredictionStr
 import { DipArbStrategy, dipArbStrategy } from './DipArbStrategy'
 import { ProjectFWStrategy, projectFWStrategy } from './ProjectFWStrategy'
 import { BtcUpDownStrategy, btcUpDownStrategy } from './BtcUpDownStrategy'
-import { MicrostructureMomentumStrategy, microMomentumStrategy } from './MicrostructureMomentumStrategy'
-import { MeanReversionStrategy, meanReversionStrategy } from './MeanReversionStrategy'
-import { CopyTradingStrategy, copyTradingStrategy } from './CopyTradingStrategy'
+import { GabagoolStrategy, gabagoolStrategy } from './GabagoolStrategy'
+import { DualSideHedgeStrategy, dualSideHedgeStrategy } from './DualSideHedgeStrategy'
+import { ImpulseSniperStrategy, impulseSniperStrategy } from './ImpulseSniperStrategy'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import type { StrategyStats } from '@/types'
 
@@ -33,9 +33,9 @@ export class StrategyManager {
     this.registerStrategy('dip-arb', dipArbStrategy)
     this.registerStrategy('project-fw', projectFWStrategy)
     this.registerStrategy('btc-updown', btcUpDownStrategy)
-    this.registerStrategy('micro-momentum', microMomentumStrategy)
-    this.registerStrategy('mean-reversion', meanReversionStrategy)
-    this.registerStrategy('copy-trading', copyTradingStrategy)
+    this.registerStrategy('gabagool', gabagoolStrategy)
+    this.registerStrategy('dual-side', dualSideHedgeStrategy)
+    this.registerStrategy('impulse-sniper', impulseSniperStrategy)
   }
 
   /**
@@ -109,24 +109,24 @@ export class StrategyManager {
   }
 
   /**
-   * Get Microstructure Momentum strategy (typed)
+   * Get Gabagool Accumulator strategy (typed)
    */
-  getMicroMomentumStrategy(): MicrostructureMomentumStrategy {
-    return microMomentumStrategy
+  getGabagoolStrategy(): GabagoolStrategy {
+    return gabagoolStrategy
   }
 
   /**
-   * Get Mean Reversion strategy (typed)
+   * Get Dual-Side Hedge strategy (typed)
    */
-  getMeanRevStrategy(): MeanReversionStrategy {
-    return meanReversionStrategy
+  getDualSideStrategy(): DualSideHedgeStrategy {
+    return dualSideHedgeStrategy
   }
 
   /**
-   * Get Copy Trading strategy (typed)
+   * Get Impulse Sniper strategy (typed)
    */
-  getCopyTradingStrategy(): CopyTradingStrategy {
-    return copyTradingStrategy
+  getImpulseSniperStrategy(): ImpulseSniperStrategy {
+    return impulseSniperStrategy
   }
 
   /**
@@ -156,10 +156,10 @@ export class StrategyManager {
     await strategy.disable() // disable() internally calls stop()
 
     // Cancel pending GTD orders for this strategy (dynamic import avoids circular dep)
-    const strategyTag = id === 'llm-prediction' ? 'llm' : id === 'dip-arb' ? 'dip' : id === 'project-fw' ? 'fw' : id === 'btc-updown' ? 'btc' : id === 'micro-momentum' ? 'micro' : id === 'mean-reversion' ? 'meanrev' : id === 'copy-trading' ? 'copy' : null
+    const strategyTag = id === 'llm-prediction' ? 'llm' : id === 'dip-arb' ? 'dip' : id === 'project-fw' ? 'fw' : id === 'btc-updown' ? 'btc' : id === 'gabagool' ? 'gabagool' : id === 'dual-side' ? 'dual-side' : id === 'impulse-sniper' ? 'impulse' : null
     if (strategyTag) {
       import('@/services/trading/GtcOrderManager').then(({ gtcOrderManager }) => {
-        gtcOrderManager.cancelAllForStrategy(strategyTag as 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy').then(n => {
+        gtcOrderManager.cancelAllForStrategy(strategyTag as 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool' | 'impulse').then(n => {
           if (n > 0) activityLogger.logSystem(`Cancelled ${n} pending GTD order(s) for ${strategy.name}`)
         })
       }).catch(() => {})

@@ -6,6 +6,7 @@ import { ActivePositionsCard } from '@/components/dashboard/ActivePositionsCard'
 import { RecentTradesGrid } from '@/components/dashboard/RecentTradesGrid'
 import { ActivitySidebar } from '@/components/dashboard/ActivitySidebar'
 import { DiagnosticsBanner } from '@/components/dashboard/DiagnosticsBanner'
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/Resizable'
 import { useBalanceHistory } from '@/hooks/useBalanceHistory'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { strategyManager, type StrategyState } from '@/services/strategies'
@@ -14,29 +15,47 @@ import { positionLifecycleManager, activityLogger } from '@/services/trading'
 // Lazy-load tab-specific components — only downloaded when their tab is active.
 // Keeps initial bundle smaller by deferring chart-heavy and feature-specific panels.
 const HistoryView = React.lazy(() => import('@/components/dashboard/HistoryView').then(m => ({ default: m.HistoryView })))
-const SpotCryptoView = React.lazy(() => import('@/components/dashboard/SpotCryptoView').then(m => ({ default: m.SpotCryptoView })))
-const FollowTraderPanel = React.lazy(() => import('@/components/dashboard/FollowTraderPanel').then(m => ({ default: m.FollowTraderPanel })))
 const PerformancePanel = React.lazy(() => import('@/components/dashboard/PerformancePanel').then(m => ({ default: m.PerformancePanel })))
 const BacktestView = React.lazy(() => import('@/components/dashboard/BacktestView').then(m => ({ default: m.BacktestView })))
 const AnalyticsView = React.lazy(() => import('@/components/dashboard/AnalyticsView').then(m => ({ default: m.AnalyticsView })))
 
-const LazyFallback: React.FC = () => (
-  <div className="flex items-center justify-center p-4">
-    <div className="text-green-500 font-mono text-sm animate-pulse">Loading...</div>
+/** Skeleton loading placeholder — matches card shape for visual continuity */
+const SkeletonPanel: React.FC = () => (
+  <div className="flex flex-col gap-3 p-4 animate-pulse">
+    <div className="h-4 w-24 rounded bg-agent-border/40" />
+    <div className="h-32 rounded-lg bg-agent-border/20" />
+    <div className="h-4 w-40 rounded bg-agent-border/30" />
+    <div className="h-20 rounded-lg bg-agent-border/20" />
   </div>
 )
 
 /**
- * DashboardView — 3-column trading dashboard with Live/History/Spot Crypto tabs.
+ * DashboardView — Resizable 3-panel trading dashboard with Live/History/Spot Crypto tabs.
+ * Desktop: drag-to-resize columns. Mobile: vertical stack.
  */
 const SIDEBAR_KEY = 'apb:activity-sidebar'
 
+/** Hook to detect desktop breakpoint (lg = 1024px) */
+function useIsDesktop() {
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1024 : true
+  )
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
+  return isDesktop
+}
+
 const DashboardView: React.FC = () => {
   const dryRun = useSettingsStore((s) => s.dryRun)
-  const [activeTab, setActiveTab] = useState<'live' | 'history' | 'spotcrypto' | 'backtest' | 'analytics'>('live')
+  const [activeTab, setActiveTab] = useState<'live' | 'history' | 'backtest' | 'analytics'>('live')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem(SIDEBAR_KEY) === '1' } catch { return false }
   })
+  const isDesktop = useIsDesktop()
   useBalanceHistory() // drives balance snapshot pipeline
 
   const toggleSidebar = useCallback(() => {
@@ -76,9 +95,9 @@ const DashboardView: React.FC = () => {
     }
   }, [])
 
-  const handleAbandonAll = useCallback(() => {
+  const handleAbandonAll = useCallback(async () => {
     setConfirmStop(false)
-    const count = positionLifecycleManager.abandonAll()
+    const count = await positionLifecycleManager.abandonAll()
     activityLogger.logWarning(`ABANDONED ${count} position(s) — tracking cleared`)
   }, [])
 
@@ -88,7 +107,7 @@ const DashboardView: React.FC = () => {
       <SniperTopBar activeTab={activeTab} onTabChange={setActiveTab} />
 
       {/* Mode banner */}
-      <div className={`px-4 py-1 text-center text-[10px] font-mono font-bold tracking-widest ${
+      <div className={`px-4 py-0.5 text-center text-[9px] font-mono font-bold tracking-widest ${
         dryRun
           ? 'bg-agent-cyan/10 text-agent-cyan border-b border-agent-cyan/20'
           : 'bg-red-950/30 text-red-400 border-b border-red-500/20'
@@ -97,50 +116,76 @@ const DashboardView: React.FC = () => {
       </div>
 
       {activeTab === 'live' ? (
-        /* ====== LIVE TRADING — 2 column + collapsible sidebar ====== */
+        /* ====== LIVE TRADING — Resizable 3-panel layout (desktop) / stack (mobile) ====== */
         <>
         <DiagnosticsBanner />
-        <div className="flex-1 flex flex-col lg:flex-row gap-3 p-3 sm:p-4 min-h-0 overflow-y-auto lg:overflow-hidden">
 
-          {/* Main content — Left col (portfolio+follow) + Center col (assets+positions) */}
-          <div className="flex-1 flex flex-col lg:flex-row gap-3 min-h-0 min-w-0">
-            {/* Left column — Follow Trader + Portfolio + Performance */}
-            <div className="lg:w-[280px] shrink-0 flex flex-col gap-3 min-h-0 lg:overflow-y-auto">
-              <Suspense fallback={<LazyFallback />}><FollowTraderPanel /></Suspense>
-              <PortfolioPanel />
-              <Suspense fallback={<LazyFallback />}><PerformancePanel /></Suspense>
-            </div>
+        {isDesktop ? (
+          /* Desktop: resizable panels */
+          <div className="flex-1 min-h-0 p-2">
+            <ResizablePanelGroup
+              orientation="horizontal"
+              id="apb-dashboard"
+            >
+              {/* Left panel — Portfolio + Performance */}
+              <ResizablePanel defaultSize="20%" minSize="14%" maxSize="30%">
+                <div className="h-full overflow-y-auto flex flex-col gap-3 pr-1 py-1 pl-2">
+                  <PortfolioPanel />
+                  <Suspense fallback={<SkeletonPanel />}><PerformancePanel /></Suspense>
+                </div>
+              </ResizablePanel>
 
-            {/* Center column — Asset cards + positions/trades */}
-            <div className="flex-1 flex flex-col gap-3 min-h-0 min-w-0">
-              <AssetCardsRow />
-              <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3 min-h-0">
-                <ActivePositionsCard />
-                <RecentTradesGrid />
-              </div>
-            </div>
+              <ResizableHandle withHandle />
+
+              {/* Center panel — Asset cards + positions (full-width) + recent trades (compact strip) */}
+              <ResizablePanel defaultSize="55%" minSize="35%">
+                <div className="h-full overflow-y-auto flex flex-col gap-3 px-1 py-1">
+                  <AssetCardsRow />
+                  <div className="flex-1 min-h-0">
+                    <ActivePositionsCard />
+                  </div>
+                  <div className="flex-shrink-0">
+                    <RecentTradesGrid />
+                  </div>
+                </div>
+              </ResizablePanel>
+
+              <ResizableHandle withHandle />
+
+              {/* Right panel — Activity sidebar (collapsible) */}
+              <ResizablePanel
+                defaultSize="25%"
+                minSize={sidebarCollapsed ? '3%' : '15%'}
+                maxSize="35%"
+                collapsible
+              >
+                <div className="h-full py-1 pr-2 pl-1">
+                  <ActivitySidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+                </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
           </div>
-
-          {/* Right column — Activity (collapsible) */}
-          <div className={`shrink-0 flex flex-col min-h-0 transition-all duration-200 ${
-            sidebarCollapsed ? 'lg:w-10' : 'lg:w-[300px]'
-          }`}>
-            <ActivitySidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+        ) : (
+          /* Mobile / tablet: vertical stack */
+          <div className="flex-1 flex flex-col gap-3 p-4 overflow-y-auto">
+            <PortfolioPanel />
+            <AssetCardsRow />
+            <ActivePositionsCard />
+            <RecentTradesGrid />
+            <ActivitySidebar collapsed={false} />
+            <Suspense fallback={<SkeletonPanel />}><PerformancePanel /></Suspense>
           </div>
-        </div>
+        )}
         </>
       ) : activeTab === 'history' ? (
         /* ====== HISTORY TAB ====== */
-        <Suspense fallback={<LazyFallback />}><HistoryView /></Suspense>
-      ) : activeTab === 'spotcrypto' ? (
-        /* ====== SPOT CRYPTO TAB ====== */
-        <Suspense fallback={<LazyFallback />}><SpotCryptoView /></Suspense>
+        <Suspense fallback={<SkeletonPanel />}><HistoryView /></Suspense>
       ) : activeTab === 'backtest' ? (
         /* ====== BACKTEST TAB ====== */
-        <Suspense fallback={<LazyFallback />}><BacktestView /></Suspense>
+        <Suspense fallback={<SkeletonPanel />}><BacktestView /></Suspense>
       ) : (
         /* ====== ANALYTICS TAB ====== */
-        <Suspense fallback={<LazyFallback />}><AnalyticsView /></Suspense>
+        <Suspense fallback={<SkeletonPanel />}><AnalyticsView /></Suspense>
       )}
 
       {/* Floating emergency stop — fixed bottom-left */}

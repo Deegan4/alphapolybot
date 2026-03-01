@@ -15,6 +15,7 @@
  * - maxCombinedAsk gate: combined YES+NO must be < threshold
  * - requireBothLegs: cancel first leg if second doesn't fill
  * - Directional bias: allocate more to predicted winner
+ * - Cancel/replace loop: BinanceWS-driven requoting on price moves
  */
 
 import { BaseStrategy } from './BaseStrategy'
@@ -38,9 +39,13 @@ interface PendingHedge {
   noPrice: number
   yesFilled: boolean
   noFilled: boolean
+  yesFilledQty: number        // actual share count from UserChannel fill
+  noFilledQty: number         // actual share count from UserChannel fill
   direction: 'up' | 'down'
   confidence: number
   placedAt: number
+  btcPriceAtPlacement: number
+  replaceThreshold: number    // fractional price change to trigger cancel/replace
 }
 
 // ==========================================
@@ -55,6 +60,7 @@ export class DualSideHedgeStrategy extends BaseStrategy {
   private pendingHedges = new Map<string, PendingHedge>()
   private unsubscribe: (() => void) | null = null
   private fillCheckInterval: ReturnType<typeof setInterval> | null = null
+  private cleanupFns: Array<() => void> = []
 
   // ==========================================
   // CONFIG
@@ -65,7 +71,7 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     return {
       enabled: settings.dualSideEnabled ?? false,
       tradeSize: settings.dualSideTradeSize ?? 2.0,
-      biasRatio: settings.dualSideBiasRatio ?? 0.70,
+      biasRatio: settings.dualSideBiasRatio ?? 0.50,
       makerOnly: settings.dualSideMakerOnly ?? true,
       maxCombinedAsk: settings.dualSideMaxCombinedAsk ?? 0.995,
       requireBothLegs: settings.dualSideRequireBothLegs ?? true,
@@ -91,8 +97,14 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     // Subscribe to BtcUpDownStrategy signals (lazy import to avoid circular dep)
     this.subscribeToBtcSignals()
 
-    // Periodic fill check for pending hedges
-    this.fillCheckInterval = setInterval(() => this.checkPendingFills(), 5_000)
+    // Subscribe to UserChannel for fill detection
+    this.subscribeToFills()
+
+    // Subscribe to BinanceWS for cancel/replace loop
+    this.subscribeToPriceUpdates()
+
+    // Safety-net timeout check (30s interval — handles BinanceWS disconnects)
+    this.fillCheckInterval = setInterval(() => this.checkPendingFills(), 30_000)
   }
 
   async stop(): Promise<void> {
@@ -105,6 +117,8 @@ export class DualSideHedgeStrategy extends BaseStrategy {
       clearInterval(this.fillCheckInterval)
       this.fillCheckInterval = null
     }
+    for (const fn of this.cleanupFns) fn()
+    this.cleanupFns = []
     this.pendingHedges.clear()
     this.log('Dual-Side Hedge strategy stopped')
   }
@@ -114,16 +128,16 @@ export class DualSideHedgeStrategy extends BaseStrategy {
   // ==========================================
 
   private subscribeToBtcSignals(): void {
-    // Dynamic import to avoid circular dependency
     import('./BtcUpDownStrategy').then(({ btcUpDownStrategy }) => {
       this.unsubscribe = btcUpDownStrategy.on('signalComputed', (_event, data) => {
-        const { asset, signal, windowOpenPrice, currentPrice } = data as {
+        const { asset, signal, windowOpenPrice, currentPrice, market } = data as {
           asset: string
           signal: Signal
           windowOpenPrice: number
           currentPrice: number
+          market: Market
         }
-        this.onSignal(asset, signal, windowOpenPrice, currentPrice).catch(err => {
+        this.onSignal(asset, signal, windowOpenPrice, currentPrice, market).catch(err => {
           this.log(`Signal handler error: ${err}`)
         })
       })
@@ -131,6 +145,219 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     }).catch(err => {
       this.log(`Failed to subscribe to BTC signals: ${err}`)
     })
+  }
+
+  // ==========================================
+  // FILL DETECTION (UserChannel WebSocket)
+  // ==========================================
+
+  private subscribeToFills(): void {
+    import('@/services/realtime').then(({ userChannelService }) => {
+      const unsubTrade = userChannelService.onTrade((msg) => {
+        if (msg.status !== 'CONFIRMED') return
+        for (const makerOrder of msg.maker_orders || []) {
+          for (const [asset, hedge] of this.pendingHedges) {
+            if (makerOrder.order_id === hedge.yesOrderId) {
+              hedge.yesFilled = true
+              hedge.yesFilledQty += parseFloat(makerOrder.matched_amount || msg.size || '0')
+              this.log(`${asset}: YES leg filled ${hedge.yesFilledQty.toFixed(2)} shares (order ${makerOrder.order_id})`)
+              this.checkBothFilled(asset, hedge)
+            } else if (makerOrder.order_id === hedge.noOrderId) {
+              hedge.noFilled = true
+              hedge.noFilledQty += parseFloat(makerOrder.matched_amount || msg.size || '0')
+              this.log(`${asset}: NO leg filled ${hedge.noFilledQty.toFixed(2)} shares (order ${makerOrder.order_id})`)
+              this.checkBothFilled(asset, hedge)
+            }
+          }
+        }
+      })
+      this.cleanupFns.push(unsubTrade)
+    }).catch(err => this.log(`Failed to subscribe UserChannel: ${err}`))
+  }
+
+  private checkBothFilled(asset: string, hedge: PendingHedge): void {
+    if (hedge.yesFilled && hedge.noFilled) {
+      this.log(`${asset}: BOTH LEGS FILLED — hedge complete`)
+      activityLogger.logTrade(`Dual-side ${asset}: both legs filled`)
+      this.pendingHedges.delete(asset)
+      this.emit('hedgeBothFilled', { asset, hedge })
+
+      // Best-effort merge: recover USDC.e immediately instead of waiting for resolution.
+      // For 5-min markets this is a ~5 min capital savings; for longer markets it's critical.
+      // Merge failure is non-blocking — positions will still resolve normally.
+      this.attemptMerge(asset, hedge).catch(err => {
+        this.log(`${asset}: merge attempt failed (non-blocking): ${err}`)
+      })
+    }
+  }
+
+  /**
+   * Attempt on-chain merge of YES+NO conditional tokens back to USDC.e.
+   * Best-effort: if merge fails (no gas, no provider, etc.), positions
+   * resolve normally at market close.
+   */
+  private async attemptMerge(asset: string, hedge: PendingHedge): Promise<void> {
+    try {
+      const { mergeService } = await import('@/services/trading/MergeService')
+
+      if (!mergeService.isReady()) {
+        // Try to initialize from wallet
+        const { walletService } = await import('@/services/wallet/WalletService')
+        const wallet = walletService.getWallet()
+        if (wallet) {
+          mergeService.initialize(wallet)
+        } else {
+          this.log(`${asset}: merge skipped — no wallet available`)
+          return
+        }
+      }
+
+      // Look up conditionId from the market
+      const { btcUpDownStrategy } = await import('./BtcUpDownStrategy')
+      const market = btcUpDownStrategy.getActiveMarket(asset)
+      const conditionId = market?.conditionId
+      if (!conditionId) {
+        this.log(`${asset}: merge skipped — no conditionId on market`)
+        return
+      }
+
+      // Compute mergeable amount from actual fill quantities (not USD sizing)
+      const mergeAmount = mergeService.computeMergeAmount(hedge.yesFilledQty, hedge.noFilledQty)
+      if (mergeAmount <= 0n) {
+        this.log(`${asset}: merge skipped — no mergeable balance`)
+        return
+      }
+
+      this.log(`${asset}: attempting on-chain merge for ${Number(mergeAmount) / 1e6} USDC.e`)
+      const result = await mergeService.merge(conditionId, mergeAmount)
+
+      if (result.success) {
+        this.log(`${asset}: MERGE SUCCESS — ${result.amountMerged?.toFixed(2)} USDC.e recovered (tx: ${result.txHash})`)
+        this.emit('hedgeMerged', { asset, ...result })
+      } else {
+        this.log(`${asset}: merge failed (non-critical): ${result.error}`)
+      }
+    } catch (err) {
+      this.log(`${asset}: merge error (non-critical): ${err}`)
+    }
+  }
+
+  // ==========================================
+  // CANCEL/REPLACE LOOP (BinanceWS-driven)
+  // ==========================================
+
+  private subscribeToPriceUpdates(): void {
+    import('@/services/realtime/BinanceWSService').then(({ binanceWSService }) => {
+      const unsubPrice = binanceWSService.onPriceUpdate(async (update) => {
+        if (update.symbol !== 'BTC') return
+        await this.onBtcPriceUpdate(update.priceUSD)
+      })
+      this.cleanupFns.push(unsubPrice)
+    }).catch(err => this.log(`Failed to subscribe BinanceWS: ${err}`))
+  }
+
+  private async onBtcPriceUpdate(currentPrice: number): Promise<void> {
+    for (const [asset, hedge] of this.pendingHedges) {
+      // Skip fully filled hedges
+      if (hedge.yesFilled && hedge.noFilled) continue
+
+      const priceChange = Math.abs(currentPrice - hedge.btcPriceAtPlacement) / hedge.btcPriceAtPlacement
+      if (priceChange < hedge.replaceThreshold) continue
+
+      await this.cancelAndReplace(asset, hedge, currentPrice)
+    }
+  }
+
+  private async cancelAndReplace(asset: string, hedge: PendingHedge, currentBtcPrice: number): Promise<void> {
+    const { tradingService } = await import('@/services/trading/TradingService')
+    const config = this.dualConfig
+
+    // Cancel unfilled legs in parallel
+    const cancels: Promise<unknown>[] = []
+    if (!hedge.yesFilled && hedge.yesOrderId) {
+      cancels.push(tradingService.cancelOrder(hedge.yesOrderId).then(() => { hedge.yesOrderId = undefined }))
+    }
+    if (!hedge.noFilled && hedge.noOrderId) {
+      cancels.push(tradingService.cancelOrder(hedge.noOrderId).then(() => { hedge.noOrderId = undefined }))
+    }
+    await Promise.all(cancels)
+
+    // Get fresh market data for repricing
+    const { btcUpDownStrategy } = await import('./BtcUpDownStrategy')
+    const market = btcUpDownStrategy.getActiveMarket(asset)
+    if (!market) {
+      this.log(`${asset}: cancel/replace — market no longer active, removing hedge`)
+      this.pendingHedges.delete(asset)
+      return
+    }
+
+    const yesPrice = market.outcomePrices[0] ?? 0.50
+    const noPrice = market.outcomePrices[1] ?? 0.50
+    let yesLimitPrice = Math.max(0.01, yesPrice - config.limitPriceOffset)
+    let noLimitPrice = Math.max(0.01, noPrice - config.limitPriceOffset)
+
+    // AS pricer for cancel/replace repricing
+    if (useSettingsStore.getState().useAvellanedaStoikov) {
+      try {
+        const { AvellanedaStoikovPricer } = await import('@/services/trading/AvellanedaStoikovPricer')
+        const { btcUpDownStrategy } = await import('./BtcUpDownStrategy')
+        const settings = useSettingsStore.getState()
+        const highFreq = btcUpDownStrategy.getHighFreqPrices('BTC')
+        const vol = AvellanedaStoikovPricer.estimateVolatility(highFreq.map(p => p.price), 1000, 900_000)
+        const inventory = AvellanedaStoikovPricer.dualSideInventory(hedge.yesFilled, hedge.noFilled)
+
+        const yesQ = AvellanedaStoikovPricer.computeQuotes({
+          midPrice: yesPrice, inventory, sigma: vol.sigma, timeRemaining: 0.5,
+          gamma: settings.asRiskAversion, kappa: settings.asOrderArrivalRate,
+        })
+        const noQ = AvellanedaStoikovPricer.computeQuotes({
+          midPrice: noPrice, inventory: -inventory, sigma: vol.sigma, timeRemaining: 0.5,
+          gamma: settings.asRiskAversion, kappa: settings.asOrderArrivalRate,
+        })
+        yesLimitPrice = yesQ.bidPrice
+        noLimitPrice = noQ.bidPrice
+      } catch { /* keep static offsets */ }
+    }
+
+    // Re-check combined ask viability
+    const combinedAsk = yesPrice + noPrice
+    if (combinedAsk >= config.maxCombinedAsk) {
+      this.log(`${asset}: cancel/replace — combined ask ${combinedAsk.toFixed(4)} >= max, abandoning`)
+      this.pendingHedges.delete(asset)
+      return
+    }
+
+    // Place new orders for unfilled legs
+    if (!hedge.yesFilled) {
+      const { yesSize } = this.computeBiasedSizes(config.tradeSize, config.biasRatio, hedge.direction)
+      const yesResult = await tradingService.placeBet(market, 'yes', yesSize, {
+        orderType: 'GTC',
+        skipGtcFallback: true,
+        strategy: 'dual-side',
+        postOnly: config.makerOnly,
+        limitPrice: yesLimitPrice,
+      })
+      hedge.yesOrderId = yesResult.orderId
+      hedge.yesPrice = yesLimitPrice
+    }
+    if (!hedge.noFilled) {
+      const { noSize } = this.computeBiasedSizes(config.tradeSize, config.biasRatio, hedge.direction)
+      const noResult = await tradingService.placeBet(market, 'no', noSize, {
+        orderType: 'GTC',
+        skipGtcFallback: true,
+        strategy: 'dual-side',
+        postOnly: config.makerOnly,
+        limitPrice: noLimitPrice,
+      })
+      hedge.noOrderId = noResult.orderId
+      hedge.noPrice = noLimitPrice
+    }
+
+    // Update price reference to prevent immediate re-trigger
+    hedge.btcPriceAtPlacement = currentBtcPrice
+
+    this.log(`${asset}: cancel/replace complete (BTC moved to $${currentBtcPrice.toFixed(2)})`)
+    this.emit('hedgeCancelReplaced', { asset, hedge })
   }
 
   // ==========================================
@@ -145,7 +372,8 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     asset: string,
     signal: Signal,
     _windowOpenPrice: number,
-    _currentPrice: number,
+    currentPrice: number,
+    market?: Market,
   ): Promise<void> {
     if (!this._enabled || !this.dualConfig.enabled) {
       this.log(`Skipping signal: enabled=${this._enabled} dualConfig.enabled=${this.dualConfig.enabled}`)
@@ -153,6 +381,23 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     }
 
     const config = this.dualConfig
+
+    // Gate: VPIN toxicity — skip if informed flow detected (best-effort)
+    try {
+      const { vpinService } = await import('@/services/trading/VPINService')
+      const yesTokenId = market?.tokens?.[0]?.token_id
+      const noTokenId = market?.tokens?.[1]?.token_id
+      if (yesTokenId && vpinService.isToxic(yesTokenId)) {
+        this.log(`${asset}: VPIN toxic on YES token (${vpinService.getVPIN(yesTokenId).toFixed(2)}), skipping`)
+        rejectionTracker.record('market_filter', 'dual-side', `${asset} VPIN toxic YES`)
+        return
+      }
+      if (noTokenId && vpinService.isToxic(noTokenId)) {
+        this.log(`${asset}: VPIN toxic on NO token (${vpinService.getVPIN(noTokenId).toFixed(2)}), skipping`)
+        rejectionTracker.record('market_filter', 'dual-side', `${asset} VPIN toxic NO`)
+        return
+      }
+    } catch { /* VPIN unavailable — proceed without */ }
 
     // Gate: minimum signal confidence
     if (signal.confidence < config.minSignalConfidence) {
@@ -166,47 +411,14 @@ export class DualSideHedgeStrategy extends BaseStrategy {
       return
     }
 
-    // We need the market data from BtcUpDownStrategy to get YES/NO prices.
-    // Use dynamic import to access the singleton.
-    let market: Market | undefined
-    let yesPrice: number
-    let noPrice: number
-
-    try {
-      const { btcUpDownStrategy } = await import('./BtcUpDownStrategy')
-      const entries = btcUpDownStrategy.getActiveMarketEntries()
-      const entry = entries.find(e => e.asset === asset)
-      if (!entry) {
-        this.log(`${asset}: no active market entry found`)
-        return
-      }
-
-      // Get live prices from the strategy's tracked market
-      const activeMarkets = btcUpDownStrategy.getActiveMarkets?.()
-      if (!activeMarkets) {
-        this.log(`${asset}: getActiveMarkets returned null`)
-        return
-      }
-
-      // Look up market by iterating active markets
-      for (const [_id, m] of activeMarkets) {
-        if (m.asset === asset) {
-          market = m.market
-          break
-        }
-      }
-
-      if (!market) {
-        this.log(`${asset}: market object not found in activeMarkets`)
-        return
-      }
-
-      yesPrice = parseFloat(market.outcomePrices[0]) || 0.50
-      noPrice = parseFloat(market.outcomePrices[1]) || 0.50
-    } catch (err) {
-      this.log(`${asset}: failed to fetch market data: ${err}`)
+    // Gate: need market data (passed directly from signalComputed event)
+    if (!market) {
+      this.log(`${asset}: no market object in signal event`)
       return
     }
+
+    const yesPrice = market.outcomePrices[0] ?? 0.50
+    const noPrice = market.outcomePrices[1] ?? 0.50
 
     // Gate: combined ask must be below threshold
     const combinedAsk = yesPrice + noPrice
@@ -245,9 +457,35 @@ export class DualSideHedgeStrategy extends BaseStrategy {
       signal.direction,
     )
 
-    // Limit prices: offset below ask for maker status
-    const yesLimitPrice = Math.max(0.01, yesPrice - config.limitPriceOffset)
-    const noLimitPrice = Math.max(0.01, noPrice - config.limitPriceOffset)
+    // Limit prices: AS pricer when enabled, static offset fallback
+    let yesLimitPrice = Math.max(0.01, yesPrice - config.limitPriceOffset)
+    let noLimitPrice = Math.max(0.01, noPrice - config.limitPriceOffset)
+
+    if (useSettingsStore.getState().useAvellanedaStoikov) {
+      try {
+        const { AvellanedaStoikovPricer } = await import('@/services/trading/AvellanedaStoikovPricer')
+        const { btcUpDownStrategy } = await import('./BtcUpDownStrategy')
+        const settings = useSettingsStore.getState()
+        const gamma = settings.asRiskAversion
+        const kappa = settings.asOrderArrivalRate
+        const highFreq = btcUpDownStrategy.getHighFreqPrices('BTC')
+        const vol = AvellanedaStoikovPricer.estimateVolatility(
+          highFreq.map(p => p.price), 1000, 900_000,
+        )
+        const yesFilled = this.pendingHedges.get(asset)?.yesFilled ?? false
+        const noFilled = this.pendingHedges.get(asset)?.noFilled ?? false
+        const inventory = AvellanedaStoikovPricer.dualSideInventory(yesFilled, noFilled)
+
+        const yesQuotes = AvellanedaStoikovPricer.computeQuotes({
+          midPrice: yesPrice, inventory, sigma: vol.sigma, timeRemaining: 0.5, gamma, kappa,
+        })
+        const noQuotes = AvellanedaStoikovPricer.computeQuotes({
+          midPrice: noPrice, inventory: -inventory, sigma: vol.sigma, timeRemaining: 0.5, gamma, kappa,
+        })
+        yesLimitPrice = yesQuotes.bidPrice
+        noLimitPrice = noQuotes.bidPrice
+      } catch { /* AS pricer failed — keep static offsets */ }
+    }
 
     this.log(
       `DUAL-SIDE: ${asset} ${signal.direction.toUpperCase()} conf=${(signal.confidence * 100).toFixed(0)}% ` +
@@ -266,29 +504,39 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     try {
       const { tradingService } = await import('@/services/trading/TradingService')
 
-      const yesResult = await tradingService.placeOrder?.(market, 'yes', yesSize, yesLimitPrice, {
+      const yesResult = await tradingService.placeBet(market, 'yes', yesSize, {
         orderType: 'GTC',
+        skipGtcFallback: true,
         strategy: 'dual-side',
+        postOnly: config.makerOnly,
+        limitPrice: yesLimitPrice,
       })
 
-      const noResult = await tradingService.placeOrder?.(market, 'no', noSize, noLimitPrice, {
+      const noResult = await tradingService.placeBet(market, 'no', noSize, {
         orderType: 'GTC',
+        skipGtcFallback: true,
         strategy: 'dual-side',
+        postOnly: config.makerOnly,
+        limitPrice: noLimitPrice,
       })
 
       // Track pending hedge
       const hedge: PendingHedge = {
         marketId: market.id,
         asset,
-        yesOrderId: yesResult?.orderId,
-        noOrderId: noResult?.orderId,
+        yesOrderId: yesResult.orderId,
+        noOrderId: noResult.orderId,
         yesPrice: yesLimitPrice,
         noPrice: noLimitPrice,
         yesFilled: false,
         noFilled: false,
+        yesFilledQty: 0,
+        noFilledQty: 0,
         direction: signal.direction,
         confidence: signal.confidence,
         placedAt: Date.now(),
+        btcPriceAtPlacement: currentPrice,
+        replaceThreshold: 0.001,  // 0.1% BTC price move triggers cancel/replace
       }
       this.pendingHedges.set(asset, hedge)
 
@@ -303,9 +551,10 @@ export class DualSideHedgeStrategy extends BaseStrategy {
   // ==========================================
 
   /**
-   * Compute biased sizes: allocate more to predicted winner.
+   * Compute biased sizes: allocate to predicted winner vs other side.
    *
-   * biasRatio = 0.70 means 70% on predicted winner, 30% on other side.
+   * biasRatio = 0.50 means equal sizing (pure hedge, maximizes merge pairs).
+   * biasRatio = 0.70 would mean 70% on predicted winner (directional tilt).
    * If direction is 'up', YES is the predicted winner.
    */
   computeBiasedSizes(
@@ -322,7 +571,7 @@ export class DualSideHedgeStrategy extends BaseStrategy {
   }
 
   // ==========================================
-  // FILL MONITORING
+  // FILL MONITORING (safety-net timeout)
   // ==========================================
 
   private async checkPendingFills(): Promise<void> {
@@ -336,10 +585,26 @@ export class DualSideHedgeStrategy extends BaseStrategy {
       if (elapsed > config.maxWaitForFillMs) {
         this.log(`DUAL-SIDE: ${asset} fill timeout after ${Math.round(elapsed / 1000)}s`)
 
-        if (config.requireBothLegs && (!hedge.yesFilled || !hedge.noFilled)) {
-          // Cancel unfilled leg, optionally sell filled leg
-          this.log(`DUAL-SIDE: ${asset} partial fill — cancelling remaining orders`)
-          activityLogger.logTrade(`Dual-side ${asset}: timeout, cancelling unfilled legs`)
+        // Actually cancel unfilled legs
+        try {
+          const { tradingService } = await import('@/services/trading/TradingService')
+
+          if (!hedge.yesFilled && hedge.yesOrderId) {
+            await tradingService.cancelOrder(hedge.yesOrderId)
+            this.log(`${asset}: cancelled YES order ${hedge.yesOrderId}`)
+          }
+          if (!hedge.noFilled && hedge.noOrderId) {
+            await tradingService.cancelOrder(hedge.noOrderId)
+            this.log(`${asset}: cancelled NO order ${hedge.noOrderId}`)
+          }
+        } catch (err) {
+          this.log(`${asset}: cancel error on timeout: ${err}`)
+        }
+
+        if (config.requireBothLegs && (hedge.yesFilled || hedge.noFilled) && !(hedge.yesFilled && hedge.noFilled)) {
+          activityLogger.logWarning(`Dual-side ${asset}: partial fill on timeout — one leg open`)
+        } else {
+          activityLogger.logTrade(`Dual-side ${asset}: timeout, orders cancelled`)
         }
 
         this.pendingHedges.delete(asset)

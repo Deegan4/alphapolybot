@@ -8,6 +8,13 @@
   to = "/index.html"
   status = 200
 
+# API proxy: CLOB (Polymarket international order book + trading)
+[[redirects]]
+  from = "/api/clob/*"
+  to = "https://clob.polymarket.com/:splat"
+  status = 200
+  force = true
+
 # API proxy: Gamma (Polymarket market data)
 [[redirects]]
   from = "/api/gamma/*"
@@ -26,13 +33,6 @@
 [[redirects]]
   from = "/api/polygon-rpc2"
   to = "https://1rpc.io/matic"
-  status = 200
-  force = true
-
-# API proxy: Coinbase Advanced Trade (crypto spot trading)
-[[redirects]]
-  from = "/api/coinbase/*"
-  to = "https://api.coinbase.com/:splat"
   status = 200
   force = true
 

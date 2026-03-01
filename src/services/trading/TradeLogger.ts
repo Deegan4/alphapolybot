@@ -23,7 +23,7 @@ export interface TradeRecord {
   outcomes: string[]
 
   // Decision context
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'mr'
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool'
   side: 'BUY' | 'SELL'
   outcome: string
   modelProbability?: number     // LLM confidence (0-1)
@@ -94,6 +94,11 @@ export interface BacktestSummary {
 export class TradeLogger {
   private records: TradeRecord[] = []
   private maxRecords = 5000
+  // Sorted cache — avoids re-sorting the full array on every getRecords() call.
+  // Multiple components poll getRecords() every 2-5s; without this cache,
+  // each call copies + sorts O(n log n) for identical results.
+  private _sortedCache: TradeRecord[] | null = null
+  private _summaryCache: BacktestSummary | null = null
 
   /**
    * Log a new trade entry.
@@ -110,6 +115,8 @@ export class TradeLogger {
     }
 
     this.records.push(entry)
+    this._sortedCache = null
+    this._summaryCache = null
 
     // Trim old records
     if (this.records.length > this.maxRecords) {
@@ -141,6 +148,8 @@ export class TradeLogger {
     record.pnlUSD = exit.pnlUSD
     record.pnlPercent = exit.pnlPercent
     record.holdTimeMs = record.exitTimestamp - record.timestamp
+    this._sortedCache = null
+    this._summaryCache = null
 
     this.persistRecord(record)
   }
@@ -160,8 +169,10 @@ export class TradeLogger {
 
   /**
    * Compute backtest summary statistics.
+   * Cached — only recomputes when records change (logEntry/logExit/hydrate).
    */
   getSummary(): BacktestSummary {
+    if (this._summaryCache) return this._summaryCache
     const closed = this.records.filter(r => r.exitTimestamp != null)
     const wins = closed.filter(r => (r.pnlUSD ?? 0) > 0)
     const losses = closed.filter(r => (r.pnlUSD ?? 0) <= 0)
@@ -197,7 +208,7 @@ export class TradeLogger {
 
     // By strategy breakdown
     const byStrategy: BacktestSummary['byStrategy'] = {}
-    for (const strat of ['llm', 'dip', 'fw', 'btc', 'micro', 'mr'] as const) {
+    for (const strat of ['llm', 'dip', 'fw', 'btc', 'dual-side', 'gabagool'] as const) {
       const stratRecords = closed.filter(r => r.strategy === strat)
       const stratWins = stratRecords.filter(r => (r.pnlUSD ?? 0) > 0)
       const stratPnl = stratRecords.reduce((s, r) => s + (r.pnlUSD ?? 0), 0)
@@ -209,7 +220,7 @@ export class TradeLogger {
       }
     }
 
-    return {
+    const result: BacktestSummary = {
       totalTrades: closed.length,
       wins: wins.length,
       losses: losses.length,
@@ -221,14 +232,19 @@ export class TradeLogger {
       maxDrawdownPercent: maxDrawdown,
       byStrategy,
     }
+    this._summaryCache = result
+    return result
   }
 
   /**
    * Get all records (for export / UI display).
+   * Uses a cached sorted array that only rebuilds when records change.
    */
   getRecords(limit?: number): TradeRecord[] {
-    const sorted = [...this.records].sort((a, b) => b.timestamp - a.timestamp)
-    return limit ? sorted.slice(0, limit) : sorted
+    if (!this._sortedCache) {
+      this._sortedCache = [...this.records].sort((a, b) => b.timestamp - a.timestamp)
+    }
+    return limit ? this._sortedCache.slice(0, limit) : this._sortedCache
   }
 
   /**
@@ -250,6 +266,8 @@ export class TradeLogger {
         const existingIds = new Set(this.records.map(r => r.id))
         const newFromStorage = stored.filter((r: TradeRecord) => !existingIds.has(r.id))
         this.records = [...this.records, ...newFromStorage].slice(-this.maxRecords)
+        this._sortedCache = null
+        this._summaryCache = null
         console.log(`[TradeLogger] Hydrated ${newFromStorage.length} trade records from storage`)
       }
     } catch {

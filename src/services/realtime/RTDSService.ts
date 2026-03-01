@@ -1,4 +1,4 @@
-import type { RTDSMessage, RTDSCryptoPricePayload } from '@/types'
+import type { RTDSCryptoPricePayload } from '@/types'
 
 /**
  * Re-export the AssetPrice shape so consumers don't need to import from PriceOracleService.
@@ -35,6 +35,11 @@ export class RTDSService {
   private reconnectTimeout: number | null = null
   private pingInterval: number | null = null
   private messageCount = 0
+
+  private suppressReconnect = false     // Set by disconnect() / rate-limit to prevent onclose auto-reconnect
+  private rateLimitBackoffTimeout: number | null = null
+  private rateLimitBackoffMs = 300_000  // 5 min base — escalates with consecutive 429s
+  private consecutiveRateLimits = 0
 
   private prices = new Map<string, RTDSAssetPrice>()
   private priceCallbacks = new Set<CryptoPriceCallback>()
@@ -89,7 +94,10 @@ export class RTDSService {
           console.log('[RTDS] Disconnected')
           this.stopPingInterval()
           this.notifyConnectionCallbacks('disconnected')
-          this.attemptReconnect()
+          if (!this.suppressReconnect) {
+            this.attemptReconnect()
+          }
+          this.suppressReconnect = false
         }
 
         this.ws.onerror = (error) => {
@@ -108,9 +116,14 @@ export class RTDSService {
    * Disconnect and clean up.
    */
   disconnect(): void {
+    this.suppressReconnect = true
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
+    }
+    if (this.rateLimitBackoffTimeout) {
+      clearTimeout(this.rateLimitBackoffTimeout)
+      this.rateLimitBackoffTimeout = null
     }
     this.stopPingInterval()
     if (this.ws) {
@@ -219,8 +232,28 @@ export class RTDSService {
       // Ignore pong keepalive
       if (msg.type === 'pong') return
 
+      // Handle rate limiting — escalating backoff to avoid IP ban
+      if (msg.message === 'Too Many Requests') {
+        this.consecutiveRateLimits++
+        // Escalate: 5min, 10min, 15min, max 15min
+        this.rateLimitBackoffMs = Math.min(15 * 60_000, 300_000 * Math.pow(2, this.consecutiveRateLimits - 1))
+        console.warn(`[RTDS] Rate limited (429) — backing off ${Math.round(this.rateLimitBackoffMs / 1000)}s (hit #${this.consecutiveRateLimits})`)
+        this.disconnect()  // Sets suppressReconnect, prevents onclose → attemptReconnect
+        this.rateLimitBackoffTimeout = window.setTimeout(() => {
+          this.rateLimitBackoffTimeout = null
+          this.reconnectAttempts = 0
+          this.connect().then(connected => {
+            if (connected) this.subscribeCryptoPrices(['BTC', 'ETH', 'SOL'])
+          })
+        }, this.rateLimitBackoffMs)
+        return
+      }
+
       // Try structured format: { topic: 'crypto_prices', payload: { symbol, price } }
       if (msg.topic === 'crypto_prices' && msg.payload) {
+        // Got real data — gradually de-escalate (don't reset to 0 immediately,
+        // or the next 429 starts at minimum backoff again)
+        if (this.consecutiveRateLimits > 0) this.consecutiveRateLimits--
         this.handleCryptoPriceUpdate(msg.payload as RTDSCryptoPricePayload)
         return
       }

@@ -13,10 +13,9 @@ vi.mock('@/services/llm/OpenRouterService', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
-  polymarketUSClient: {
+  polymarketClient: {
     getEvents: vi.fn().mockResolvedValue([]),
   },
-  normalizeEventToMarkets: vi.fn().mockReturnValue([]),
 }))
 
 import { MutexValidator } from '../projectfw/crossmarket/MutexValidator'

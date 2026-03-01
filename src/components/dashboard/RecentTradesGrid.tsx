@@ -11,7 +11,7 @@ export const RecentTradesGrid: React.FC = () => {
       const closed = records
         .filter((r) => r.exitTimestamp != null && r.pnlUSD != null)
         .sort((a, b) => b.exitTimestamp! - a.exitTimestamp!)
-        .slice(0, 4)
+        .slice(0, 8)
       setTrades(closed)
     }
     tick()
@@ -28,7 +28,6 @@ export const RecentTradesGrid: React.FC = () => {
     if (r.strategy === 'dip') return 'DIP'
     if (r.strategy === 'fw') return 'FW'
     if (r.strategy === 'llm') return 'LLM'
-    if (r.strategy === 'micro') return 'MICRO'
     return r.strategy.toUpperCase()
   }
 
@@ -41,33 +40,36 @@ export const RecentTradesGrid: React.FC = () => {
   }
 
   return (
-    <div className="card-base p-4 flex flex-col min-h-0">
+    <div className="card-base px-4 py-3">
       <div className="flex items-center gap-2 mb-2">
-        <span className="text-sm">&#128200;</span>
         <span className="text-xs uppercase tracking-wider text-agent-text-muted font-sans font-medium">
           Recent Trades
         </span>
+        {trades.length > 0 && (
+          <span className="text-xs font-mono text-agent-text-muted bg-agent-elevated/40 px-1.5 py-0.5 rounded-full">
+            {trades.length}
+          </span>
+        )}
       </div>
 
       {trades.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center text-center px-4 gap-2">
-          <span className="text-2xl opacity-30">&#128200;</span>
-          <span className="text-sm font-sans text-agent-text-label">No closed trades yet</span>
+        <div className="text-center py-2">
+          <span className="text-xs font-sans text-agent-text-label/60">No closed trades yet</span>
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-2 flex-1 min-h-0">
+        <div className="flex gap-2 overflow-x-auto no-scrollbar pb-0.5">
           {trades.map((t) => {
             const isWin = (t.pnlUSD ?? 0) >= 0
             return (
               <div
                 key={t.id}
-                className={`flex flex-col justify-between rounded-md px-3 py-2.5 border transition-colors ${
+                className={`flex-shrink-0 rounded-md px-3 py-2 border transition-colors min-w-[130px] ${
                   isWin
-                    ? 'bg-agent-green/5 border-agent-green/20 hover:bg-agent-green/10'
-                    : 'bg-agent-red/5 border-agent-red/20 hover:bg-agent-red/10'
+                    ? 'bg-agent-green/5 border-agent-green/20'
+                    : 'bg-agent-red/5 border-agent-red/20'
                 }`}
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-sans font-semibold text-agent-text">
                     {stratLabel(t)}
                   </span>
@@ -79,7 +81,7 @@ export const RecentTradesGrid: React.FC = () => {
                     {isWin ? '+' : ''}${(t.pnlUSD ?? 0).toFixed(2)}
                   </span>
                 </div>
-                <span className="text-xs font-sans text-agent-text-muted mt-0.5">
+                <span className="text-[10px] font-sans text-agent-text-muted mt-0.5 block">
                   {timeAgo(t.exitTimestamp!)}
                 </span>
               </div>

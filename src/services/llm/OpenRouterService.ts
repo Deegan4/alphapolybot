@@ -17,6 +17,25 @@ export class OpenRouterService {
   private baseUrl = import.meta.env.VITE_OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1'
   private analysisHistory: AnalysisRecord[] = []
 
+  // Resolve active provider + base URL from settings at call time
+  private getActiveProvider(): { provider: string; baseUrl: string; ollamaModel: string } {
+    try {
+      const raw = localStorage.getItem('alphapolybot-settings')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        const s = parsed?.state
+        if (s?.llmProvider === 'ollama') {
+          return {
+            provider: 'ollama',
+            baseUrl: s.ollamaBaseUrl || 'http://localhost:11434/v1',
+            ollamaModel: s.ollamaModel || 'polytrader',
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    return { provider: 'openrouter', baseUrl: this.baseUrl, ollamaModel: '' }
+  }
+
   // Cost tracking — partitioned daily budget enforcement
   private budgets: Record<string, { limit: number; spent: number; calls: number; lastReset: string }> = {
     prediction:  { limit: 1.00, spent: 0, calls: 0, lastReset: '' },
@@ -24,6 +43,18 @@ export class OpenRouterService {
     premium:     { limit: 0.50, spent: 0, calls: 0, lastReset: '' },
   }
   private totalSpendUSD = 0               // Lifetime spend across all buckets (session only)
+
+  // 402 circuit breaker — stop hammering OpenRouter when account has no credits.
+  // Trips on first 402 response, blocks all calls for CREDIT_COOLDOWN_MS.
+  private creditExhaustedAt = 0           // Timestamp when 402 was received (0 = healthy)
+  private static readonly CREDIT_COOLDOWN_MS = 30 * 60 * 1000  // 30 minutes
+
+  // Ollama circuit breaker — stop spamming when Ollama server is down.
+  // Trips after OLLAMA_FAILURE_THRESHOLD consecutive failures, blocks for OLLAMA_COOLDOWN_MS.
+  private ollamaConsecutiveFailures = 0
+  private ollamaCircuitOpenAt = 0         // Timestamp when circuit opened (0 = healthy)
+  private static readonly OLLAMA_FAILURE_THRESHOLD = 3
+  private static readonly OLLAMA_COOLDOWN_MS = 5 * 60 * 1000   // 5 minutes
 
   private config: LLMConfig = {
     provider: 'openrouter',
@@ -92,8 +123,9 @@ export class OpenRouterService {
    */
   async analyzeMarket(market: Market, context?: MarketContext): Promise<PredictionResult> {
     const startTime = Date.now()
+    const { provider } = this.getActiveProvider()
 
-    if (!this.apiKey) {
+    if (!this.apiKey && provider !== 'ollama') {
       throw new Error('OpenRouter API key not configured')
     }
 
@@ -150,13 +182,19 @@ export class OpenRouterService {
 
       return result
     } catch (error) {
-      console.error('LLM analysis failed:', error)
-      
-      // Return low-confidence fallback
+      const msg = error instanceof Error ? error.message : String(error)
+      console.error('LLM analysis failed:', msg)
+
+      // Re-throw for known-bad states — caller should skip this market entirely
+      // rather than getting a fake "yes" prediction
+      const isFatal = /budget exhausted|credit|402|api key|not configured/i.test(msg)
+      if (isFatal) throw error
+
+      // Only return low-confidence fallback for transient/parse errors
       return {
         predictedOutcome: 'yes',
-        confidence: 0.1,
-        reasoning: `Analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        confidence: 0.0, // Zero confidence — will always be below any threshold
+        reasoning: `Analysis failed: ${msg}`,
         sources: [],
         analysisTime: Date.now() - startTime,
       }
@@ -169,8 +207,9 @@ export class OpenRouterService {
    */
   async analyzeCryptoMarket(market: Market, context?: MarketContext, cryptoModel?: string): Promise<PredictionResult> {
     const startTime = Date.now()
+    const { provider } = this.getActiveProvider()
 
-    if (!this.apiKey) {
+    if (!this.apiKey && provider !== 'ollama') {
       throw new Error('OpenRouter API key not configured')
     }
 
@@ -252,14 +291,16 @@ export class OpenRouterService {
         body.plugins = [{ id: 'web', max_results: 3 }]
       }
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      const { provider: p2, baseUrl: b2 } = this.getActiveProvider()
+      const secondOpinionHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (p2 !== 'ollama') {
+        secondOpinionHeaders['Authorization'] = `Bearer ${this.apiKey}`
+        secondOpinionHeaders['HTTP-Referer'] = window.location.origin
+        secondOpinionHeaders['X-Title'] = 'AlphaPolyBot - Signal Fusion'
+      }
+      const response = await fetch(`${p2 === 'ollama' ? b2 : this.baseUrl}/chat/completions`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`,
-          'HTTP-Referer': window.location.origin,
-          'X-Title': 'AlphaPolyBot - Signal Fusion',
-        },
+        headers: secondOpinionHeaders,
         body: JSON.stringify(body),
       })
 
@@ -288,6 +329,20 @@ export class OpenRouterService {
   }
 
   /**
+   * Check if the 402 circuit breaker is currently active (credits exhausted).
+   * Used by callers to silently skip LLM calls without logging spam.
+   */
+  isCircuitBreakerActive(): boolean {
+    if (this.creditExhaustedAt <= 0) return false
+    const elapsed = Date.now() - this.creditExhaustedAt
+    if (elapsed >= OpenRouterService.CREDIT_COOLDOWN_MS) {
+      this.creditExhaustedAt = 0
+      return false
+    }
+    return true
+  }
+
+  /**
    * Analyze a crypto signal for the BTC Up/Down strategy.
    * Takes a pre-built prompt (strategy builds it with signal context).
    * Returns confirmation/adjustment or null on any failure (fail-open).
@@ -298,7 +353,12 @@ export class OpenRouterService {
     adjustment: number  // -20 to +20 confidence adjustment
     reasoning: string
   } | null> {
-    if (!this.apiKey) return null
+    const { provider } = this.getActiveProvider()
+    if (!this.apiKey && provider !== 'ollama') return null
+
+    // Circuit breaker — silently return null when credits are exhausted.
+    // This prevents hundreds of console.warn lines per minute from scan cycles.
+    if (this.isCircuitBreakerActive()) return null
 
     // Budget check (prediction bucket)
     this.maybeResetBucket('prediction')
@@ -363,6 +423,56 @@ export class OpenRouterService {
       // Disagreement: penalize primary confidence proportional to secondary's strength
       const penalty = secondary.confidence * 0.5 // up to 50% reduction
       return { confidence: Math.max(0.05, primary.confidence * (1 - penalty)), fusionApplied: true }
+    }
+  }
+
+  /**
+   * Predict crypto price direction independently (no mechanical signal data).
+   * Used by BTC Up/Down LLM fusion — forms an independent opinion to avoid confirmation bias.
+   * Returns null on any failure (fail-open).
+   */
+  async predictCryptoDirection(prompt: string, model?: string): Promise<{
+    direction: 'up' | 'down'
+    confidence: number  // 0-1
+    reasoning: string
+  } | null> {
+    const { provider } = this.getActiveProvider()
+    if (!this.apiKey && provider !== 'ollama') return null
+
+    if (this.isCircuitBreakerActive()) return null
+
+    this.maybeResetBucket('prediction')
+    const predBudget = this.budgets.prediction
+    if (predBudget.spent >= predBudget.limit) return null
+
+    try {
+      const response = await this.callOpenRouter(prompt, model || undefined, {
+        systemPrompt: 'Crypto direction predictor. Predict whether the price will go up or down. JSON only.',
+        temperature: 0.2,
+        title: 'AlphaPolyBot - Crypto Direction Prediction',
+      })
+      this.recordCost(response.cost, 'prediction')
+
+      let content = response.message.content
+      content = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+      const jsonMatch = content.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) return null
+
+      const parsed = JSON.parse(jsonMatch[0])
+      const dir = String(parsed.direction).toLowerCase()
+      if (dir !== 'up' && dir !== 'down') return null
+
+      const conf = Number(parsed.confidence)
+      if (isNaN(conf) || conf < 0 || conf > 100) return null
+
+      return {
+        direction: dir as 'up' | 'down',
+        confidence: Math.max(0, Math.min(1, conf / 100)),
+        reasoning: String(parsed.reasoning || '').slice(0, 200),
+      }
+    } catch (error) {
+      console.warn('[predictCryptoDirection] Failed:', error instanceof Error ? error.message : error)
+      return null
     }
   }
 
@@ -449,9 +559,35 @@ Respond ONLY with JSON:
     maxTokens?: number
     title?: string
   }): Promise<{ message: { content: string; annotations?: Array<{ type: string; url?: string; title?: string }> }; cost: number }> {
-    // When web search is enabled, append :online to model slug and add plugins config
-    const baseModel = modelOverride || this.config.model
-    const model = this.config.webSearchEnabled
+    const { provider, baseUrl: activeBaseUrl, ollamaModel } = this.getActiveProvider()
+    const isOllama = provider === 'ollama'
+
+    // 402 circuit breaker — only applies to OpenRouter
+    if (!isOllama && this.creditExhaustedAt > 0) {
+      const elapsed = Date.now() - this.creditExhaustedAt
+      if (elapsed < OpenRouterService.CREDIT_COOLDOWN_MS) {
+        const remainMin = Math.ceil((OpenRouterService.CREDIT_COOLDOWN_MS - elapsed) / 60_000)
+        throw new Error(`OpenRouter credits exhausted — retrying in ${remainMin}m`)
+      }
+      this.creditExhaustedAt = 0
+      console.log('[OpenRouterService] Credit cooldown expired, retrying API calls')
+    }
+
+    // Ollama circuit breaker — stop spamming when server is down
+    if (isOllama && this.ollamaCircuitOpenAt > 0) {
+      const elapsed = Date.now() - this.ollamaCircuitOpenAt
+      if (elapsed < OpenRouterService.OLLAMA_COOLDOWN_MS) {
+        const remainMin = Math.ceil((OpenRouterService.OLLAMA_COOLDOWN_MS - elapsed) / 60_000)
+        throw new Error(`Ollama server unreachable — retrying in ${remainMin}m`)
+      }
+      this.ollamaCircuitOpenAt = 0
+      this.ollamaConsecutiveFailures = 0
+      console.log('[OpenRouterService] Ollama cooldown expired, retrying')
+    }
+
+    // Model selection: Ollama uses its own model, OpenRouter supports :online suffix
+    const baseModel = modelOverride || (isOllama ? ollamaModel : this.config.model)
+    const model = (!isOllama && this.config.webSearchEnabled)
       ? `${baseModel}:online`
       : baseModel
 
@@ -484,40 +620,72 @@ Respond ONLY with JSON:
       body.plugins = [{ id: 'web', max_results: 3 }]
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    }
+    if (!isOllama) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`
+      headers['HTTP-Referer'] = window.location.origin
+      headers['X-Title'] = opts?.title ?? 'AlphaPolyBot - Polymarket LLM Trading'
+    }
+
+    const fetchUrl = `${isOllama ? activeBaseUrl : this.baseUrl}/chat/completions`
+    const response = await fetch(fetchUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-        'HTTP-Referer': window.location.origin,
-        'X-Title': opts?.title ?? 'AlphaPolyBot - Polymarket LLM Trading',
-      },
+      headers,
       body: JSON.stringify(body),
     })
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
-      throw new Error(`OpenRouter API error: ${response.status} - ${errorData.error?.message || response.statusText}`)
+
+      // Trip circuit breaker on 402 (Payment Required / insufficient credits) — OpenRouter only
+      if (!isOllama && response.status === 402) {
+        this.creditExhaustedAt = Date.now()
+        const cooldownMin = OpenRouterService.CREDIT_COOLDOWN_MS / 60_000
+        console.error(`[OpenRouterService] 402 — credits exhausted. Circuit breaker tripped for ${cooldownMin}m.`)
+        throw new Error(`OpenRouter credits exhausted (402). All LLM calls paused for ${cooldownMin} minutes.`)
+      }
+
+      // Trip Ollama circuit breaker after consecutive failures (server down / model not loaded)
+      if (isOllama) {
+        this.ollamaConsecutiveFailures++
+        if (this.ollamaConsecutiveFailures >= OpenRouterService.OLLAMA_FAILURE_THRESHOLD) {
+          this.ollamaCircuitOpenAt = Date.now()
+          const cooldownMin = OpenRouterService.OLLAMA_COOLDOWN_MS / 60_000
+          console.error(`[OpenRouterService] Ollama failed ${this.ollamaConsecutiveFailures}× — circuit breaker tripped for ${cooldownMin}m`)
+        }
+      }
+
+      const prefix = isOllama ? 'Ollama API error' : 'OpenRouter API error'
+      throw new Error(`${prefix}: ${response.status} - ${errorData.error?.message || response.statusText}`)
     }
 
     const data = await response.json()
+
+    // Reset Ollama circuit breaker on success
+    if (isOllama && this.ollamaConsecutiveFailures > 0) {
+      this.ollamaConsecutiveFailures = 0
+    }
 
     if (!data.choices?.[0]?.message) {
       throw new Error('Invalid response from OpenRouter')
     }
 
-    // Extract cost: OpenRouter returns usage.total_cost (in USD) when available.
+    // Extract cost: Ollama is free (local inference). OpenRouter returns usage.total_cost when available.
     // Fall back to token-count estimate: ~$0.00059 per 1K input + $0.00079 per 1K output (Llama 3.1 70B rates).
     // When web search is enabled, add Exa search cost: $0.004 per result × 3 results = $0.012.
     let cost = 0
-    if (data.usage?.total_cost != null) {
-      cost = data.usage.total_cost
-    } else if (data.usage) {
-      const inputTokens = data.usage.prompt_tokens ?? 0
-      const outputTokens = data.usage.completion_tokens ?? 0
-      cost = (inputTokens / 1000) * 0.00059 + (outputTokens / 1000) * 0.00079
-      if (this.config.webSearchEnabled) {
-        cost += 0.012 // Exa search: $0.004/result × 3 results
+    if (!isOllama) {
+      if (data.usage?.total_cost != null) {
+        cost = data.usage.total_cost
+      } else if (data.usage) {
+        const inputTokens = data.usage.prompt_tokens ?? 0
+        const outputTokens = data.usage.completion_tokens ?? 0
+        cost = (inputTokens / 1000) * 0.00059 + (outputTokens / 1000) * 0.00079
+        if (this.config.webSearchEnabled) {
+          cost += 0.012 // Exa search: $0.004/result × 3 results
+        }
       }
     }
 
@@ -670,8 +838,9 @@ Respond ONLY with JSON:
     pairs: Array<{ marketA: Market; marketB: Market }>,
   ): Promise<MarketDependency[]> {
     if (pairs.length === 0) return []
+    const { provider } = this.getActiveProvider()
 
-    if (!this.apiKey) {
+    if (!this.apiKey && provider !== 'ollama') {
       throw new Error('OpenRouter API key not configured')
     }
 

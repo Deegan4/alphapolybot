@@ -33,10 +33,6 @@ vi.mock('@/services/strategies/ProjectFWStrategy', () => ({
   projectFWStrategy: { setFWConfig: vi.fn() },
 }))
 
-vi.mock('@/services/strategies/MicrostructureMomentumStrategy', () => ({
-  microMomentumStrategy: { setConfig: vi.fn() },
-}))
-
 // Block transitive imports that cascade from the dynamic imports above
 vi.mock('@/services/trading/ActivityLogger', () => ({
   activityLogger: { on: vi.fn(), emit: vi.fn(), subscribe: vi.fn() },
@@ -47,7 +43,7 @@ vi.mock('@/stores/walletStore', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
-  polymarketUSClient: {},
+  polymarketClient: {},
 }))
 
 vi.mock('@/services/wallet', () => ({
@@ -104,11 +100,11 @@ describe('settingsStore', () => {
 
     it('has risk management defaults', () => {
       const state = useSettingsStore.getState()
-      expect(state.dailyLossLimit).toBe(3)
-      expect(state.weeklyLossLimit).toBe(10)
-      expect(state.maxTradesPerHour).toBe(20)
-      expect(state.consecutiveFailureLimit).toBe(5)
-      expect(state.minBalanceForTrade).toBe(1.00)
+      expect(state.dailyLossLimit).toBe(2)
+      expect(state.weeklyLossLimit).toBe(7)
+      expect(state.maxTradesPerHour).toBe(12)
+      expect(state.consecutiveFailureLimit).toBe(3)
+      expect(state.minBalanceForTrade).toBe(1)
       expect(state.riskManagementEnabled).toBe(true)
     })
 
@@ -120,7 +116,7 @@ describe('settingsStore', () => {
 
     it('has FW arb defaults', () => {
       const state = useSettingsStore.getState()
-      expect(state.fwTradeSize).toBe(5)
+      expect(state.fwTradeSize).toBe(1)
       expect(state.fwMinProfitBps).toBe(30)
     })
   })
@@ -202,8 +198,8 @@ describe('settingsStore', () => {
       expect(s.aggressiveMode).toBe(true)
       expect(s.pennyTraderMode).toBe(false)
       expect(s.kellyFraction).toBe(0.40)
-      expect(s.dailyLossLimit).toBe(25)
-      expect(s.weeklyLossLimit).toBe(100)
+      expect(s.dailyLossLimit).toBe(5)
+      expect(s.weeklyLossLimit).toBe(10)
       expect(s.maxTradesPerHour).toBe(40)
       expect(s.consecutiveFailureLimit).toBe(8)
       expect(s.microMinCompositeSignal).toBe(0.30)
@@ -219,12 +215,12 @@ describe('settingsStore', () => {
       useSettingsStore.getState().setAggressiveMode(false)
       const s = useSettingsStore.getState()
       expect(s.aggressiveMode).toBe(false)
-      expect(s.pennyTraderMode).toBe(true)
-      expect(s.kellyFraction).toBe(0.15)
-      expect(s.dailyLossLimit).toBe(3)
-      expect(s.weeklyLossLimit).toBe(10)
-      expect(s.maxTradesPerHour).toBe(20)
-      expect(s.consecutiveFailureLimit).toBe(5)
+      expect(s.pennyTraderMode).toBe(false)
+      expect(s.kellyFraction).toBe(0.20)
+      expect(s.dailyLossLimit).toBe(2)
+      expect(s.weeklyLossLimit).toBe(7)
+      expect(s.maxTradesPerHour).toBe(12)
+      expect(s.consecutiveFailureLimit).toBe(3)
       expect(s.microMinCompositeSignal).toBe(0.40)
       expect(s.fwMinProfitBps).toBe(30)
     })
@@ -246,8 +242,8 @@ describe('settingsStore', () => {
       expect(useSettingsStore.getState().aggressiveMode).toBe(false)
     })
 
-    it('btcEnableBtc defaults to false', () => {
-      expect(useSettingsStore.getState().btcEnableBtc).toBe(false)
+    it('btcEnableBtc defaults to true (primary $10 strategy)', () => {
+      expect(useSettingsStore.getState().btcEnableBtc).toBe(true)
     })
   })
 })

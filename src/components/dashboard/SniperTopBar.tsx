@@ -4,15 +4,14 @@ import { WindowTimer } from './WindowTimer'
 import { StrategyDropdown } from './StrategyDropdown'
 import { useWalletStore, useSettingsStore } from '@/stores'
 import { walletService } from '@/services/wallet/WalletService'
-import type { WalletEntry } from '@/types'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import { tradeLogger, rejectionTracker, positionLifecycleManager, tradingService } from '@/services/trading'
 import { btcUpDownStrategy } from '@/services/strategies/BtcUpDownStrategy'
 import type { BacktestSummary } from '@/services/trading/TradeLogger'
 
 interface SniperTopBarProps {
-  activeTab: 'live' | 'history' | 'spotcrypto' | 'backtest' | 'analytics'
-  onTabChange: (tab: 'live' | 'history' | 'spotcrypto' | 'backtest' | 'analytics') => void
+  activeTab: 'live' | 'history' | 'backtest' | 'analytics'
+  onTabChange: (tab: 'live' | 'history' | 'backtest' | 'analytics') => void
 }
 
 export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChange }) => {
@@ -26,7 +25,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
   const [showWalletPicker, setShowWalletPicker] = useState(false)
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [summary, setSummary] = useState<BacktestSummary>(tradeLogger.getSummary())
-  const [window, setWindow] = useState(btcUpDownStrategy.getActiveWindow())
+  const [activeWindow, setActiveWindow] = useState(btcUpDownStrategy.getActiveWindow())
 
   useEffect(() => {
     return strategyManager.subscribe(setStrategies)
@@ -41,7 +40,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
   useEffect(() => {
     const tick = () => {
       setSummary(tradeLogger.getSummary())
-      setWindow(btcUpDownStrategy.getActiveWindow())
+      setActiveWindow(btcUpDownStrategy.getActiveWindow())
       const rSummary = rejectionTracker.getSummary()
       setRejectionTotal(rSummary.total)
       setRejectionTooltip(
@@ -58,6 +57,13 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
   }, [])
 
   const [showDropdown, setShowDropdown] = useState(false)
+
+  // Listen for banner CTA to open the strategy dropdown
+  useEffect(() => {
+    const handler = () => setShowDropdown(true)
+    window.addEventListener('open-strategy-dropdown', handler)
+    return () => window.removeEventListener('open-strategy-dropdown', handler)
+  }, [])
 
   const anyRunning = strategies.some((s) => s.status === 'running')
   // Total PnL = realized (closed trades) + unrealized (open positions)
@@ -76,27 +82,29 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
           </span>
         </div>
 
-        {/* Tabs — horizontally scrollable on mobile */}
-        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+        {/* Tabs — underline indicator style, horizontally scrollable on mobile */}
+        <div className="flex items-center gap-0.5 overflow-x-auto no-scrollbar border-b border-transparent">
           {([
             { key: 'live' as const, label: 'Live', labelFull: 'Live Trading' },
             { key: 'history' as const, label: 'History', labelFull: 'History' },
-            { key: 'spotcrypto' as const, label: 'Spot', labelFull: 'Spot Crypto' },
             { key: 'backtest' as const, label: 'Backtest', labelFull: 'Backtest' },
             { key: 'analytics' as const, label: 'Stats', labelFull: 'Analytics' },
           ]).map(tab => (
             <button
               key={tab.key}
               onClick={() => onTabChange(tab.key)}
-              className={`whitespace-nowrap px-2.5 sm:px-3.5 py-1.5 rounded-md text-xs sm:text-sm font-sans font-semibold transition-colors ${
+              className={`relative whitespace-nowrap px-3 sm:px-4 py-2 text-xs sm:text-sm font-sans font-medium transition-colors ${
                 activeTab === tab.key
-                  ? 'bg-agent-green/15 text-agent-green border border-agent-green/30'
+                  ? 'text-agent-green'
                   : 'text-agent-text-muted hover:text-agent-text'
               }`}
             >
-              <span className={`mr-1.5 inline-block w-1.5 h-1.5 rounded-full ${activeTab === tab.key ? 'bg-agent-green' : 'bg-agent-text-label'}`} />
               <span className="hidden sm:inline">{tab.labelFull}</span>
               <span className="sm:hidden">{tab.label}</span>
+              {/* Active underline indicator */}
+              {activeTab === tab.key && (
+                <span className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full bg-agent-green" />
+              )}
             </button>
           ))}
         </div>
@@ -170,9 +178,9 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
       {/* Center: Window timer (hidden on small screens) */}
       <div className="hidden md:block">
         <WindowTimer
-          windowStartMs={window?.windowStartMs ?? null}
-          windowEndMs={window?.windowEndMs ?? null}
-          windowDurationMs={window?.windowDurationMs ?? null}
+          windowStartMs={activeWindow?.windowStartMs ?? null}
+          windowEndMs={activeWindow?.windowEndMs ?? null}
+          windowDurationMs={activeWindow?.windowDurationMs ?? null}
         />
       </div>
 
@@ -182,12 +190,12 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
         <div className="hidden lg:flex items-center gap-5 text-sm font-mono">
           <div className="text-center">
             <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Balance</div>
-            <div className="text-agent-text font-semibold tabular-nums">${balance.toFixed(2)}</div>
+            <div className="text-agent-text font-semibold tabular-nums">${(balance ?? 0).toFixed(2)}</div>
           </div>
           <div className="text-center">
             <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Today</div>
             <div className={`font-semibold tabular-nums ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
-              {todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)}
+              {todayPnl >= 0 ? '+' : ''}${(todayPnl ?? 0).toFixed(2)}
             </div>
           </div>
           <div className="text-center">

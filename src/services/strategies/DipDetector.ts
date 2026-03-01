@@ -107,7 +107,7 @@ export class DipDetector {
     // which always sums to exactly 1.0 and would never trigger arbs).
     const complementIndex = update.outcome === 'yes' ? 1 : 0
     const complementPrice = market.outcomePrices?.[complementIndex] ?? (1 - currentPrice)
-    const totalCost = currentPrice + complementPrice
+    const _totalCost = currentPrice + complementPrice
 
     // For dip detection, we want the sum to be BELOW the target (profitable arb).
     // Skip if sum is too high — no arb exists.

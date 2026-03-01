@@ -8,7 +8,7 @@ Browser-based TypeScript/React Polymarket trading bot. Vite 7, React 18, Zustand
 npm run dev          # Vite dev server on :4000 (auto-opens browser)
 npm run dev:strict-csp # Dev server with strict CSP headers
 npm run build        # Production build (uses vite build, NOT tsc)
-npm test             # Vitest single run (511 tests)
+npm test             # Vitest single run (762 tests)
 npm run test:watch   # Vitest watch mode
 npm run lint         # ESLint (.eslintrc.cjs)
 npm run preview      # Preview production build
@@ -20,19 +20,18 @@ npm run preview      # Preview production build
 
 - **Singleton services** exported from modules: `export const tradingService = new TradingService()`
 - **Event-driven strategies**: BaseStrategy has `.on()` / `.emit()` pattern
-- **Zustand stores** with `persist` middleware (settingsStore v29, walletStore). notificationStore and backtestStore have no persist.
+- **Zustand stores** with `persist` middleware (settingsStore v49, walletStore). notificationStore and backtestStore have no persist.
 - **Barrel exports** via `index.ts` in each service directory
 - **ActivityLogger** is the central audit trail — services subscribe to it
 - **Path alias**: `@/` maps to `src/`
 
-### Seven Trading Strategies
-1. **LLM Prediction** — AI-powered via OpenRouter, analyzes markets with LLMs
+### Six Trading Strategies
+1. **LLM Prediction** — AI-powered via OpenRouter, analyzes markets with LLMs. GTD-first order mode (maker 0% fees)
 2. **Dip Arbitrage** — Mechanical, buys price dips on binary markets
 3. **ProjectFW Arb** — Frank-Wolfe optimized spread arbitrage with Bregman projection
-4. **BTC Up/Down** — Resolution-hold on cheap outcomes (<45c). 5-factor vol-normalized signal with regime detection, RSI filter, adaptive scan. BinanceWS 300-point high-freq buffer.
-5. **Microstructure Momentum** — Trades on bid/ask imbalance and flow toxicity signals from MicrostructureAnalyzer
-6. **Mean Reversion** — Coinbase spot crypto (BTC/ETH/SOL), Z-score mean reversion on price buffers, BinanceWS live feed
-7. **Copy Trading** — Mirrors trades from tracked Polymarket whale wallets
+4. **BTC Up/Down** — Resolution-hold on cheap outcomes. 5-factor vol-normalized signal with regime detection, RSI filter. Primary focus on 1hr + 4hr windows (15m opt-in). BinanceWS high-freq buffer.
+5. **Dual-Side Hedge** — Maker-only YES+NO orders with 70/30 bias, event-driven via signalComputed, DynamicFeeService viability gate
+6. **Gabagool Accumulator** — Direction-agnostic merge arbitrage on BTC 15m markets. Accumulates cheap YES+NO shares via maker-only GTC orders until pair cost < $1.00, then merges for guaranteed profit.
 
 ## Directory Structure
 
@@ -41,34 +40,36 @@ src/
 ├── components/
 │   ├── charts/        # MatrixLineChart, MatrixAreaChart, MatrixBarChart, MatrixPieChart,
 │   │                  # MatrixGauge, MatrixSparkline
-│   ├── dashboard/     # 22 components: ActivePositionsCard, AssetCard, AssetCardsRow,
-│   │                  # BacktestView, DiagnosticsBanner, FollowTraderPanel, HistoryView,
-│   │                  # PerformancePanel, PortfolioPanel, ReadinessPanel, RecentTradesGrid,
-│   │                  # SniperTopBar, SpotCryptoView, StrategyDropdown, WindowTimer,
-│   │                  # MatrixDataTable, MatrixMetricCard, MatrixProgressCard, etc.
+│   ├── dashboard/     # ActivePositionsCard, AssetCard, AssetCardsRow, BacktestView,
+│   │                  # DiagnosticsBanner, HistoryView, PerformancePanel, PortfolioPanel,
+│   │                  # ReadinessPanel, RecentTradesGrid, SniperTopBar, StrategyDropdown,
+│   │                  # WindowTimer, MatrixDataTable, MatrixMetricCard, MatrixProgressCard, etc.
 │   ├── layout/        # AppLayout, DashboardLayout, SettingsLayout, Header, Sidebar, MatrixRain
-│   └── ui/            # 18 Matrix-themed components (Button, Card, Modal, Toast, etc.)
+│   └── ui/            # 19 Matrix-themed components (Button, Card, Modal, Toast, Resizable, etc.)
 ├── hooks/             # useWallet, useBalanceHistory, useCryptoPrices, usePolymarketPrices
 ├── services/
-│   ├── api/           # BaseApiClient, CLOBClient, GammaClient, DataClient, PriceOracleService,
-│   │                  # CoinbaseClient, PolyBacktestClient, PolymarketUSClient
+│   ├── api/           # BaseApiClient, CLOBClient, GammaClient, DataClient, PolymarketClient,
+│   │                  # PriceOracleService, PolyBacktestClient
 │   ├── llm/           # OpenRouterService (multi-model, budget-bucketed)
 │   ├── notifications/ # NotificationService (toast + browser + Web Audio)
 │   ├── realtime/      # RealtimeService, RTDSService (crypto), UserChannelService (auth push),
 │   │                  # BinanceWSService
 │   ├── storage/       # IndexedDBService (v4, 6 object stores)
-│   ├── strategies/    # BaseStrategy, LLMPrediction, DipArb, ProjectFW, BtcUpDown, MicroMomentum,
-│   │                  # MeanReversion, CopyTrading, DipDetector
-│   │   ├── __tests__/ # DipArb, FW Optimizer, FW Strategy, BtcUpDown, MeanReversion, CopyTrading tests
+│   ├── strategies/    # BaseStrategy, LLMPrediction, DipArb, ProjectFW, BtcUpDown,
+│   │                  # DualSideHedge, GabagoolStrategy, DipDetector
+│   │   ├── __tests__/ # DipArb, FW Optimizer, FW Strategy, BtcUpDown, DualSideHedge, Gabagool tests
 │   │   ├── btcupdown/ # signalEngine, BacktestRunner, HistoricalEnrichment
 │   │   └── projectfw/ # FrankWolfeOptimizer, ArbitrageScanner, crossmarket/
 │   ├── trading/       # TradingService, RiskManager, PLM, ActivityLogger, GtcOrderManager,
 │   │   │              # KellySizer, GasOracle, OrderBookDepth, TradeLogger, EdgeTracker,
-│   │   │              # CalibrationTracker, MicrostructureAnalyzer, ReadinessChecker,
-│   │   │              # RejectionTracker, MarketScanner
-│   │   └── __tests__/ # RiskManager, PLM, KellySizer, EdgeTracker tests
+│   │   │              # CalibrationTracker, ReadinessChecker, RejectionTracker,
+│   │   │              # MarketScanner, DynamicFeeService, MergeService,
+│   │   │              # AvellanedaStoikovPricer, BtcCalibrationService, VPINService
+│   │   ├── oms/       # OrderStateMachine (77-state FSM), OrderRegistry (lifecycle tracking)
+│   │   └── __tests__/ # RiskManager, PLM, KellySizer, EdgeTracker, DynamicFeeService,
+│   │                  # AvellanedaStoikov, KellyMonteCarlo, MergeService, VPINService tests
 │   └── wallet/        # WalletService (Ethers.js wrapper)
-├── stores/            # settingsStore (v29), walletStore, notificationStore, balanceHistoryStore, backtestStore
+├── stores/            # settingsStore (v49), walletStore, notificationStore, balanceHistoryStore, backtestStore
 ├── types/             # api.ts, wallet.ts, index.ts
 ├── utils/             # secureStorage, cn (tailwind-merge)
 └── views/             # TradingTerminal, DashboardView, PortfolioView, ActivityView, SettingsView, NotFoundView
@@ -100,7 +101,16 @@ src/
 ### Market Data
 - **Gamma mid-prices always sum to exactly 1.00**: Display prices, NOT tradeable. Coherence filtering on Gamma prices is useless.
 - **CLOB ask sums typically 1.005–1.02**: Market maker spread. Real buy-all-merge arb only works when ask sum temporarily dips below $1.00 (rare on liquid markets).
-- **Taker fee ~1%** (100 bps). With 2 legs on binary: ~2% total fee, so need >2% incoherence to profit.
+- **Dynamic taker fees** (Feb 2026): Formula `fee = 2500 × (p × (1-p))²`, max ~156 bps at 50% price, near zero at extremes. 15-min crypto markets = 1000 bps (10%). Makers pay 0% + earn rebates.
+- With 2 legs on binary: ~2-3% total taker fee, so need >3% incoherence to profit as taker.
+
+### Maker vs Taker Fee Meta (Feb 2026)
+- **Makers pay 0%** + earn daily USDC rebates. **Takers pay dynamic fees** up to 1.56%.
+- **GTD/GTC limit orders** fill as maker (0% fees). **FOK market orders** are always taker.
+- **Strategy order modes**: LLM Prediction = GTD (10 min), BTC Up/Down = GTC if makerMode, Dual-Side = GTC+postOnly, Gabagool = GTC+postOnly, DipArb = GTD (2 min). ProjectFW remains FOK taker.
+- **settingsStore fields**: `llmOrderMode`, `microOrderMode` control GTD vs FOK per strategy.
+- **PLM default taker fee**: `DEFAULT_TAKER_FEE_PERCENT = 0.01` (100 bps). Strategies should set `takerFeeBps` on positions; if omitted, this default applies.
+- **DynamicFeeService**: `computeTakerFeeBps(price)` implements the quadratic formula. Used by BtcUpDown and DualSide for EV viability gates.
 
 ### FW Optimizer
 - Large `epsilonD` (e.g., 0.1) causes early convergence before finding profit for small incoherence. Needs >20% price gap for loose convergence.
@@ -114,11 +124,6 @@ src/
 - **`negRisk` is per-token**: Must query `/neg-risk?token_id=X`. Wrong value = wrong EIP-712 domain = "invalid signature".
 - **`VITE_SIGNATURE_TYPE` env var**: Override auto-detection with explicit 0/1/2.
 
-### Mean Reversion / CoinbaseClient
-- CoinbaseClient uses HMAC-SHA256 via Web Crypto API. Proxy `/api/coinbase` → `api.coinbase.com`.
-- `computeSignal()` takes separate `prices` array and `currentPrice` — currentPrice is NOT included in stats.
-- Test buffer gotcha: outlier in buffer shifts mean/stdDev. Use extreme outliers (e.g., 60 vs 100-baseline) to exceed Z=-2.0 threshold.
-- In-memory position tracking (not PLM). Product IDs: BTC-USD, ETH-USD, SOL-USD (native USD, not USDT).
 
 ### Environment
 - Project lives on external drive: `/Volumes/SAMSUNG 1TB/alphapolybot` — paths have spaces, always quote.
@@ -129,7 +134,7 @@ src/
 
 - **Framework**: Vitest + jsdom + @testing-library/react
 - **Config**: `vitest.config.ts` (globals enabled, jsdom environment)
-- **511 tests** across 21 files: RiskManager (32), PLM (25), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (17), settingsStore (18), BtcUpDown (34), MeanReversion (53), EdgeTracker (24), CopyTrading (21), ArbitrageProfitFormula (30), signalEngine (51), BacktestRunner (12), PolyBacktestClient (15), MCP tools (12), MCP rounding (11), MCP auth (8)
+- **798 tests** across 31 files: RiskManager (32), PLM (25), DipArb (21), FW Optimizer (31), FW Strategy (17), KellySizer (33), CrossMarket (23), OpenRouterService (21), secureStorage (19), settingsStore (18), BtcUpDown (38), EdgeTracker (24), ArbitrageProfitFormula (30), signalEngine (54), signalFusion (12), BacktestRunner (12), PolyBacktestClient (15), DualSideHedge (27), DynamicFeeService (27), ChainlinkFeedService (20), OrderStateMachine (77), OrderRegistry (51), MergeService (13), Gabagool (28), AvellanedaStoikov (34), KellyMonteCarlo (17), VPINService (25), MCP tools (12), MCP PMUS tools (23), MCP rounding (11), MCP auth (8)
 - Test files live in `__tests__/` directories next to the code they test
 
 ## Environment Setup
@@ -171,7 +176,15 @@ Storage failures are non-critical and never block bot execution.
 
 ## MCP Server
 
-`mcp-server/` contains a standalone Model Context Protocol server for AI-assisted trading operations. Separate `package.json`, own test suite (31 tests across 3 files: tools, rounding, auth). Built with TypeScript, tested with Vitest.
+`mcp-server/` contains a standalone Model Context Protocol server for AI-assisted trading operations. Separate `package.json`, own test suite (54 tests across 4 files: tools, PMUS tools, rounding, auth). Built with TypeScript, tested with Vitest.
+
+## Claude Code Automations
+
+- **Agents** (5): trading-bot-architect, trade-flow-reviewer, security-reviewer, market-researcher, fee-impact-reviewer
+- **Skills** (9): ci, deploy, run-checks, new-strategy, polymarket-api, trade-safety, scan-status, fee-calculator, strategy-health
+- **Commands** (6): trade, strategy, risk, portfolio, scan, analyze
+- **Hooks**: .env/lockfile block, ESLint-on-edit, smart test matching (source→`__tests__/`), build-on-type-change, settingsStore version guard, circular dep prevention, strategy edit fee reminder
+- **MCP Server**: Custom Polymarket server (`mcp-server/`, 54 tests)
 
 ## Deployment
 

@@ -99,10 +99,14 @@ function roundDown(n: number, decimals: number): number {
   return Math.floor((n + Number.EPSILON) * 10 ** decimals) / 10 ** decimals
 }
 
-/** Round up to `decimals` places (official SDK: roundUp) */
-function roundUp(n: number, decimals: number): number {
+/** Round up to `decimals` places (official SDK: roundUp). Used for BUY maker amounts. */
+function _roundUp(n: number, decimals: number): number {
   if (decimalPlaces(n) <= decimals) return n
-  return Math.ceil(n * 10 ** decimals) / 10 ** decimals
+  // Subtract EPSILON before ceiling to prevent IEEE-754 drift from false rounding up.
+  // e.g. 5.11 * 0.43 = 2.1973 exactly, but JS gives 2.1973000000000003
+  // Without correction: ceil(21973.000000000003) = 21974 → 2.1974 (WRONG)
+  // With correction:    ceil(21972.999...998)    = 21973 → 2.1973 (correct)
+  return Math.ceil((n - Number.EPSILON) * 10 ** decimals) / 10 ** decimals
 }
 
 /**
@@ -135,6 +139,9 @@ export class CLOBClient extends BaseApiClient {
   private negRiskCache = new Map<string, boolean>()
   /** Cache: tokenId → fee rate in basis points (e.g. 0 or 1000) */
   private feeRateCache = new Map<string, number>()
+  /** Short-lived balance cache to avoid redundant /balance-allowance calls */
+  private _balanceCache: { result: { balance: number; allowance: number | null }; ts: number } | null = null
+  private static readonly BALANCE_CACHE_TTL_MS = 5_000
 
   /**
    * Rounding config per tick size — matches the official Polymarket clob-client exactly.
@@ -212,6 +219,11 @@ export class CLOBClient extends BaseApiClient {
   /** Check if we have valid API credentials */
   hasCredentials(): boolean {
     return this.creds !== null
+  }
+
+  /** Compute proxy address for a signer (instance convenience method) */
+  computeProxyAddress(signerAddress: string): string {
+    return CLOBClient.computePolyProxyAddress(signerAddress)
   }
 
   // ─── L1 Auth: EIP-712 ClobAuth Signing ───────────────────────
@@ -493,8 +505,9 @@ export class CLOBClient extends BaseApiClient {
       this.feeRateCache.set(tokenId, feeRate)
       return feeRate
     } catch (error) {
-      console.warn(`[CLOBClient] Failed to fetch fee rate for ${tokenId.slice(0, 12)}…:`, error instanceof Error ? error.message : error)
-      return 0 // Default to 0 (no fee) if API fails
+      const msg = error instanceof Error ? error.message : String(error)
+      console.error(`[CLOBClient] Failed to fetch fee rate for ${tokenId.slice(0, 12)}…:`, msg)
+      throw new Error(`Fee rate lookup failed for ${tokenId.slice(0, 12)}…: ${msg}`)
     }
   }
 
@@ -590,19 +603,15 @@ export class CLOBClient extends BaseApiClient {
       const signatureType = this.getSignatureType()
 
       // ─── Fetch tick size, negRisk, and fee rate from CLOB API ─────────
-      // The official SDK queries these per-token to determine rounding precision,
-      // the correct EIP-712 domain, and the fee rate for fee-enabled markets.
-      const tickSize = await this.getTickSize(request.tokenId)
+      // These 3 per-token queries are independent — run in parallel to shave ~100-200ms
+      // on cold tokens (cached tokens resolve instantly via Map lookup).
+      const [tickSize, clobNegRisk, feeRateBps] = await Promise.all([
+        this.getTickSize(request.tokenId),
+        this.getNegRisk(request.tokenId),
+        this.getFeeRateBps(request.tokenId),
+      ])
       const roundConfig = CLOBClient.ROUNDING_CONFIG[tickSize] || CLOBClient.ROUNDING_CONFIG['0.01']
-
-      // Verify negRisk via CLOB API — overrides caller-provided value if API responds
-      const clobNegRisk = await this.getNegRisk(request.tokenId)
       const negRisk = clobNegRisk ?? request.negRisk ?? false
-
-      // Fee rate: fee-enabled markets (e.g. 15-min crypto) require the correct feeRateBps
-      // in both the EIP-712 signed data AND the request body. Sending 0 on a fee-enabled
-      // market returns "invalid fee rate (0), current market's taker fee: 1000".
-      const feeRateBps = await this.getFeeRateBps(request.tokenId)
 
       // Snap price to tick grid (using official SDK's roundNormal with EPSILON correction)
       // and clamp to CLOB valid range [tickSize, 1-tickSize]
@@ -630,10 +639,15 @@ export class CLOBClient extends BaseApiClient {
       const isFok = orderType === 'FOK'
       let rawMakerAmt: number
       let rawTakerAmt: number
+      // CRITICAL: All multiplication-derived amounts must use roundNormal (nearest-round),
+      // NOT roundDown/roundUp. JavaScript float math: 5 * 0.94 = 4.699999999999999 (not 4.7).
+      // roundDown(4.699999..., 4) = 4.6999 → CLOB rejects "invalid amounts".
+      // roundNormal(4.699999..., 4) = 4.7 ✓ — matches CLOB's own server-side calculation.
+      // The official Polymarket SDK uses roundNormal for multiplication-derived fields.
       if (request.side === 'BUY') {
         if (isFok) {
           // FOK BUY: maker must be ≤ size dp (2). Anchor maker, derive taker.
-          rawMakerAmt = roundDown(rawSize * tickPrice, roundConfig.size)
+          rawMakerAmt = roundNormal(rawSize * tickPrice, roundConfig.size)
           rawTakerAmt = rawMakerAmt / tickPrice
           if (decimalPlaces(rawTakerAmt) > roundConfig.amount) {
             rawTakerAmt = roundDown(rawTakerAmt, roundConfig.amount)
@@ -642,7 +656,7 @@ export class CLOBClient extends BaseApiClient {
           // rawSize itself can be <5 (e.g., $4.15 / $0.83 = 4.988) or rounding can push below.
           if (rawTakerAmt > 0 && rawTakerAmt < 5) {
             rawTakerAmt = 5
-            rawMakerAmt = roundDown(5 * tickPrice, roundConfig.size)
+            rawMakerAmt = roundNormal(5 * tickPrice, roundConfig.size)
           }
         } else {
           // GTC/GTD BUY: official SDK approach — anchor taker (shares), derive maker.
@@ -653,7 +667,7 @@ export class CLOBClient extends BaseApiClient {
           }
           rawMakerAmt = rawTakerAmt * tickPrice
           if (decimalPlaces(rawMakerAmt) > roundConfig.amount) {
-            rawMakerAmt = roundDown(rawMakerAmt, roundConfig.amount)
+            rawMakerAmt = roundNormal(rawMakerAmt, roundConfig.amount)
           }
         }
       } else {
@@ -661,7 +675,7 @@ export class CLOBClient extends BaseApiClient {
         rawMakerAmt = roundDown(rawSize, roundConfig.size)
         rawTakerAmt = rawMakerAmt * tickPrice
         if (decimalPlaces(rawTakerAmt) > roundConfig.amount) {
-          rawTakerAmt = roundDown(rawTakerAmt, roundConfig.amount)
+          rawTakerAmt = roundNormal(rawTakerAmt, roundConfig.amount)
         }
       }
 
@@ -951,6 +965,11 @@ export class CLOBClient extends BaseApiClient {
     const sigType = signatureType ?? this.getSignatureType()
     if (!this.creds || !this.wallet) return null
 
+    // Return cached result if fresh (avoids redundant API calls during rapid polling)
+    if (this._balanceCache && (Date.now() - this._balanceCache.ts) < CLOBClient.BALANCE_CACHE_TTL_MS) {
+      return this._balanceCache.result
+    }
+
     try {
       const response = await this.authGet<Record<string, string>>('/balance-allowance', {
         asset_type: 'COLLATERAL',
@@ -964,11 +983,14 @@ export class CLOBClient extends BaseApiClient {
       const rawAllowance = response.allowance
       const allowance = rawAllowance != null ? parseFloat(rawAllowance) / 1e6 : null
 
+      const result = { balance, allowance }
+      this._balanceCache = { result, ts: Date.now() }
+
       console.log(`[CLOBClient] CLOB balance/allowance (sigType=${sigType}): ` +
         `balance=$${balance.toFixed(4)}, allowance=${allowance != null ? `$${allowance.toFixed(4)}` : 'N/A'} ` +
         `(raw: ${response.balance} / ${response.allowance})`)
 
-      return { balance, allowance }
+      return result
     } catch (error) {
       // Non-critical — log but don't block trading
       console.warn('[CLOBClient] Failed to check CLOB balance:', error instanceof Error ? error.message : error)
@@ -985,6 +1007,9 @@ export class CLOBClient extends BaseApiClient {
   async updateBalanceAllowance(signatureType?: number): Promise<{ balance: number; allowance: number | null } | null> {
     const sigType = signatureType ?? this.getSignatureType()
     if (!this.creds || !this.wallet) return null
+
+    // Invalidate local cache so the subsequent read is fresh
+    this._balanceCache = null
 
     try {
       // Fire the cache refresh (returns void / empty body per official client)

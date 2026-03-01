@@ -28,9 +28,9 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
   maxConcurrentArbs: 2,
   scanIntervalMs: 30000, // 30s (was 15s) — gives time for 75 order book checks
   cooldownMs: 60000,
-  // Fee model — Polymarket charges ~1% taker fee on market orders.
-  // Limit orders pay 0% maker fee, but we assume worst-case taker fills.
-  takerFeeBps: 100,
+  // Fee model — maker mode (GTD limit orders) pays 0% fees.
+  // Only falls back to taker on revalidation failure or partial unwind.
+  takerFeeBps: 0,
   gasEstimateUSD: 0.01,
   // Market filters — set low for small bankrolls. The optimizer + profitability
   // check are the real gates; these just filter out completely dead markets.
@@ -68,7 +68,7 @@ const DEFAULT_CONFIG: ProjectFWConfig = {
  * 4. Strategy executes multi-leg buy (all outcomes)
  * 5. Positions held until resolution ($1/set) — tracked by PLM
  *
- * PM US architecture: No on-chain merge/split. Profit is realized at resolution.
+ * CLOB architecture: No on-chain merge/split. Profit is realized at resolution.
  * Overpriced path (bidSum > 1.0) is not available — requires on-chain bundle split.
  */
 export class ProjectFWStrategy extends BaseStrategy {
@@ -238,7 +238,7 @@ export class ProjectFWStrategy extends BaseStrategy {
    * UNDERPRICED (askSum < 1.0): Buy all outcomes via placeBet. Positions resolve
    * at $1/set — profit = (1 - askSum) * tradeSize - fees. Tracked by PLM.
    *
-   * OVERPRICED (bidSum > 1.0): Not available on PM US (requires on-chain bundle
+   * OVERPRICED (bidSum > 1.0): Not available on CLOB (requires on-chain bundle
    * splitting). Scanner still detects these for logging, but execution is skipped.
    */
   private async executeArb(opp: ArbOpportunity): Promise<void> {
@@ -258,7 +258,7 @@ export class ProjectFWStrategy extends BaseStrategy {
     const priceSumDisplay = (priceSum * 100).toFixed(1)
     const profitDisplay = (opp.netProfitUSD * 100).toFixed(2)
 
-    const arbPath = opp.arbType === 'overpriced' ? 'OVERPRICED (not executable on PM US)' : 'UNDERPRICED (buy all → hold to resolution)'
+    const arbPath = opp.arbType === 'overpriced' ? 'OVERPRICED (not executable on CLOB)' : 'UNDERPRICED (buy all → hold to resolution)'
     this.log(`ARB OPPORTUNITY [${arbPath}]: ${opp.market.question.substring(0, 40)}...`)
     this.log(`  Price sum: ${priceSumDisplay}¢ | Net profit: ${profitDisplay}¢ | KL: ${opp.result.klDivergence.toFixed(4)}`)
 
@@ -299,12 +299,12 @@ export class ProjectFWStrategy extends BaseStrategy {
       }
     }
 
-    // ── OVERPRICED PATH: Not available on PM US ──
+    // ── OVERPRICED PATH: Not available on CLOB ──
     // Requires on-chain splitPosition (buy bundle at $1, sell outcomes at bid).
-    // PM US uses centralized clearing with no on-chain operations.
+    // CLOB uses centralized clearing with no on-chain operations.
     if (opp.arbType === 'overpriced') {
-      this.log(`OVERPRICED ARB: Skipped — requires on-chain bundle split (not available on PM US)`)
-      activityLogger.logInfo('FW overpriced arb detected but not executable on PM US', {
+      this.log(`OVERPRICED ARB: Skipped — requires on-chain bundle split (not available on CLOB)`)
+      activityLogger.logInfo('FW overpriced arb detected but not executable on CLOB', {
         market: opp.market.question.substring(0, 50),
         bidSum: priceSum,
         netProfit: opp.netProfitUSD,
@@ -398,7 +398,13 @@ export class ProjectFWStrategy extends BaseStrategy {
           opp.market,
           outcome,
           amount,
-          { skipGtcFallback: true, outcomeIndex: leg.outcomeIndex }
+          {
+            orderType: 'GTD',
+            skipGtcFallback: true,
+            outcomeIndex: leg.outcomeIndex,
+            postOnly: true,       // ensure maker status (0% fee)
+            strategy: 'fw',
+          }
         )
 
         const arbLeg: FWArbLeg = {
@@ -487,7 +493,7 @@ export class ProjectFWStrategy extends BaseStrategy {
 
   /**
    * Unwind executed legs when a later leg fails.
-   * Sells back each executed leg via PM US API, or falls back to PLM tracking.
+   * Sells back each executed leg via CLOB API, or falls back to PLM tracking.
    */
   private async unwindLegs(round: FWArbRound, opp: ArbOpportunity): Promise<void> {
     this.log('Unwinding executed legs...')
@@ -525,6 +531,7 @@ export class ProjectFWStrategy extends BaseStrategy {
    */
   private trackFallbackPosition(leg: FWArbLeg, opp: ArbOpportunity): void {
     import('@/services/trading/PositionLifecycleManager').then((m) => {
+      const outcomeIdx = leg.outcome.toLowerCase() === 'yes' ? 0 : 1
       m.positionLifecycleManager.trackPosition({
         marketSlug: opp.market.slug,
         outcome: leg.outcome.toLowerCase() === 'yes' ? 'yes' : 'no',
@@ -536,6 +543,7 @@ export class ProjectFWStrategy extends BaseStrategy {
         stopLossPercent: this.fwConfig.stopLossPercent,
         takeProfitPercent: this.fwConfig.takeProfitPercent,
         strategy: 'fw',
+        tokenId: opp.market.clobTokenIds?.[outcomeIdx],
       })
     }).catch(err => console.warn('[ProjectFW] Failed to track fallback position:', err))
   }

@@ -10,26 +10,24 @@ interface StrategyDropdownProps {
 const SHORT_NAMES: Record<string, string> = {
   'llm-prediction': 'LLM',
   'btc-updown': 'BTC Up/Down',
-  'micro-momentum': 'Micro Mom',
   'project-fw': 'FW Arb',
   'dip-arb': 'Dip Arb',
-  'mean-reversion': 'Mean Rev',
-  'copy-trading': 'Copy Trade',
+  'dual-side': 'Dual-Side',
+  'gabagool': 'Gabagool',
 }
 
 /** Subtitle descriptions for each strategy */
 const SUBTITLES: Record<string, string> = {
   'llm-prediction': 'AI analysis',
-  'btc-updown': '15m & 9PM crypto',
-  'micro-momentum': 'Order flow',
+  'btc-updown': '15m crypto',
   'project-fw': 'Spread arb (rare)',
   'dip-arb': 'Dip arb (rare)',
-  'mean-reversion': 'Spot crypto (Coinbase)',
-  'copy-trading': 'Mirror top trader',
+  'dual-side': 'Maker hedge',
+  'gabagool': 'Merge arb',
 }
 
 /** Display order — most likely to trade first */
-const STRATEGY_ORDER = ['llm-prediction', 'btc-updown', 'copy-trading', 'mean-reversion', 'micro-momentum', 'project-fw', 'dip-arb']
+const STRATEGY_ORDER = ['llm-prediction', 'btc-updown', 'dual-side', 'gabagool', 'project-fw', 'dip-arb']
 
 const STATUS_DOT: Record<string, string> = {
   running: 'bg-agent-green',

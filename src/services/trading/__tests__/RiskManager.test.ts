@@ -343,14 +343,14 @@ describe('RiskManager', () => {
   // Penny Trader Mode
   // ────────────────────────────────────────────
 
-  it('scales daily loss limit in penny mode (trips at $0.80 not $4)', () => {
+  it('scales daily loss limit in penny mode (trips at $2.40 not $4)', () => {
     mockSettingsState.pennyTraderMode = true
-    // Record $1 loss — exceeds penny limit ($4 * 0.2 = $0.80)
-    rm.recordTradeResult(true, -1)
+    // Record $3 loss — exceeds penny limit ($4 * 0.6 = $2.40)
+    rm.recordTradeResult(true, -3)
     const result = rm.validateTrade(1)
     expect(result.allowed).toBe(false)
     expect(result.riskCode).toBe('DAILY_LOSS_EXCEEDED')
-    expect(result.reason).toContain('$0.8')
+    expect(result.reason).toContain('$2.4')
   })
 
   it('does NOT scale daily loss limit when penny mode is off', () => {
@@ -363,20 +363,17 @@ describe('RiskManager', () => {
 
   it('scales weekly loss limit in penny mode', () => {
     mockSettingsState.pennyTraderMode = true
-    // Record $11 weekly loss — exceeds penny limit ($20 * 0.2 = $4)
-    rm.recordTradeResult(true, -11)
+    // Record $13 weekly loss — exceeds penny limit ($20 * 0.6 = $12)
+    rm.recordTradeResult(true, -13)
     const result = rm.validateTrade(1)
-    // Daily limit trips first at $0.80, but let's test weekly specifically
-    // Need loss between $0.80 and $4 to only trip weekly... actually daily trips first.
-    // So reset and test weekly independently:
     expect(result.allowed).toBe(false)
   })
 
   it('getStatus() returns scaled limits in penny mode', () => {
     mockSettingsState.pennyTraderMode = true
     const status = rm.getStatus()
-    expect(status.config.dailyLossLimit).toBeCloseTo(0.8) // 4 * 0.2
-    expect(status.config.weeklyLossLimit).toBe(4) // 20 * 0.2
+    expect(status.config.dailyLossLimit).toBeCloseTo(2.4) // 4 * 0.6
+    expect(status.config.weeklyLossLimit).toBe(12) // 20 * 0.6
   })
 
   it('getStatus() returns original limits when penny mode is off', () => {

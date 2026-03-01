@@ -9,7 +9,7 @@ export interface AssetPrice {
   symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'
   priceUSD: number
   timestamp: number
-  source: 'binance' | 'coingecko' | 'rtds'
+  source: 'binance' | 'coingecko' | 'rtds' | 'chainlink'
 }
 
 const CACHE_TTL_MS = 5_000
@@ -32,6 +32,22 @@ export class PriceOracleService {
   private cache = new Map<string, AssetPrice>()
 
   async getPrice(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
+    // 0. Chainlink on-chain feed (resolution-source, highest priority)
+    try {
+      const { chainlinkFeedService } = await import('@/services/trading/ChainlinkFeedService')
+      const clPrice = chainlinkFeedService.getCachedPrice(symbol)
+      if (clPrice && Date.now() - clPrice.updatedAt * 1000 < CACHE_TTL_MS) {
+        return {
+          symbol: symbol,
+          priceUSD: clPrice.priceUSD,
+          timestamp: clPrice.updatedAt * 1000,
+          source: 'chainlink',
+        }
+      }
+    } catch {
+      // Chainlink not initialized — fall through
+    }
+
     // 1. Try RTDS cached price (streaming, <5s old = fresh)
     try {
       const { rtdsService } = await import('@/services/realtime/RTDSService')
@@ -78,7 +94,7 @@ export class PriceOracleService {
   private async fetchBinance(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
     const pair = BINANCE_PAIRS[symbol]
     const binanceBase = import.meta.env.VITE_BINANCE_API_URL
-      || (import.meta.env.DEV ? '/api/binance/api/v3' : 'https://api.binance.us/api/v3')
+      || (import.meta.env.DEV ? '/api/binance/api/v3' : 'https://api.binance.com/api/v3')
     const res = await fetch(
       `${binanceBase}/ticker/price?symbol=${pair}`,
       { signal: AbortSignal.timeout(5000) },

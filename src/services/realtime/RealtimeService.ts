@@ -1,108 +1,94 @@
 /**
- * RealtimeService — Polymarket US Market WebSocket
+ * RealtimeService — CLOB Market WebSocket
  *
- * Uses the official SDK's MarketsWebSocket for real-time BBO/trade data.
- * Subscribes via MARKET_DATA_LITE for lightweight best-bid/ask streaming.
+ * Native WebSocket to wss://ws-subscriptions-clob.polymarket.com/ws/market
+ * for real-time BBO/trade data. No SDK dependency.
  *
- * Public interface preserved from CLOB version:
+ * Protocol (two-phase):
+ *   - Handshake (REQUIRED on every connect): { assets_ids: [], type: 'market' }
+ *     Registers the connection as a market data consumer. Server drops connections
+ *     that skip this handshake. Can include asset IDs to subscribe immediately.
+ *   - Dynamic subscription: { assets_ids, operation: 'subscribe' }
+ *   - Messages use event_type field, price_changes array, string prices
+ *   - 30s ping keepalive
+ *
+ * Public interface:
  *   connect(), disconnect(), subscribeMarket(), getPrice(),
  *   getAllPrices(), onPriceUpdate(), onConnectionChange(), isConnected()
- *
- * Key difference: subscriptions use market slugs, not token IDs.
  */
 
-import {
-  MarketsWebSocket,
-  type MarketDataLite,
-  type MarketData,
-  type WebSocketOptions,
-} from 'polymarket-us'
 import type { PriceData } from '@/types'
-import { polymarketUSClient } from '@/services/api'
 
-type PriceUpdateCallback = (slug: string, price: PriceData) => void
+const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market'
+const PING_INTERVAL_MS = 30_000
+
+type PriceUpdateCallback = (id: string, price: PriceData) => void
 type ConnectionCallback = (status: 'connected' | 'disconnected' | 'error') => void
 
 export class RealtimeService {
-  private ws: MarketsWebSocket | null = null
+  private ws: WebSocket | null = null
   private reconnectAttempts = 0
   private maxReconnectAttempts = 10
   private reconnectDelay = 1000
   private reconnectTimeout: number | null = null
+  private pingInterval: number | null = null
   private cleanupInterval: number | null = null
-  private subscriptions = new Set<string>()
-  private prices = new Map<string, PriceData>()
+  private subscriptions = new Set<string>()     // token IDs
+  private prices = new Map<string, PriceData>()  // keyed by token ID
   private lastMessageTime = 0
   private messageCount = 0
-  private requestIdCounter = 0
+  private initialSubscribed = false
 
   private priceCallbacks = new Set<PriceUpdateCallback>()
   private connectionCallbacks = new Set<ConnectionCallback>()
 
+  // Batching: collect new token IDs and send in one WS message per microtask
+  private pendingDynamicIds: string[] = []
+  private dynamicBatchScheduled = false
+
   /**
-   * Connect to Polymarket US Markets WebSocket.
+   * Connect to CLOB Market WebSocket.
    * Idempotent — safe to call from multiple strategies.
    */
   async connect(): Promise<boolean> {
-    if (this.ws?.isConnected) return true
-
-    const wsOpts = polymarketUSClient.getWebSocketOptions()
-    if (!wsOpts) {
-      console.warn('[RealtimeService] Cannot connect — no credentials configured')
-      return false
-    }
+    if (this.ws?.readyState === WebSocket.OPEN) return true
 
     return new Promise((resolve) => {
       try {
-        this.ws = new MarketsWebSocket({
-          keyId: wsOpts.keyId,
-          secretKey: wsOpts.secretKey,
-          baseUrl: wsOpts.baseUrl,
-        })
+        this.ws = new WebSocket(WS_URL)
+        this.initialSubscribed = false
 
-        this.ws.on('open', () => {
+        this.ws.onopen = () => {
           console.log('[RealtimeService] WebSocket connected')
           this.reconnectAttempts = 0
           this.messageCount = 0
+          this.startPingInterval()
           this.startCleanupInterval()
           this.notifyConnectionCallbacks('connected')
 
-          // Re-subscribe existing markets
-          if (this.subscriptions.size > 0) {
-            const slugs = Array.from(this.subscriptions)
-            const reqId = this.nextRequestId()
-            this.ws!.subscribeMarketDataLite(reqId, slugs)
-            console.log(`[RealtimeService] Subscribed to ${slugs.length} markets`)
-          }
-
+          // Phase 1: Always send handshake (registers connection as "market" type)
+          // The CLOB WS requires this even with an empty assets list
+          this.sendInitialSubscription(Array.from(this.subscriptions))
+          this.initialSubscribed = true
           resolve(true)
-        })
+        }
 
-        this.ws.on('marketDataLite', (data: MarketDataLite) => {
-          this.handleMarketDataLite(data)
-        })
+        this.ws.onmessage = (event) => {
+          this.handleMessage(event.data)
+        }
 
-        this.ws.on('marketData', (data: MarketData) => {
-          this.handleMarketData(data)
-        })
-
-        this.ws.on('heartbeat', () => {
-          this.lastMessageTime = Date.now()
-        })
-
-        this.ws.on('error', (err) => {
+        this.ws.onerror = (err) => {
           console.error('[RealtimeService] WebSocket error:', err)
           this.notifyConnectionCallbacks('error')
           resolve(false)
-        })
+        }
 
-        this.ws.on('close', () => {
+        this.ws.onclose = () => {
           console.log('[RealtimeService] WebSocket disconnected')
+          this.stopPingInterval()
           this.notifyConnectionCallbacks('disconnected')
           this.attemptReconnect()
-        })
-
-        this.ws.connect()
+        }
       } catch (error) {
         console.error('[RealtimeService] Failed to connect:', error)
         resolve(false)
@@ -115,46 +101,54 @@ export class RealtimeService {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
     }
+    this.stopPingInterval()
     this.stopCleanupInterval()
     if (this.ws) {
+      this.ws.onclose = null  // prevent reconnect
       this.ws.close()
       this.ws = null
     }
     this.subscriptions.clear()
     this.prices.clear()
+    this.initialSubscribed = false
   }
 
   /**
-   * Subscribe to price updates for market slugs.
+   * Subscribe to price updates for token IDs.
+   * Accepts token IDs (CLOB native identifiers).
    */
-  subscribeMarket(slugs: string | string[]): void {
-    const ids = Array.isArray(slugs) ? slugs : [slugs]
-    const newSlugs: string[] = []
+  subscribeMarket(tokenIds: string | string[]): void {
+    const ids = Array.isArray(tokenIds) ? tokenIds : [tokenIds]
+    const newIds: string[] = []
 
-    for (const slug of ids) {
-      if (!this.subscriptions.has(slug)) {
-        this.subscriptions.add(slug)
-        newSlugs.push(slug)
+    for (const id of ids) {
+      if (!this.subscriptions.has(id)) {
+        this.subscriptions.add(id)
+        newIds.push(id)
       }
     }
 
-    if (newSlugs.length > 0 && this.ws?.isConnected) {
-      const reqId = this.nextRequestId()
-      this.ws.subscribeMarketDataLite(reqId, newSlugs)
+    if (newIds.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
+      if (this.initialSubscribed) {
+        // Dynamic subscription — batched to coalesce rapid calls (e.g., DipArb scanning 700+ markets)
+        this.scheduleDynamicSubscription(newIds)
+      } else {
+        // Still in initial phase — will be included in initial subscription
+      }
     }
   }
 
-  unsubscribeMarket(slugs: string | string[]): void {
-    const ids = Array.isArray(slugs) ? slugs : [slugs]
-    for (const slug of ids) {
-      this.subscriptions.delete(slug)
-      this.prices.delete(slug)
+  unsubscribeMarket(tokenIds: string | string[]): void {
+    const ids = Array.isArray(tokenIds) ? tokenIds : [tokenIds]
+    for (const id of ids) {
+      this.subscriptions.delete(id)
+      this.prices.delete(id)
     }
-    // SDK doesn't have a per-slug unsubscribe — tracked locally
+    // CLOB WS doesn't have per-asset unsubscribe — tracked locally
   }
 
-  getPrice(slug: string): PriceData | null {
-    return this.prices.get(slug) || null
+  getPrice(id: string): PriceData | null {
+    return this.prices.get(id) || null
   }
 
   getAllPrices(): Map<string, PriceData> {
@@ -172,11 +166,11 @@ export class RealtimeService {
   }
 
   isConnected(): boolean {
-    return this.ws?.isConnected ?? false
+    return this.ws?.readyState === WebSocket.OPEN
   }
 
-  isStale(slug: string, maxAgeMs = 300_000): boolean {
-    const priceData = this.prices.get(slug)
+  isStale(id: string, maxAgeMs = 300_000): boolean {
+    const priceData = this.prices.get(id)
     if (!priceData) return true
     return Date.now() - priceData.timestamp.getTime() > maxAgeMs
   }
@@ -185,104 +179,127 @@ export class RealtimeService {
     return this.lastMessageTime
   }
 
-  // ─── Private ────────────────────────────────────────────
+  // ─── Private: Protocol ─────────────────────────────────
 
-  private nextRequestId(): string {
-    return `mkt-${++this.requestIdCounter}-${Date.now()}`
+  /** Phase 1: Initial subscription (sent on connect) */
+  private sendInitialSubscription(assetIds: string[]): void {
+    this.send({
+      assets_ids: assetIds,
+      type: 'market',
+    })
+    console.log(`[RealtimeService] Initial subscription: ${assetIds.length} assets`)
   }
 
-  private handleMarketDataLite(data: MarketDataLite): void {
-    this.lastMessageTime = Date.now()
-    this.messageCount++
+  /** Phase 2: Dynamic subscription — batched via microtask to coalesce rapid calls */
+  private scheduleDynamicSubscription(assetIds: string[]): void {
+    this.pendingDynamicIds.push(...assetIds)
 
+    if (!this.dynamicBatchScheduled) {
+      this.dynamicBatchScheduled = true
+      queueMicrotask(() => {
+        const batch = this.pendingDynamicIds
+        this.pendingDynamicIds = []
+        this.dynamicBatchScheduled = false
+
+        if (batch.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
+          this.send({
+            assets_ids: batch,
+            operation: 'subscribe',
+          })
+          console.log(`[RealtimeService] Dynamic subscription: ${batch.length} assets (batched)`)
+        }
+      })
+    }
+  }
+
+  private send(data: unknown): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(data))
+    }
+  }
+
+  private handleMessage(raw: string): void {
+    this.lastMessageTime = Date.now()
+
+    let data: unknown
+    try {
+      data = JSON.parse(raw)
+    } catch {
+      return
+    }
+
+    // CLOB sends arrays of events
+    const events = Array.isArray(data) ? data : [data]
+
+    for (const event of events) {
+      if (!event || typeof event !== 'object') continue
+      const evt = event as Record<string, unknown>
+
+      if (evt.event_type === 'price_change') {
+        this.handlePriceChange(evt)
+      } else if (evt.event_type === 'last_trade_price') {
+        this.handleLastTradePrice(evt)
+      }
+      // Ignore other event types (book, tick_size, etc.)
+    }
+  }
+
+  private handlePriceChange(evt: Record<string, unknown>): void {
+    this.messageCount++
     if (this.messageCount === 1) {
       console.log('[RealtimeService] First market data received — pipeline active')
     }
 
-    const slug = data.marketDataLite.marketSlug
-    const bid = parseFloat(data.marketDataLite.bestBid?.value || '0')
-    const ask = parseFloat(data.marketDataLite.bestAsk?.value || '0')
-    const last = parseFloat(data.marketDataLite.lastTradePx?.value || '0')
+    const changes = evt.price_changes as Array<Record<string, string>> | undefined
+    if (!changes || !Array.isArray(changes)) return
 
-    if (bid <= 0 && ask <= 0) return
+    for (const change of changes) {
+      const assetId = change.asset_id
+      if (!assetId) continue
 
-    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : (bid || ask)
-    const priceData: PriceData = {
-      bid: bid || last,
-      ask: ask || last,
-      last: last || mid,
-      mid,
-      spread: ask > 0 && bid > 0 ? ask - bid : 0,
-      timestamp: new Date(),
+      const bestBid = parseFloat(change.best_bid || '0')
+      const bestAsk = parseFloat(change.best_ask || '0')
+
+      if (bestBid <= 0 && bestAsk <= 0) continue
+
+      const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : (bestBid || bestAsk)
+      const last = parseFloat(change.price || '0') || mid
+
+      const priceData: PriceData = {
+        bid: bestBid || last,
+        ask: bestAsk || last,
+        last,
+        mid,
+        spread: bestAsk > 0 && bestBid > 0 ? bestAsk - bestBid : 0,
+        timestamp: new Date(),
+      }
+
+      this.prices.set(assetId, priceData)
+      this.notifyPriceCallbacks(assetId, priceData)
     }
-
-    this.prices.set(slug, priceData)
-    this.feedMicrostructureAnalyzer(slug, bid, ask)
-    this.notifyPriceCallbacks(slug, priceData)
   }
 
-  private handleMarketData(data: MarketData): void {
-    this.lastMessageTime = Date.now()
+  private handleLastTradePrice(evt: Record<string, unknown>): void {
     this.messageCount++
+    const assetId = evt.asset_id as string
+    if (!assetId) return
 
-    const md = data.marketData
-    const slug = md.marketSlug
-    const bids = md.bids || []
-    const offers = md.offers || []
+    const price = parseFloat(evt.price as string || '0')
+    if (price <= 0) return
 
-    const bestBid = bids.length > 0 ? parseFloat(bids[0].px.value) : 0
-    const bestAsk = offers.length > 0 ? parseFloat(offers[0].px.value) : 0
-
-    if (bestBid <= 0 && bestAsk <= 0) return
-
-    const last = parseFloat(md.stats?.lastTradePx?.value || '0')
-    const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : (bestBid || bestAsk)
-
-    const priceData: PriceData = {
-      bid: bestBid,
-      ask: bestAsk,
-      last: last || mid,
-      mid,
-      spread: bestAsk > 0 && bestBid > 0 ? bestAsk - bestBid : 0,
-      timestamp: new Date(),
+    const existing = this.prices.get(assetId)
+    if (existing) {
+      existing.last = price
+      existing.timestamp = new Date()
+      this.notifyPriceCallbacks(assetId, existing)
     }
-
-    this.prices.set(slug, priceData)
-    this.feedMicrostructureAnalyzer(slug, bestBid, bestAsk)
-    this.notifyPriceCallbacks(slug, priceData)
   }
 
-  /**
-   * Feed bid/ask data to MicrostructureAnalyzer (best-effort, non-blocking).
-   * Dynamic import cached after first resolution.
-   */
-  private microstructureModule: typeof import('@/services/trading/MicrostructureAnalyzer') | null = null
-  private microstructureImporting = false
-  private feedMicrostructureAnalyzer(slug: string, bid: number, ask: number): void {
-    if (bid <= 0 || ask <= 0 || bid === ask) return
+  // ─── Private: Callbacks ────────────────────────────────
 
-    if (this.microstructureModule) {
-      this.microstructureModule.then(m => {
-        m.microstructureAnalyzer.recordSnapshot(slug, bid, 1, ask, 1)
-      })
-      return
-    }
-
-    if (this.microstructureImporting) return
-    this.microstructureImporting = true
-
-    this.microstructureModule = import('@/services/trading/MicrostructureAnalyzer')
-    this.microstructureModule.then(m => {
-      m.microstructureAnalyzer.recordSnapshot(slug, bid, 1, ask, 1)
-    }).catch(() => {
-      this.microstructureModule = null
-      this.microstructureImporting = false
-    })
-  }
-
-  private notifyPriceCallbacks(slug: string, price: PriceData): void {
+  private notifyPriceCallbacks(id: string, price: PriceData): void {
     for (const callback of this.priceCallbacks) {
-      try { callback(slug, price) } catch (e) { console.error('Price callback error:', e) }
+      try { callback(id, price) } catch (e) { console.error('Price callback error:', e) }
     }
   }
 
@@ -292,9 +309,38 @@ export class RealtimeService {
     }
   }
 
+  // ─── Private: Keepalive & Reconnect ────────────────────
+
+  private startPingInterval(): void {
+    this.stopPingInterval()
+    this.lastMessageTime = Date.now()
+    this.pingInterval = window.setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send('PING')
+
+        // Force-reconnect if no data received in 2x ping interval (stale/dead connection)
+        const silenceDuration = Date.now() - this.lastMessageTime
+        if (this.lastMessageTime > 0 && silenceDuration > PING_INTERVAL_MS * 2) {
+          console.warn(`[RealtimeService] No data for ${Math.round(silenceDuration / 1000)}s — force-reconnecting`)
+          this.ws.close()  // triggers onclose → attemptReconnect
+        }
+      }
+    }, PING_INTERVAL_MS)
+  }
+
+  private stopPingInterval(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval)
+      this.pingInterval = null
+    }
+  }
+
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[RealtimeService] Max reconnect attempts reached')
+      console.error('[RealtimeService] Max reconnect attempts reached — triggering emergency stop')
+      import('@/services/trading/RiskManager').then(({ riskManager }) => {
+        riskManager.emergencyStop('RealtimeService WebSocket died after max reconnect attempts')
+      }).catch(() => {})
       return
     }
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts)
@@ -311,9 +357,9 @@ export class RealtimeService {
     const ONE_HOUR = 60 * 60 * 1000
     this.cleanupInterval = window.setInterval(() => {
       const cutoff = Date.now() - ONE_HOUR
-      for (const [slug, priceData] of this.prices) {
+      for (const [id, priceData] of this.prices) {
         if (priceData.timestamp.getTime() < cutoff) {
-          this.prices.delete(slug)
+          this.prices.delete(id)
         }
       }
     }, 5 * 60 * 1000)

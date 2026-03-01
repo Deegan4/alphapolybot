@@ -11,7 +11,7 @@ export interface AssetCardProps {
   upPriceChange: number        // % change of Up outcome since subscription
   referencePrice: number       // Spot price from market question (e.g., 97432)
   windowEnd: number            // Unix ms when market resolves
-  windowDuration: '5m' | '15m' | '9pm' | null
+  windowDuration: '5m' | '15m' | 'hourly' | 'daily' | null
   marketFound: boolean
   // Binance spot price fallback (shown when Polymarket unavailable)
   spotPrice?: number           // Live Binance/RTDS spot price
@@ -71,7 +71,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
   wins,
   losses,
   pnl,
-  recentTradePnls,
+  recentTradePnls: _recentTradePnls,
 }) => {
   // 1-second tick for countdown
   const [now, setNow] = useState(Date.now())
@@ -141,11 +141,11 @@ export const AssetCard: React.FC<AssetCardProps> = ({
             <div className="flex items-center gap-2 mt-0.5">
               <span
                 className={`text-xs font-mono ${
-                  upPriceChange >= 0 ? 'text-agent-green' : 'text-agent-red'
+                  (upPriceChange ?? 0) >= 0 ? 'text-agent-green' : 'text-agent-red'
                 }`}
               >
-                {upPriceChange >= 0 ? '+' : ''}
-                {upPriceChange.toFixed(1)}%
+                {(upPriceChange ?? 0) >= 0 ? '+' : ''}
+                {(upPriceChange ?? 0).toFixed(1)}%
               </span>
               {(referencePrice > 0 || (spotPrice && spotPrice > 0)) && (
                 <>
@@ -244,7 +244,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
             pnl >= 0 ? 'text-agent-green' : 'text-agent-red'
           }`}
         >
-          {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+          {(pnl ?? 0) >= 0 ? '+' : ''}${(pnl ?? 0).toFixed(2)}
         </span>
       </div>
     </div>

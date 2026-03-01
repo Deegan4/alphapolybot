@@ -311,7 +311,7 @@ export class IndexedDBService {
       return stored
         .reverse()
         .slice(0, limit)
-        .map(({ id, _storedAt, ...round }) => round)
+        .map(({ id: _id, _storedAt, ...round }) => round)
     } catch (error) {
       console.warn('[IndexedDB] Failed to load arb rounds:', error)
       return []

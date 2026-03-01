@@ -5,7 +5,6 @@
  * for LLM prompts. Zero new API calls — reads from in-memory state only.
  *
  * Used by OpenRouterService to enrich analysis prompts with:
- * - Order book microstructure signals
  * - Market quality scores
  * - Historical calibration accuracy per category
  * - Strategy win rate from EdgeTracker
@@ -13,7 +12,6 @@
  */
 
 import type { Market } from '@/types'
-import { microstructureAnalyzer, type MicrostructureSignal } from '@/services/trading/MicrostructureAnalyzer'
 import { marketScanner } from '@/services/trading/MarketScanner'
 import { calibrationTracker } from '@/services/trading/CalibrationTracker'
 import { edgeTracker } from '@/services/trading/EdgeTracker'
@@ -27,12 +25,6 @@ export interface MarketContext {
 
   // Quality (from MarketScanner)
   qualityScore: number | null
-
-  // Microstructure (from MicrostructureAnalyzer)
-  microSignal: number | null        // compositeSignal, -1 to +1
-  microConfidence: number | null    // signalConfidence, 0-1
-  bidAskImbalance: number | null    // raw imbalance [-1, 1]
-  spreadWidening: boolean | null
 
   // Calibration (from CalibrationTracker)
   categoryAccuracy: number | null
@@ -79,13 +71,6 @@ export function gatherMarketContext(
   const scanResult = scanResults.find(r => r.market.id === market.id)
   const qualityScore = scanResult?.score ?? null
 
-  // Microstructure signals
-  const signal: MicrostructureSignal | null = microstructureAnalyzer.getSignal(tokenId)
-  const microSignal = signal?.compositeSignal ?? null
-  const microConfidence = signal?.signalConfidence ?? null
-  const bidAskImbalance = signal?.imbalance ?? null
-  const spreadWidening = signal?.spreadWidening ?? null
-
   // Category accuracy from CalibrationTracker
   const catAccuracy = category
     ? calibrationTracker.getCategoryAccuracy(category)
@@ -106,10 +91,6 @@ export function gatherMarketContext(
     ageHours,
     endDate,
     qualityScore,
-    microSignal,
-    microConfidence,
-    bidAskImbalance,
-    spreadWidening,
     categoryAccuracy,
     categorySampleSize,
     strategyWinRate,
@@ -177,17 +158,7 @@ export function formatContextForPrompt(ctx: MarketContext): string {
   }
   if (parts.length > 0) lines.push(`- ${parts.join(' | ')}`)
 
-  // Line 2: Order book bias (continuous value, not binary)
-  if (ctx.microSignal !== null && ctx.microConfidence !== null && ctx.microConfidence >= 0.3) {
-    const bias = ctx.microSignal > 0.1 ? 'buy pressure'
-      : ctx.microSignal < -0.1 ? 'sell pressure'
-      : 'neutral'
-    const strength = Math.abs(ctx.microSignal) > 0.3 ? 'strong' : 'slight'
-    const spreadNote = ctx.spreadWidening ? ', spread widening' : ', spread stable'
-    lines.push(`- Order book: ${strength} ${bias} (imbalance ${ctx.microSignal > 0 ? '+' : ''}${ctx.microSignal.toFixed(2)}${spreadNote})`)
-  }
-
-  // Line 3: Historical accuracy for this category
+  // Line 2: Historical accuracy for this category
   if (ctx.categoryAccuracy !== null && ctx.categorySampleSize >= 5) {
     lines.push(`- Your past accuracy in ${ctx.category}: ${Math.round(ctx.categoryAccuracy * 100)}% (${ctx.categorySampleSize} samples)`)
   }

@@ -1,6 +1,6 @@
 import { BaseStrategy } from './BaseStrategy'
 import type { BtcUpDownConfig, Market } from '@/types'
-import { polymarketUSClient, normalizeEventToMarkets } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 import { priceOracleService } from '@/services/api/PriceOracleService'
 import { tradingService } from '@/services/trading/TradingService'
 import { activityLogger } from '@/services/trading/ActivityLogger'
@@ -16,10 +16,12 @@ import {
   classifyRegime as _classifyRegime,
   computeRSI as _computeRSI,
   linearRegressionSlope as _linearRegressionSlope,
+  fuseBtcSignals,
 } from './btcupdown/signalEngine'
+import type { LLMDirectionSignal } from './btcupdown/signalEngine'
 
 // Re-export types from signalEngine for backward compatibility
-export type { SignalInput, Signal } from './btcupdown/signalEngine'
+export type { SignalInput, Signal, CrossAssetSnapshot } from './btcupdown/signalEngine'
 import type { SignalInput, Signal } from './btcupdown/signalEngine'
 
 // ==========================================
@@ -29,30 +31,31 @@ import type { SignalInput, Signal } from './btcupdown/signalEngine'
 const DEFAULT_CONFIG: BtcUpDownConfig = {
   enableBtc: true,
   enableEth: false,
-  enableSol: false,
+  enableSol: true,             // SOL has highest intra-window volatility → strongest directional signals
   enableXrp: false,
-  enable5m: false,   // 5m markets disabled — lower edge, higher fees, less liquidity
-  enable15m: true,
-  enableHourly: false,
+  enable5m: false,      // 5m markets disabled — lower edge, higher fees, less liquidity
+  enable15m: true,      // 15m ON — maker mode (0% fee) makes these profitable
+  enableHourly: true,   // Hourly windows — primary focus
+  enable4h: true,       // 4hr windows — primary focus
   enableDaily: false,
-  enable9pm: false,
-  tradeSize: 2.0,
+  tradeSize: 1.50,
   useKellySizing: true,
-  minConfidence: 0.55, // Higher confidence — selectivity over volume on small bankroll
-  maxEntryPrice: 0.45,        // Only buy cheap outcomes where binary math works
+  minConfidence: 0.38, // Signal engine outputs 0.20–0.45 on calm markets. 0.38 lets top signals through.
+  maxEntryPrice: 0.65,        // Allow outcomes up to 65c — covers typical balanced-market spreads.
   minEntryPrice: 0.10,        // Low floor — only reject extreme long-shots
   minWindowRemaining: 120,     // 2 min before resolution for 15m
-  minTimeIntoWindowMs: 45_000, // Need 45s of data before trading
+  minTimeIntoWindowMs: 30_000, // 30s into window — enough for initial signal, don't waste half the window
   regimeFilterEnabled: true,   // Skip choppy/mean-reverting markets
   rsiFilterEnabled: true,      // Reduce confidence on overbought/oversold
   scanIntervalMs: 15_000,
-  maxConcurrentPositions: 4,   // Conservative — $16 bankroll, ~$2/trade = 4 max active
+  maxConcurrentPositions: 2,   // $14 bankroll — max 2 active positions to avoid over-exposure
   maxEntriesPerMarket: 1,      // One shot per window — preserve capital
-  cooldownMs: 15_000,          // 15s cooldown — be selective, not rapid-fire
+  cooldownMs: 20_000,          // 20s cooldown — let price move between signals
   stopLossPercent: 0.95,       // Effectively disabled — hold to resolution
   takeProfitPercent: 0.95,     // Effectively disabled — hold to resolution
   maxHoldMs: 16 * 60 * 1000,  // 16min > 15m window — position resolves on-chain, never sold
   useLLMConfirmation: false,   // LLM confirmation gate on hourly+ windows (opt-in)
+  useLLMFusion: false,         // LLM signal fusion — independent direction prediction (opt-in)
 }
 
 /** Baseline window duration — all time-based config params are calibrated for this */
@@ -63,13 +66,13 @@ export const WINDOW_DURATIONS = {
   '5m': 5 * 60 * 1000,
   '15m': 15 * 60 * 1000,
   'hourly': 60 * 60 * 1000,
+  '4h': 4 * 60 * 60 * 1000,
   'daily': 24 * 60 * 60 * 1000,
-  '9pm': 24 * 60 * 60 * 1000,  // Daily event — actual duration derived from market endDate
 } as const
 
 export type WindowDuration = keyof typeof WINDOW_DURATIONS
 
-const ASSET_NAMES: Record<string, string> = {
+const _ASSET_NAMES: Record<string, string> = {
   BTC: 'Bitcoin',
   ETH: 'Ethereum',
   SOL: 'Solana',
@@ -81,25 +84,10 @@ const ASSET_NAMES: Record<string, string> = {
  * Pattern: {asset}-updown-{duration}-{windowStartUnix}
  */
 export const ASSET_SLUG_PATTERNS: Record<string, Partial<Record<WindowDuration, string>>> = {
-  BTC: { '5m': 'btc-updown-5m-', '15m': 'btc-updown-15m-' },
-  ETH: { '5m': 'eth-updown-5m-', '15m': 'eth-updown-15m-' },
-  SOL: { '5m': 'sol-updown-5m-', '15m': 'sol-updown-15m-' },
-  XRP: { '5m': 'xrp-updown-5m-', '15m': 'xrp-updown-15m-' },
-}
-
-/** Month names for 9PM event slug generation */
-const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june',
-  'july', 'august', 'september', 'october', 'november', 'december']
-
-/**
- * 9PM event slugs use a different format: {asset}-up-or-down-{month}-{day}-9pm-et
- * Unlike 5m/15m which are timestamp-based, these are human-readable date-based.
- */
-export const ASSET_9PM_SLUG_BUILDERS: Record<string, (date: Date) => string> = {
-  BTC: (d) => `bitcoin-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
-  ETH: (d) => `ethereum-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
-  SOL: (d) => `solana-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
-  XRP: (d) => `xrp-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
+  BTC: { '5m': 'btc-updown-5m-', '15m': 'btc-updown-15m-', '4h': 'btc-updown-4h-' },
+  ETH: { '5m': 'eth-updown-5m-', '15m': 'eth-updown-15m-', '4h': 'eth-updown-4h-' },
+  SOL: { '5m': 'sol-updown-5m-', '15m': 'sol-updown-15m-', '4h': 'sol-updown-4h-' },
+  XRP: { '5m': 'xrp-updown-5m-', '15m': 'xrp-updown-15m-', '4h': 'xrp-updown-4h-' },
 }
 
 /** Full asset names used in human-readable hourly/daily slugs */
@@ -109,6 +97,12 @@ const ASSET_FULL_NAMES: Record<string, string> = {
   SOL: 'solana',
   XRP: 'xrp',
 }
+
+/** Month names for human-readable hourly/daily slugs (lowercase, matches Polymarket format) */
+const MONTH_NAMES = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+]
 
 /**
  * Convert a UTC Date to Eastern Time hour components.
@@ -139,7 +133,7 @@ function toEasternTime(utcDate: Date): { etDate: Date; hour12: number; ampm: str
  * Hourly event slugs: {asset}-up-or-down-{month}-{day}-{hour}{am/pm}-et
  * e.g. bitcoin-up-or-down-february-14-1pm-et
  */
-function buildHourlySlug(asset: string, utcDate: Date): string {
+export function buildHourlySlug(asset: string, utcDate: Date): string {
   const fullName = ASSET_FULL_NAMES[asset]
   if (!fullName) return ''
   const { etDate, hour12, ampm } = toEasternTime(utcDate)
@@ -195,7 +189,7 @@ export function parseReferencePrice(question: string): number | null {
  */
 export class BtcUpDownStrategy extends BaseStrategy {
   name = 'BTC Up/Down'
-  description = '15m & 9PM binary markets on crypto price direction'
+  description = 'Hourly and 4-hour binary markets on crypto price direction'
   strategyType = 'mechanical' as const
 
   private btcConfig: BtcUpDownConfig = DEFAULT_CONFIG
@@ -207,8 +201,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
     windowOpenPrice: number
     asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'
     windowEndMs: number
-    windowDurationMs: number  // 900_000 (15m) or longer for 9PM events
-    durationKey: string       // '5m' | '15m' | 'hourly' | 'daily' | '9pm'
+    windowDurationMs: number  // 900_000 (15m) or longer for hourly/daily
+    durationKey: string       // '5m' | '15m' | 'hourly' | 'daily'
   }>()
   private positionsByWindow = new Map<string, number>()
   private lastTradeTimes = new Map<string, number>()
@@ -223,13 +217,23 @@ export class BtcUpDownStrategy extends BaseStrategy {
   /** Last computed signal per asset — exposed for dashboard display */
   private _lastSignals = new Map<string, { signal: Signal; windowOpenPrice: number; currentPrice: number }>()
   /** Cached RealtimeService reference (set in start(), null if unavailable) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamically imported RealtimeService
   private realtimeServiceRef: any | null = null
-  /** Map clobTokenId → { asset, outcomeIndex } for reverse-lookup on live price reads */
-  private slugToOutcomeMap = new Map<string, { asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'; outcomeIndex: number }>()
-  // Maps marketId → [outcomeSlug0, outcomeSlug1] for WS subscription and live price lookups
-  private marketOutcomeSlugs = new Map<string, string[]>()
+  /** Map CLOB tokenId → { asset, outcomeIndex } for reverse-lookup on live price reads */
+  private tokenToOutcomeMap = new Map<string, { asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'; outcomeIndex: number }>()
+  // Maps marketId → [tokenId0, tokenId1] for WS subscription and live price lookups
+  private marketOutcomeTokenIds = new Map<string, string[]>()
   /** Unsubscribe function for RealtimeService price callback */
   private realtimeUnsubscribe: (() => void) | null = null
+  /** Per-market LLM fusion cooldown — prevents excessive LLM calls (60s min between calls per market) */
+  private lastLLMFusionCallTimes = new Map<string, number>()
+  /** Chainlink feed unsubscribe */
+  private chainlinkUnsubscribe: (() => void) | null = null
+  /** Cached ChainlinkFeedService reference (set in start(), null if unavailable) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamically imported
+  private chainlinkServiceRef: any | null = null
+  /** Latest Chainlink BTC price (updated every ~2s from on-chain) */
+  private chainlinkPrice: { priceUSD: number; updatedAt: number } | null = null
 
   constructor(config?: Partial<BtcUpDownConfig>) {
     super()
@@ -243,8 +247,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
       enable5m: s.btcEnable5m,
       enable15m: s.btcEnable15m,
       enableHourly: s.btcEnableHourly,
+      enable4h: s.btcEnable4h,
       enableDaily: s.btcEnableDaily,
-      enable9pm: s.btcEnable9pm,
       minConfidence: s.btcMinConfidence,
       maxEntryPrice: s.btcMaxEntryPrice,
       minEntryPrice: s.btcMinEntryPrice,
@@ -257,6 +261,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
       stopLossPercent: s.btcStopLossPercent,
       takeProfitPercent: s.btcTakeProfitPercent,
       useLLMConfirmation: s.btcUseLLMConfirmation,
+      useLLMFusion: s.btcUseLLMFusion,
     }
     this.btcConfig = { ...DEFAULT_CONFIG, ...persisted, ...config }
     this._config = { enabled: false, ...this.btcConfig }
@@ -270,7 +275,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
   async start(): Promise<void> {
     if (this._status === 'running') return
 
-    this.log('Starting BTC Up/Down Strategy (resolution-hold mode)')
+    const earlyExit = useSettingsStore.getState().btcEarlyExitEnabled
+    this.log(`Starting BTC Up/Down Strategy (${earlyExit ? 'early-exit' : 'resolution-hold'} mode)`)
     this.setStatus('running')
 
     // Subscribe to BinanceWS for 1-second high-frequency price data
@@ -283,13 +289,35 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
         const buffer = this.highFreqPrices.get(asset) || []
         buffer.push({ price: update.priceUSD, timestamp: update.timestamp })
-        // Keep last 300 entries (~5 min at 1s)
-        if (buffer.length > 300) buffer.shift()
+        // Keep last 1800 entries (~30 min at 1s) — sufficient for hourly/4hr regime detection
+        if (buffer.length > 1800) buffer.shift()
         this.highFreqPrices.set(asset, buffer)
       })
       this.log('BinanceWS subscribed — 1s price buffer active')
     } catch (error) {
       this.logError('BinanceWS subscription failed — using sparse oracle data', error)
+    }
+
+    // Subscribe to Chainlink on-chain price feed (resolution-source for BTC Up/Down)
+    try {
+      const { chainlinkFeedService } = await import('@/services/trading/ChainlinkFeedService')
+      // Determine which assets need Chainlink feeds
+      const chainlinkSymbols: Array<'BTC' | 'ETH' | 'SOL' | 'XRP'> = []
+      if (this.btcConfig.enableBtc) chainlinkSymbols.push('BTC')
+      if (this.btcConfig.enableEth) chainlinkSymbols.push('ETH')
+      if (this.btcConfig.enableSol) chainlinkSymbols.push('SOL')
+      if (this.btcConfig.enableXrp) chainlinkSymbols.push('XRP')
+
+      this.chainlinkServiceRef = chainlinkFeedService
+      chainlinkFeedService.startPolling(2000, chainlinkSymbols)
+      this.chainlinkUnsubscribe = chainlinkFeedService.onPriceUpdate((price) => {
+        if (price.symbol === 'BTC') {
+          this.chainlinkPrice = { priceUSD: price.priceUSD, updatedAt: price.updatedAt * 1000 }
+        }
+      })
+      this.log(`Chainlink feed active — polling ${chainlinkSymbols.join(',')} every 2s (resolution-source)`)
+    } catch (error) {
+      this.logError('Chainlink feed failed — using Binance/RTDS fallback', error)
     }
 
     // Connect Polymarket WebSocket for live CLOB prices + order flow signals
@@ -301,9 +329,9 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Lightweight callback — logs first live price confirmation per session
       let firstPriceLogged = false
-      this.realtimeUnsubscribe = realtimeService.onPriceUpdate((slug: string) => {
-        if (!firstPriceLogged && this.slugToOutcomeMap.has(slug)) {
-          this.log(`[WS] Live price pipeline active (first update for ${slug.slice(0, 20)}…)`)
+      this.realtimeUnsubscribe = realtimeService.onPriceUpdate((tokenId: string) => {
+        if (!firstPriceLogged && this.tokenToOutcomeMap.has(tokenId)) {
+          this.log(`[WS] Live price pipeline active (first update for ${tokenId.slice(0, 20)}…)`)
           firstPriceLogged = true
         }
       })
@@ -332,6 +360,18 @@ export class BtcUpDownStrategy extends BaseStrategy {
       this.binanceUnsubscribe = null
     }
 
+    // Stop Chainlink polling
+    if (this.chainlinkUnsubscribe) {
+      this.chainlinkUnsubscribe()
+      this.chainlinkUnsubscribe = null
+    }
+    try {
+      const { chainlinkFeedService } = await import('@/services/trading/ChainlinkFeedService')
+      chainlinkFeedService.stopPolling()
+    } catch { /* already stopped */ }
+    this.chainlinkPrice = null
+    this.chainlinkServiceRef = null
+
     // Unsubscribe from RealtimeService price callback (does NOT disconnect WebSocket)
     if (this.realtimeUnsubscribe) {
       this.realtimeUnsubscribe()
@@ -346,8 +386,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
     this.highFreqPrices.clear()
     this.windowOpenPriceCache.clear()
     this._lastSignals.clear()
-    this.slugToOutcomeMap.clear()
-    this.marketOutcomeSlugs.clear()
+    this.tokenToOutcomeMap.clear()
+    this.marketOutcomeTokenIds.clear()
 
     this.setStatus('idle')
     activityLogger.logSystem('BTC Up/Down Strategy stopped')
@@ -358,12 +398,22 @@ export class BtcUpDownStrategy extends BaseStrategy {
   // ==========================================
 
   private async runScanCycle(): Promise<void> {
-    if (!this._enabled || this._status !== 'running') return
+    if (!this._enabled || this._status !== 'running') {
+      console.log(`[BTC Scan] Skipped — enabled=${this._enabled}, status=${this._status}`)
+      return
+    }
+
+    // Skip scanning when emergency stop is active — avoid pointless log spam
+    try {
+      const { riskManager } = await import('@/services/trading/RiskManager')
+      if (riskManager.emergencyStopped) return
+    } catch { /* proceed if import fails */ }
 
     try {
       // 1. Discover markets for enabled assets
       await this.discoverMarkets()
 
+      console.log(`[BTC Scan] Active markets: ${this.activeMarkets.size}`)
       if (this.activeMarkets.size === 0) {
         const assets: string[] = []
         if (this.btcConfig.enableBtc) assets.push('BTC')
@@ -374,8 +424,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
         if (this.btcConfig.enable5m) durations.push('5m')
         if (this.btcConfig.enable15m) durations.push('15m')
         if (this.btcConfig.enableHourly) durations.push('hourly')
+        if (this.btcConfig.enable4h) durations.push('4h')
         if (this.btcConfig.enableDaily) durations.push('daily')
-        if (this.btcConfig.enable9pm) durations.push('9pm')
 
         // Synthetic dry-run: fabricate a market from live price data so the full
         // pipeline (signal → gates → sizing → PLM) can be exercised between windows.
@@ -401,6 +451,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
       } catch { /* PLM not available */ }
 
       if (btcPositionCount >= this.btcConfig.maxConcurrentPositions) {
+        console.log(`[BTC Scan] BLOCKED: position limit ${btcPositionCount}/${this.btcConfig.maxConcurrentPositions}`)
         rejectionTracker.record('position_limit', 'btc', `${btcPositionCount}/${this.btcConfig.maxConcurrentPositions} BTC positions`)
         return
       }
@@ -408,7 +459,28 @@ export class BtcUpDownStrategy extends BaseStrategy {
       // 3. Analyze each active market
       for (const [marketId, entry] of this.activeMarkets) {
         if (!this._enabled) break
-        if ((this.positionsByWindow.get(marketId) ?? 0) >= this.btcConfig.maxEntriesPerMarket) continue
+        if ((this.positionsByWindow.get(marketId) ?? 0) >= this.btcConfig.maxEntriesPerMarket) {
+          console.log(`[BTC Scan] ${entry.asset}: maxEntries reached for ${marketId.slice(0, 8)}`)
+          continue
+        }
+
+        // Skip markets whose window hasn't started yet (next-window pre-discovery)
+        const windowStartMs = entry.windowEndMs - entry.windowDurationMs
+        if (Date.now() < windowStartMs) continue
+
+        // === SNIPE MODE: Chainlink-driven last-window sniping ===
+        // In the final seconds, Chainlink price IS the resolution price.
+        // Skip cooldown and normal signal — use on-chain truth directly.
+        const snipe = this.getSnipeSignal(entry)
+        if (snipe) {
+          console.log(
+            `[BTC SNIPE] ${entry.asset} ${entry.durationKey}: Chainlink $${snipe.chainlinkPrice.toFixed(2)} → ` +
+            `${snipe.direction.toUpperCase()} (conf ${(snipe.confidence * 100).toFixed(0)}%, ` +
+            `${Math.round((entry.windowEndMs - Date.now()) / 1000)}s to close)`,
+          )
+          await this.executeSnipe(entry.market, entry, snipe)
+          continue
+        }
 
         const lastTrade = this.lastTradeTimes.get(marketId) || 0
         // Scale cooldown proportionally to window duration
@@ -416,6 +488,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
         const scaledCooldown = this.btcConfig.cooldownMs * timeScale
         if (Date.now() - lastTrade < scaledCooldown) continue
 
+        console.log(`[BTC Scan] Analyzing ${entry.asset} ${entry.durationKey} market ${marketId.slice(0, 8)}...`)
         await this.analyzeAndTrade(entry.market, entry.windowOpenPrice, entry.asset, entry.windowDurationMs, entry.durationKey)
       }
     } catch (error) {
@@ -479,11 +552,11 @@ export class BtcUpDownStrategy extends BaseStrategy {
         market: syntheticMarket,
       }
 
-      const signal = this.computeSignal(signalInput)
+      const signal = await this.computeSignal(signalInput)
 
       // Emit for dashboard display
       this._lastSignals.set(asset, { signal, windowOpenPrice, currentPrice })
-      this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice })
+      this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice, market })
 
       const logPrefix = `[SYNTHETIC DRY RUN] ${asset}`
       this.log(
@@ -508,9 +581,19 @@ export class BtcUpDownStrategy extends BaseStrategy {
         return
       }
 
-      const positionSize = this.calculatePositionSize(signal.confidence, targetPrice)
+      // Calibrate + edge gate (same as real trading path)
+      const { btcCalibrationService } = await import('@/services/trading/BtcCalibrationService')
+      const calConf = btcCalibrationService.calibrate(signal.confidence)
+      const dryRunSettings = useSettingsStore.getState()
+      const minEdge = dryRunSettings.btcMinEdgeOverMarket
+      if (calConf <= targetPrice + minEdge) {
+        rejectionTracker.record('edge_gate', 'btc', `${logPrefix} conf ${(calConf * 100).toFixed(0)}% <= required ${((targetPrice + minEdge) * 100).toFixed(0)}%`)
+        return
+      }
 
-      this.log(`${logPrefix} SIGNAL: ${signal.direction.toUpperCase()} @ ${(targetPrice * 100).toFixed(0)}c ($${positionSize.toFixed(2)})`)
+      const positionSize = await this.calculatePositionSize(calConf, targetPrice, false)
+
+      this.log(`${logPrefix} SIGNAL: ${signal.direction.toUpperCase()} @ ${(targetPrice * 100).toFixed(0)}c (cal ${(calConf * 100).toFixed(0)}%, $${positionSize.toFixed(2)})`)
 
       // Execute via TradingService (which simulates in dry-run mode)
       const outcomeStr: 'yes' | 'no' = targetIndex === 0 ? 'yes' : 'no'
@@ -548,12 +631,98 @@ export class BtcUpDownStrategy extends BaseStrategy {
   private scheduleNextScan(): void {
     if (!this._enabled || this._status !== 'running') return
 
-    // Always scan every 1s for maximum speed
-    const intervalMs = 1_000
+    const intervalMs = this.getAdaptiveScanInterval()
     this.scanTimeout = window.setTimeout(async () => {
       await this.runScanCycle()
       this.scheduleNextScan()
     }, intervalMs)
+  }
+
+  /**
+   * Adaptive scan interval based on market state.
+   * - No active markets: 8s (discovery-only, no need to hammer Gamma)
+   * - Active window, early (<30%): 5s (gathering data, not yet decision time)
+   * - Active window, decision phase (30-80%): 3s (critical trading window)
+   * - Active window, late (80-93%): 5s (winding down, positions resolving)
+   * - SNIPE ZONE (last ~60s for 15m, last ~20s for 5m): 1.5s (Chainlink-driven sniping)
+   */
+  private getAdaptiveScanInterval(): number {
+    if (this.activeMarkets.size === 0) return 8_000
+
+    const now = Date.now()
+    let mostUrgentRatio = 0 // highest = most into window
+    let closestWindowEndMs = Infinity
+
+    for (const entry of this.activeMarkets.values()) {
+      const windowStartMs = entry.windowEndMs - entry.windowDurationMs
+      const elapsed = now - windowStartMs
+      const ratio = Math.max(0, Math.min(1, elapsed / entry.windowDurationMs))
+      if (ratio > mostUrgentRatio) mostUrgentRatio = ratio
+      if (entry.windowEndMs < closestWindowEndMs) closestWindowEndMs = entry.windowEndMs
+    }
+
+    // Snipe zone: last 60s of any active window — maximum scan frequency
+    const timeToClose = closestWindowEndMs - now
+    if (timeToClose > 0 && timeToClose <= 60_000) return 1_500
+
+    if (mostUrgentRatio > 0.80) return 5_000   // late: winding down
+    if (mostUrgentRatio > 0.30) return 3_000   // decision phase
+    return 5_000                                 // early: gathering data
+  }
+
+  /**
+   * Check if a market is in the snipe zone (last 60s for 15m, last 20s for 5m).
+   * Returns the Chainlink-derived direction if snipeable, null otherwise.
+   */
+  private getSnipeSignal(
+    entry: { windowEndMs: number; windowDurationMs: number; windowOpenPrice: number; asset: string },
+  ): { direction: 'up' | 'down'; confidence: number; chainlinkPrice: number } | null {
+    const now = Date.now()
+    const timeRemainingMs = entry.windowEndMs - now
+
+    // Snipe zone: scaled by window duration — more time for longer windows
+    const snipeWindowMs = entry.windowDurationMs <= 5 * 60 * 1000 ? 20_000      // 5m: 20s
+      : entry.windowDurationMs <= 15 * 60 * 1000 ? 60_000                       // 15m: 60s
+      : entry.windowDurationMs <= 60 * 60 * 1000 ? 120_000                      // hourly: 2 min
+      : entry.windowDurationMs <= 4 * 60 * 60 * 1000 ? 300_000                  // 4h: 5 min
+      : 600_000                                                                   // daily: 10 min
+    if (timeRemainingMs <= 0 || timeRemainingMs > snipeWindowMs) return null
+
+    // Need Chainlink price (the resolution source)
+    let chainlinkPriceUSD: number | null = null
+
+    // For BTC, use the locally cached Chainlink price (updated every 2s)
+    if (entry.asset === 'BTC' && this.chainlinkPrice) {
+      const ageMs = now - this.chainlinkPrice.updatedAt
+      if (ageMs < 10_000) chainlinkPriceUSD = this.chainlinkPrice.priceUSD
+    }
+
+    // For other assets, use cached service ref (set during start())
+    if (!chainlinkPriceUSD && this.chainlinkServiceRef) {
+      const cached = this.chainlinkServiceRef.getCachedPrice(entry.asset, 10_000)
+      if (cached) chainlinkPriceUSD = cached.priceUSD
+    }
+
+    if (!chainlinkPriceUSD) return null
+
+    const refPrice = entry.windowOpenPrice
+    const displacement = (chainlinkPriceUSD - refPrice) / refPrice
+
+    // Direction is deterministic: if Chainlink > ref, outcome = Up
+    const direction: 'up' | 'down' = displacement >= 0 ? 'up' : 'down'
+
+    // Confidence scales with displacement magnitude and proximity to close.
+    // At 60s remaining with 0.5% displacement → ~0.85 confidence.
+    // At 10s remaining with 0.3% displacement → ~0.95 confidence (almost certain).
+    const absPct = Math.abs(displacement) * 100
+    const timeFactor = 1 - (timeRemainingMs / snipeWindowMs)  // 0 at zone entry, 1 at close
+    const confidence = Math.min(0.98, 0.60 + absPct * 0.15 + timeFactor * 0.20)
+
+    // Minimum displacement filter: need at least 0.05% to snipe
+    // (within noise of Chainlink heartbeat, direction could flip)
+    if (absPct < 0.05) return null
+
+    return { direction, confidence, chainlinkPrice: chainlinkPriceUSD }
   }
 
   // ==========================================
@@ -571,8 +740,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
     if (this.btcConfig.enable5m) enabledDurations.push('5m')
     if (this.btcConfig.enable15m) enabledDurations.push('15m')
     if (this.btcConfig.enableHourly) enabledDurations.push('hourly')
+    if (this.btcConfig.enable4h) enabledDurations.push('4h')
     if (this.btcConfig.enableDaily) enabledDurations.push('daily')
-    if (this.btcConfig.enable9pm) enabledDurations.push('9pm')
 
     if (assets.length === 0 || enabledDurations.length === 0) {
       this.log(`[Discovery] Nothing to scan — assets: [${assets}], durations: [${enabledDurations}]`)
@@ -583,13 +752,13 @@ export class BtcUpDownStrategy extends BaseStrategy {
     const now = Date.now()
     for (const [id, entry] of this.activeMarkets) {
       if (entry.windowEndMs < now) {
-        // Remove evicted slugs from lookup map (do NOT unsubscribe — other consumers may need them)
-        const evictedSlugs = this.marketOutcomeSlugs.get(id)
-        if (evictedSlugs) {
-          for (const s of evictedSlugs) {
-            this.slugToOutcomeMap.delete(s)
+        // Remove evicted token IDs from lookup map (do NOT unsubscribe — other consumers may need them)
+        const evictedTokenIds = this.marketOutcomeTokenIds.get(id)
+        if (evictedTokenIds) {
+          for (const t of evictedTokenIds) {
+            this.tokenToOutcomeMap.delete(t)
           }
-          this.marketOutcomeSlugs.delete(id)
+          this.marketOutcomeTokenIds.delete(id)
         }
         this.activeMarkets.delete(id)
         this.positionsByWindow.delete(id)
@@ -651,9 +820,9 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
             this.activeMarkets.set(market.id, { market, windowOpenPrice, asset, windowEndMs, windowDurationMs, durationKey: duration })
 
-            // Subscribe outcome slugs for live bid/ask via WebSocket
-            const outcomeSlugs = this.marketOutcomeSlugs.get(market.id)
-            if (outcomeSlugs?.length === 2 && this.realtimeServiceRef) {
+            // Subscribe outcome token IDs for live bid/ask via WebSocket
+            const outcomeTokenIds = this.marketOutcomeTokenIds.get(market.id)
+            if (outcomeTokenIds?.length === 2 && this.realtimeServiceRef) {
               const mOutcomes = market.outcomes || []
               const mUpIdx = mOutcomes.includes('Up') ? mOutcomes.indexOf('Up')
                 : mOutcomes.includes('Yes') && market.question.toUpperCase().includes('UP')
@@ -661,10 +830,10 @@ export class BtcUpDownStrategy extends BaseStrategy {
                   : 0
               const mDownIdx = mUpIdx === 0 ? 1 : 0
 
-              this.slugToOutcomeMap.set(outcomeSlugs[mUpIdx], { asset, outcomeIndex: mUpIdx })
-              this.slugToOutcomeMap.set(outcomeSlugs[mDownIdx], { asset, outcomeIndex: mDownIdx })
-              this.realtimeServiceRef.subscribeMarket(outcomeSlugs)
-              this.log(`[Discovery] Subscribed outcome slugs for ${asset} ${duration}`)
+              this.tokenToOutcomeMap.set(outcomeTokenIds[mUpIdx], { asset, outcomeIndex: mUpIdx })
+              this.tokenToOutcomeMap.set(outcomeTokenIds[mDownIdx], { asset, outcomeIndex: mDownIdx })
+              this.realtimeServiceRef.subscribeMarket(outcomeTokenIds)
+              this.log(`[Discovery] Subscribed outcome tokens for ${asset} ${duration}`)
             }
 
             this.log(`Found ${duration}: ${market.question.substring(0, 60)}... (${Math.round(timeRemaining / 1000)}s left, open $${windowOpenPrice.toFixed(2)})`)
@@ -685,12 +854,13 @@ export class BtcUpDownStrategy extends BaseStrategy {
    */
   private async discoverBySlug(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP', duration: WindowDuration): Promise<Market[]> {
     // Human-readable slug formats — delegate to dedicated methods
-    if (duration === '9pm') return this.discoverBySlug9pm(asset)
     if (duration === 'hourly') return this.discoverBySlugHourly(asset)
     if (duration === 'daily') return this.discoverBySlugDaily(asset)
     const prefix = ASSET_SLUG_PATTERNS[asset]?.[duration]
     if (!prefix) return []
-    const intervalSec = duration === '5m' ? 300 : 900
+    const intervalSecMap: Record<string, number> = { '5m': 300, '15m': 900, '4h': 14400 }
+    const intervalSec = intervalSecMap[duration]
+    if (!intervalSec) return []
     const nowSec = Math.floor(Date.now() / 1000)
     const currentWindowStart = Math.floor(nowSec / intervalSec) * intervalSec
     const nextWindowStart = currentWindowStart + intervalSec
@@ -701,19 +871,6 @@ export class BtcUpDownStrategy extends BaseStrategy {
     ]
 
     return this.discoverFromEventSlugs(slugs, 'slug')
-  }
-
-  /**
-   * 9PM event discovery — uses human-readable date-based slugs.
-   * Format: {asset}-up-or-down-{month}-{day}-9pm-et
-   * Queries today's event + tomorrow's event.
-   */
-  private async discoverBySlug9pm(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<Market[]> {
-    const builder = ASSET_9PM_SLUG_BUILDERS[asset]
-    if (!builder) return []
-    const today = new Date()
-    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000)
-    return this.discoverFromEventSlugs([builder(today), builder(tomorrow)], '9PM')
   }
 
   private async discoverBySlugHourly(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<Market[]> {
@@ -744,22 +901,20 @@ export class BtcUpDownStrategy extends BaseStrategy {
     for (const slug of eventSlugs) {
       if (!slug) continue
       try {
-        const event = await polymarketUSClient.getEventBySlug(slug)
+        const event = await polymarketClient.getEventBySlug(slug)
         if (!event) continue
 
-        // Capture individual outcome slugs before normalization
-        const rawMarkets = (event as any).markets || []
-        const outcomeSlugs = rawMarkets
-          .filter((m: any) => m.active && !m.closed)
-          .map((m: any) => m.slug)
+        // Gamma events have markets array directly
+        const eventMarkets = event.markets || []
 
-        // Normalize US API event into unified Market objects
-        const eventMarkets = normalizeEventToMarkets(event as any)
         for (const m of eventMarkets) {
           if (m.active && !m.closed) {
             markets.push(m)
-            // Store outcome slugs keyed by market ID for WS subscriptions
-            this.marketOutcomeSlugs.set(m.id, outcomeSlugs)
+            // Store THIS market's own clobTokenIds (e.g., [yesToken, noToken])
+            // Previously stored cross-market tokens which broke live price lookups
+            if (m.clobTokenIds && m.clobTokenIds.length >= 2) {
+              this.marketOutcomeTokenIds.set(m.id, m.clobTokenIds)
+            }
           }
         }
       } catch (error) {
@@ -815,9 +970,9 @@ export class BtcUpDownStrategy extends BaseStrategy {
    * Read live CLOB mid-price for an outcome token via RealtimeService.
    * Falls back to stale Gamma mid-price if WebSocket data unavailable.
    */
-  private getLiveOutcomePrice(slug: string | undefined, fallback: number): number {
-    if (!slug || !this.realtimeServiceRef) return fallback
-    const pd = this.realtimeServiceRef.getPrice(slug)
+  private getLiveOutcomePrice(tokenId: string | undefined, fallback: number): number {
+    if (!tokenId || !this.realtimeServiceRef) return fallback
+    const pd = this.realtimeServiceRef.getPrice(tokenId)
     return pd && pd.mid > 0 ? pd.mid : fallback
   }
 
@@ -843,16 +998,18 @@ export class BtcUpDownStrategy extends BaseStrategy {
       // Don't trade before we have enough data for a signal
       const scaledMinTimeInto = this.btcConfig.minTimeIntoWindowMs * timeScale
       if (timeIntoWindowMs < scaledMinTimeInto) {
-        return // Silent skip — too early in window
+        console.log(`[BTC Gate] ${asset} ${durationKey}: too early — ${Math.round(timeIntoWindowMs/1000)}s into window (need ${Math.round(scaledMinTimeInto/1000)}s)`)
+        return
       }
 
       // === Phase 3d: Liquidity pre-check ===
       try {
-        const { OrderBookDepth } = await import('@/services/trading/OrderBookDepth')
-        const firstSlug = this.marketOutcomeSlugs.get(market.id)?.[0]
-        if (firstSlug) {
-          const depthCheck = await OrderBookDepth.checkBuyDepth(firstSlug, 0.50, 1.0)
+        const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')
+        const firstTokenId = this.marketOutcomeTokenIds.get(market.id)?.[0]
+        if (firstTokenId) {
+          const depthCheck = await orderBookDepth.checkBuyDepth(firstTokenId, 0.50, 1.0)
           if (depthCheck.maxFillableUSD < 1.0) {
+            console.log(`[BTC Gate] ${asset} ${durationLabel}: LOW LIQUIDITY $${depthCheck.maxFillableUSD.toFixed(2)} < $1`)
             rejectionTracker.record('liquidity', 'btc', `${asset} ${durationLabel} depth $${depthCheck.maxFillableUSD.toFixed(2)} < $1`)
             return
           }
@@ -894,16 +1051,16 @@ export class BtcUpDownStrategy extends BaseStrategy {
       if (hasUpDown) {
         upIndex = market.outcomes.indexOf('Up')
         downIndex = market.outcomes.indexOf('Down')
-        upPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[upIndex], market.outcomePrices[upIndex])
-        downPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[downIndex], market.outcomePrices[downIndex])
+        upPrice = this.getLiveOutcomePrice(this.marketOutcomeTokenIds.get(market.id)?.[upIndex], market.outcomePrices[upIndex])
+        downPrice = this.getLiveOutcomePrice(this.marketOutcomeTokenIds.get(market.id)?.[downIndex], market.outcomePrices[downIndex])
       } else if (hasYesNo) {
         const yesIndex = market.outcomes.indexOf('Yes')
         const noIndex = market.outcomes.indexOf('No')
         const questionMeansUp = market.question.toUpperCase().includes('UP')
         upIndex = questionMeansUp ? yesIndex : noIndex
         downIndex = questionMeansUp ? noIndex : yesIndex
-        upPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[upIndex], market.outcomePrices[upIndex])
-        downPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[downIndex], market.outcomePrices[downIndex])
+        upPrice = this.getLiveOutcomePrice(this.marketOutcomeTokenIds.get(market.id)?.[upIndex], market.outcomePrices[upIndex])
+        downPrice = this.getLiveOutcomePrice(this.marketOutcomeTokenIds.get(market.id)?.[downIndex], market.outcomePrices[downIndex])
       } else {
         console.warn(`[BTC] Unrecognized outcomes: ${JSON.stringify(market.outcomes)}`)
         return
@@ -913,6 +1070,51 @@ export class BtcUpDownStrategy extends BaseStrategy {
       // when high-freq is the primary buffer and sparse history has enough data
       const priceBufferLongTerm = (highFreq.length >= 10 && history.length >= 5)
         ? history : undefined
+
+      // Cross-asset correlation: grab live prices of peer assets from BinanceWS.
+      // If BTC is being analyzed, include ETH/SOL snapshots so the signal engine
+      // can detect macro moves (all crypto moving together = stronger signal).
+      let crossAssets: Array<{ asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'; currentPrice: number; windowOpenPrice: number }> | undefined
+      try {
+        const { binanceWSService } = await import('@/services/realtime/BinanceWSService')
+        const peerSymbols: Array<'BTC' | 'ETH' | 'SOL' | 'XRP'> = ['BTC', 'ETH', 'SOL', 'XRP']
+        const snapshots: typeof crossAssets = []
+        for (const sym of peerSymbols) {
+          if (sym === asset) continue
+          const cached = binanceWSService.getCachedPrice(sym)
+          if (cached) {
+            // Use cached open price if we have a market for this peer in the same window,
+            // otherwise approximate from 24h open price
+            const peerEntry = [...this.activeMarkets.values()].find(m => m.asset === sym)
+            const peerWindowOpen = peerEntry?.windowOpenPrice ?? cached.priceUSD / (1 + cached.priceChange24hPct / 100)
+            snapshots.push({ asset: sym, currentPrice: cached.priceUSD, windowOpenPrice: peerWindowOpen })
+          } else {
+            // Fallback: use our own high-freq buffer if BinanceWS hasn't cached this peer yet
+            const peerBuffer = this.highFreqPrices.get(sym)
+            if (peerBuffer && peerBuffer.length >= 2) {
+              const latest = peerBuffer[peerBuffer.length - 1]
+              const oldest = peerBuffer[0]
+              snapshots.push({ asset: sym, currentPrice: latest.price, windowOpenPrice: oldest.price })
+            }
+          }
+        }
+        if (snapshots.length > 0) crossAssets = snapshots
+      } catch {
+        // BinanceWS unavailable — try high-freq buffer directly
+        const peerSymbols: Array<'BTC' | 'ETH' | 'SOL' | 'XRP'> = ['BTC', 'ETH', 'SOL', 'XRP']
+        const snapshots: NonNullable<typeof crossAssets> = []
+        for (const sym of peerSymbols) {
+          if (sym === asset) continue
+          const peerBuffer = this.highFreqPrices.get(sym)
+          if (peerBuffer && peerBuffer.length >= 2) {
+            const latest = peerBuffer[peerBuffer.length - 1]
+            const oldest = peerBuffer[0]
+            snapshots.push({ asset: sym, currentPrice: latest.price, windowOpenPrice: oldest.price })
+          }
+        }
+        if (snapshots.length > 0) crossAssets = snapshots
+      }
+
       const signalInput: SignalInput = {
         asset,
         currentPrice,
@@ -923,11 +1125,12 @@ export class BtcUpDownStrategy extends BaseStrategy {
         windowDurationMs,
         recentPriceHistory: priceBuffer,
         recentPriceHistoryLongTerm: priceBufferLongTerm,
+        crossAssets,
         market,
       }
 
       // Multi-factor mechanical signal (with vol normalization + RSI)
-      const signal = this.computeSignal(signalInput)
+      const signal = await this.computeSignal(signalInput)
 
       // Historical enrichment — non-blocking, best-effort confidence adjustment
       let historicalWinRate: number | null = null
@@ -938,7 +1141,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
           const { historicalEnrichment } = await import('./btcupdown/HistoricalEnrichment')
           const hour = new Date().getUTCHours()
           const dow = new Date().getUTCDay()
-          const durationKeyMap: Record<string, string> = { '5m': '5m', '15m': '15m', '1hr': '1hr', '4hr': '4hr', '24hr': '24hr' }
+          const durationKeyMap: Record<string, string> = { '5m': '5m', '15m': '15m', 'hourly': '1hr', '4h': '4hr', 'daily': '24hr' }
           const backtestType = durationKeyMap[durationLabel]
           if (backtestType) {
             const enrichment = await historicalEnrichment.getEnrichment(
@@ -959,7 +1162,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Store for dashboard display + emit event for real-time UI updates
       this._lastSignals.set(asset, { signal, windowOpenPrice, currentPrice })
-      this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice })
+      this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice, market })
 
       this.log(
         `${asset} ${durationLabel} signal: ${signal.direction.toUpperCase()} conf=${(signal.confidence * 100).toFixed(0)}% ` +
@@ -969,14 +1172,40 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Gate: confidence
       if (signal.confidence < this.btcConfig.minConfidence) {
+        console.log(`[BTC Gate] ${asset} ${durationLabel}: confidence ${(signal.confidence * 100).toFixed(0)}% < ${(this.btcConfig.minConfidence * 100).toFixed(0)}% min`)
         rejectionTracker.record('confidence', 'btc', `${asset} ${durationLabel} ${(signal.confidence * 100).toFixed(0)}% < ${(this.btcConfig.minConfidence * 100).toFixed(0)}%`)
         return
       }
 
-      // Gate: LLM confirmation — when enabled, every trade gets LLM verification.
-      // User controls which windows/assets are active via their own toggles.
-      // Budget is enforced internally by OpenRouterService ($1/day prediction bucket).
-      if (this.btcConfig.useLLMConfirmation) {
+      // Gate: LLM signal fusion — independent directional prediction fused with mechanical signal.
+      // Takes priority over confirmation when both are enabled.
+      const settings = useSettingsStore.getState()
+      const useLLMFusion = this.btcConfig.useLLMFusion ?? settings.btcUseLLMFusion
+      const llmFusionWeight = settings.btcLLMFusionWeight ?? 0.30
+      const llmFusionPreFilter = settings.btcLLMFusionPreFilter ?? 0.30
+
+      if (useLLMFusion && signal.confidence >= llmFusionPreFilter) {
+        const llmPrediction = await this.llmFusion(asset, signalInput, durationLabel)
+        if (llmPrediction) {
+          const preFusionConf = signal.confidence
+          const fused = fuseBtcSignals(signal, llmPrediction, llmFusionWeight)
+          signal.confidence = fused.confidence
+          signal.direction = fused.direction
+          this.log(
+            `[LLM Fusion] ${asset} ${durationLabel}: mech=${(preFusionConf * 100).toFixed(0)}% ${signal.direction.toUpperCase()} + ` +
+            `llm=${(llmPrediction.confidence * 100).toFixed(0)}% ${llmPrediction.direction.toUpperCase()} → ` +
+            `fused=${(signal.confidence * 100).toFixed(0)}% (${fused.direction === llmPrediction.direction ? 'AGREE' : 'DISAGREE'})`,
+          )
+          // Re-check confidence after fusion
+          if (signal.confidence < this.btcConfig.minConfidence) {
+            rejectionTracker.record('llm_fusion', 'btc', `${asset} ${durationLabel} post-fusion ${(signal.confidence * 100).toFixed(0)}% < ${(this.btcConfig.minConfidence * 100).toFixed(0)}%`)
+            return
+          }
+        } else {
+          this.log(`[LLM Fusion] ${asset} ${durationLabel}: LLM returned null — proceeding with mechanical signal`)
+        }
+      } else if (this.btcConfig.useLLMConfirmation) {
+        // Fallback: legacy LLM confirmation gate (when fusion is off)
         const llmResult = await this.llmConfirmation(asset, signal, signalInput, durationLabel, windowDurationMs - timeIntoWindowMs, {
           historicalWinRate,
           historicalSampleSize,
@@ -985,10 +1214,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
           rejectionTracker.record('llm_veto', 'btc', `${asset} ${durationLabel} LLM vetoed trade`)
           return
         }
-        // Apply LLM confidence adjustment (capped at ±10%)
         signal.confidence = Math.max(0, Math.min(1, llmResult.adjustedConfidence))
         this.log(`[LLM] ${asset} ${durationLabel} ${signal.direction.toUpperCase()} → ${llmResult.reasoning} (adj ${(signal.confidence * 100).toFixed(0)}%)`)
-        // Re-check confidence after LLM adjustment
         if (signal.confidence < this.btcConfig.minConfidence) {
           rejectionTracker.record('llm_confidence', 'btc', `${asset} ${durationLabel} post-LLM ${(signal.confidence * 100).toFixed(0)}% < ${(this.btcConfig.minConfidence * 100).toFixed(0)}%`)
           return
@@ -997,8 +1224,10 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Gate: max entry price (cheap outcomes only for resolution-hold)
       const targetIndex = signal.direction === 'up' ? upIndex : downIndex
-      const targetPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[targetIndex], market.outcomePrices[targetIndex])
+      const targetPrice = this.getLiveOutcomePrice(this.marketOutcomeTokenIds.get(market.id)?.[targetIndex], market.outcomePrices[targetIndex])
+      console.log(`[BTC Gate] ${asset} ${durationLabel}: ${signal.direction.toUpperCase()} @ ${(targetPrice * 100).toFixed(0)}c (conf ${(signal.confidence * 100).toFixed(0)}%, maxEntry ${(this.btcConfig.maxEntryPrice * 100).toFixed(0)}c)`)
       if (targetPrice > this.btcConfig.maxEntryPrice) {
+        console.log(`[BTC Gate] ${asset} ${durationLabel}: PRICE TOO HIGH ${(targetPrice * 100).toFixed(0)}c > ${(this.btcConfig.maxEntryPrice * 100).toFixed(0)}c`)
         rejectionTracker.record('market_filter', 'btc', `${asset} price ${(targetPrice * 100).toFixed(0)}c > ${(this.btcConfig.maxEntryPrice * 100).toFixed(0)}c max`)
         return
       }
@@ -1007,74 +1236,189 @@ export class BtcUpDownStrategy extends BaseStrategy {
         return
       }
 
-      // Position sizing (fee-adjusted Kelly for crypto markets)
-      const positionSize = this.calculatePositionSize(signal.confidence, targetPrice)
+      // Determine maker mode before edge gate — fee rate affects required edge
+      const makerModeMap: Record<string, boolean> = {
+        '5m': settings.btcFiveMinMakerMode,
+        '15m': settings.btcFifteenMinMakerMode,
+        'hourly': settings.btcHourlyMakerMode,
+        '4h': settings.btcFourHourMakerMode,
+      }
+      const makerModeEnabled = makerModeMap[durationLabel] ?? false
+
+      // Circuit breaker: EdgeTracker blocks if realized edge is negative after 20+ trades
+      let edgeFeeRateBps = 0
+      if (!makerModeEnabled) {
+        try {
+          const { dynamicFeeService } = await import('@/services/trading/DynamicFeeService')
+          edgeFeeRateBps = dynamicFeeService.estimateDynamicFee(targetPrice, true).feeRateBps
+        } catch {
+          edgeFeeRateBps = 1000
+        }
+      }
+      if (!edgeTracker.shouldTrade('btc', edgeFeeRateBps)) {
+        console.log(`[BTC Gate] ${asset} ${durationLabel}: CIRCUIT BREAKER — realized edge negative after 20+ trades`)
+        rejectionTracker.record('edge_gate', 'btc', `${asset} circuit breaker: negative realized edge`)
+        return
+      }
+
+      // Calibrate signal confidence using historical win rates
+      const { btcCalibrationService } = await import('@/services/trading/BtcCalibrationService')
+      const calibratedConfidence = btcCalibrationService.calibrate(signal.confidence)
+
+      // Gate: edge over market — calibrated confidence must exceed market price + fees + margin
+      const effectiveFee = makerModeEnabled ? 0 : (edgeFeeRateBps / 10_000)
+      const minEdge = settings.btcMinEdgeOverMarket
+      const requiredConfidence = targetPrice + effectiveFee + minEdge
+      if (calibratedConfidence <= requiredConfidence) {
+        console.log(
+          `[BTC Gate] ${asset} ${durationLabel}: NO EDGE — ` +
+          `conf ${(calibratedConfidence * 100).toFixed(0)}% <= ` +
+          `market ${(targetPrice * 100).toFixed(0)}% + fee ${(effectiveFee * 100).toFixed(0)}% + edge ${(minEdge * 100).toFixed(0)}%`,
+        )
+        rejectionTracker.record('edge_gate', 'btc',
+          `${asset} conf ${(calibratedConfidence * 100).toFixed(0)}% <= required ${(requiredConfidence * 100).toFixed(0)}%`)
+        return
+      }
+
+      // Position sizing (fee-adjusted Kelly using calibrated confidence)
+      const positionSize = await this.calculatePositionSize(calibratedConfidence, targetPrice, makerModeEnabled)
 
       this.log(
         `SIGNAL: ${asset} ${signal.direction.toUpperCase()} ` +
         `@ ${(targetPrice * 100).toFixed(0)}c ` +
-        `(conf ${(signal.confidence * 100).toFixed(0)}%, $${positionSize.toFixed(2)})`,
+        `(raw ${(signal.confidence * 100).toFixed(0)}% → cal ${(calibratedConfidence * 100).toFixed(0)}%, $${positionSize.toFixed(2)})`,
       )
 
       // Execute trade
       // TradingService.placeBet() expects 'yes'/'no' but we pass explicit outcomeIndex
       // which overrides the yes/no mapping. Map index 0 → 'yes', index 1 → 'no'.
       const outcomeStr: 'yes' | 'no' = targetIndex === 0 ? 'yes' : 'no'
+      // PostOnly maker orders MUST be priced at or below the best bid to avoid
+      // "crosses book" rejection. Using mid-offset can cross when spreads are tight.
+      // Read the actual best bid from CLOB WebSocket; fall back to mid - offset.
+      let makerLimitPrice: number | undefined
+      if (makerModeEnabled) {
+        const tokenId = this.marketOutcomeTokenIds.get(market.id)?.[targetIndex]
+        const pd = tokenId ? this.realtimeServiceRef?.getPrice(tokenId) : null
+        const bestBid = pd && pd.bid > 0 ? pd.bid : 0
+        const makerOffset = isFifteenMin ? 0.01 : 0.03
+        // Use best bid if available (guaranteed below ask); fall back to mid - offset
+        makerLimitPrice = bestBid > 0
+          ? Math.max(0.01, bestBid)
+          : Math.max(0.01, targetPrice - makerOffset)
+      }
+
       const result = await tradingService.placeBet(
         market,
         outcomeStr,
         positionSize,
-        {
-          skipGtcFallback: false,
-          outcomeIndex: targetIndex,
-          stopLossPercent: this.btcConfig.stopLossPercent,
-          takeProfitPercent: this.btcConfig.takeProfitPercent,
-          strategy: 'btc',
-        },
+        makerModeEnabled
+          ? {
+              skipGtcFallback: true,
+              outcomeIndex: targetIndex,
+              stopLossPercent: this.btcConfig.stopLossPercent,
+              takeProfitPercent: this.btcConfig.takeProfitPercent,
+              strategy: 'btc',
+              orderType: 'GTC',
+              postOnly: true,
+              limitPrice: makerLimitPrice,
+            }
+          : {
+              skipGtcFallback: false,
+              outcomeIndex: targetIndex,
+              stopLossPercent: this.btcConfig.stopLossPercent,
+              takeProfitPercent: this.btcConfig.takeProfitPercent,
+              strategy: 'btc',
+            },
       )
 
       if (!result.success) {
         const isFokKill = result.error?.includes("couldn't be fully filled") || result.error?.includes('FOK')
+        const isPostOnlyReject = result.error?.includes('post only') || result.error?.includes('post_only') || result.error?.includes('post-only') || result.error?.includes('crosses book')
         if (isFokKill) {
           activityLogger.logWarning(`BTC ${asset} FOK killed (thin book): ${result.error}`)
+        } else if (isPostOnlyReject) {
+          activityLogger.logWarning(`BTC ${asset} maker order rejected (would cross spread): ${result.error}`)
         } else {
           activityLogger.logError(`BTC ${asset} trade failed: ${result.error}`)
         }
         return
       }
 
+      // For maker mode GTC orders, hand off to GtcOrderManager for fill tracking
+      if (makerModeEnabled && result.success && result.orderId) {
+        import('./../../services/trading/GtcOrderManager').then(({ gtcOrderManager }) => {
+          const scaledMaxHold = Math.round(this.btcConfig.maxHoldMs * timeScale)
+          gtcOrderManager.trackOrder({
+            orderId: result.orderId!,
+            marketSlug: market.slug,
+            outcome: outcomeStr,
+            question: market.question,
+            side: 'BUY',
+            price: makerLimitPrice!,
+            size: positionSize / makerLimitPrice!,
+            costBasis: positionSize,
+            strategy: 'btc',
+            stopLossPercent: this.btcConfig.stopLossPercent,
+            takeProfitPercent: this.btcConfig.takeProfitPercent,
+            placedAt: Date.now(),
+            expiresAt: 0,  // GTC has no expiry
+            status: 'pending',
+            tokenId: market.clobTokenIds?.[targetIndex],
+            maxHoldMs: scaledMaxHold,
+          })
+        }).catch(err => console.warn('[BtcUpDown] GtcOrderManager track failed:', err))
+      }
+
       // Record success
       activityLogger.logTrade(
-        `${asset} ${signal.direction.toUpperCase()} $${positionSize.toFixed(2)}`,
+        `${asset} ${signal.direction.toUpperCase()} $${positionSize.toFixed(2)}${makerModeEnabled ? ' (maker)' : ''}`,
         { marketId: market.id, orderId: result.orderId },
       )
       this.positionsByWindow.set(market.id, (this.positionsByWindow.get(market.id) ?? 0) + 1)
       this.lastTradeTimes.set(market.id, Date.now())
 
       // Track with PLM (dynamic import for circular dep safety)
-      // Fetch per-token fee rate so PLM adjusts TP threshold correctly
-      // (crypto markets charge 1000 bps = 10%, not the default 2%)
-      const filledSize = result.filledSize ?? positionSize / targetPrice
-      const scaledMaxHold = Math.round(this.btcConfig.maxHoldMs * timeScale)
-      import('@/services/trading/PositionLifecycleManager').then(m => {
-        m.positionLifecycleManager.trackPosition({
-          marketSlug: market.slug,
-          outcome: targetIndex === 0 ? 'yes' : 'no',
-          question: market.question,
-          entryPrice: targetPrice,
-          size: filledSize,
-          costBasis: positionSize,
-          entryTime: Date.now(),
-          stopLossPercent: this.btcConfig.stopLossPercent,
-          takeProfitPercent: this.btcConfig.takeProfitPercent,
-          strategy: 'btc',
-          maxHoldMs: scaledMaxHold,
-        })
-      }).catch(err => console.warn('[BtcUpDown] PLM track failed:', err))
+      // For pending GTC/maker orders, GtcOrderManager handles PLM handoff on fill.
+      // Only track immediately for orders that filled now (FOK/taker).
+      if (!result.pending) {
+        const filledSize = result.filledSize ?? positionSize / targetPrice
+        const scaledMaxHold = Math.round(this.btcConfig.maxHoldMs * timeScale)
+
+        // Early exit: use real TP% + accurate taker fee so PLM sells before resolution
+        const { btcEarlyExitEnabled, btcEarlyExitTPPercent } = useSettingsStore.getState()
+        const effectiveTP = btcEarlyExitEnabled ? btcEarlyExitTPPercent : this.btcConfig.takeProfitPercent
+        let exitFeeBps: number | undefined
+        if (btcEarlyExitEnabled) {
+          try {
+            const { dynamicFeeService } = await import('@/services/trading/DynamicFeeService')
+            exitFeeBps = dynamicFeeService.estimateDynamicFee(targetPrice, true).feeRateBps
+          } catch { exitFeeBps = 1000 }
+        }
+
+        import('@/services/trading/PositionLifecycleManager').then(m => {
+          m.positionLifecycleManager.trackPosition({
+            marketSlug: market.slug,
+            outcome: targetIndex === 0 ? 'yes' : 'no',
+            question: market.question,
+            entryPrice: targetPrice,
+            size: filledSize,
+            costBasis: positionSize,
+            entryTime: Date.now(),
+            stopLossPercent: this.btcConfig.stopLossPercent,
+            takeProfitPercent: effectiveTP,
+            strategy: 'btc',
+            tokenId: market.clobTokenIds?.[targetIndex],
+            maxHoldMs: scaledMaxHold,
+            ...(exitFeeBps != null && { takerFeeBps: exitFeeBps }),
+          })
+        }).catch(err => console.warn('[BtcUpDown] PLM track failed:', err))
+      }
 
       // Log trade for backtest
       const kellyFraction = useSettingsStore.getState().kellyFraction
-      const fStar = KellySizer.polymarketKellyWithFee(signal.confidence, targetPrice, 1000)
+      const logFeeBps = makerModeEnabled ? 0 : 1000
+      const fStar = KellySizer.polymarketKellyWithFee(signal.confidence, targetPrice, logFeeBps)
       tradeLogger.logEntry({
         marketId: market.id,
         slug: market.slug,
@@ -1097,6 +1441,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
         filledSize: result.filledSize,
         success: true,
         modelProbability: signal.confidence,
+        calibratedProbability: calibratedConfidence,
       })
 
       this.emit('tradePlaced', { market, signal, result })
@@ -1106,15 +1451,230 @@ export class BtcUpDownStrategy extends BaseStrategy {
   }
 
   // ==========================================
+  // CHAINLINK SNIPE EXECUTION
+  // ==========================================
+
+  /**
+   * Execute a last-window snipe using Chainlink-derived direction.
+   * Streamlined path: skip signal engine, skip LLM, skip cooldown.
+   * Uses FOK for speed (need fill NOW, not maker queue).
+   */
+  private async executeSnipe(
+    market: Market,
+    entry: { windowEndMs: number; windowDurationMs: number; windowOpenPrice: number; asset: string; durationKey: string },
+    snipe: { direction: 'up' | 'down'; confidence: number; chainlinkPrice: number },
+  ): Promise<void> {
+    try {
+      const asset = entry.asset as 'BTC' | 'ETH' | 'SOL' | 'XRP'
+
+      // Resolve outcome indices (same logic as analyzeAndTrade)
+      let upIndex: number, downIndex: number
+      const hasUpDown = market.outcomes.includes('Up') && market.outcomes.includes('Down')
+      const hasYesNo = market.outcomes.includes('Yes') && market.outcomes.includes('No')
+
+      if (hasUpDown) {
+        upIndex = market.outcomes.indexOf('Up')
+        downIndex = market.outcomes.indexOf('Down')
+      } else if (hasYesNo) {
+        const yesIndex = market.outcomes.indexOf('Yes')
+        const noIndex = market.outcomes.indexOf('No')
+        const questionMeansUp = market.question.toUpperCase().includes('UP')
+        upIndex = questionMeansUp ? yesIndex : noIndex
+        downIndex = questionMeansUp ? noIndex : yesIndex
+      } else {
+        return
+      }
+
+      const targetIndex = snipe.direction === 'up' ? upIndex : downIndex
+      const targetPrice = this.getLiveOutcomePrice(
+        this.marketOutcomeTokenIds.get(market.id)?.[targetIndex],
+        market.outcomePrices[targetIndex],
+      )
+
+      // Gate: max entry price (still respect — don't buy 90c outcomes)
+      if (targetPrice > this.btcConfig.maxEntryPrice) {
+        console.log(`[BTC SNIPE] ${asset}: price ${(targetPrice * 100).toFixed(0)}c > max ${(this.btcConfig.maxEntryPrice * 100).toFixed(0)}c — skip`)
+        return
+      }
+
+      // Gate: edge check — snipe confidence must exceed market price + fees
+      let feeBps = 0
+      try {
+        const { dynamicFeeService } = await import('@/services/trading/DynamicFeeService')
+        feeBps = dynamicFeeService.estimateDynamicFee(targetPrice, true).feeRateBps
+      } catch {
+        feeBps = 1000
+      }
+      const effectiveFee = feeBps / 10_000
+      if (snipe.confidence <= targetPrice + effectiveFee) {
+        console.log(
+          `[BTC SNIPE] ${asset}: NO EDGE — conf ${(snipe.confidence * 100).toFixed(0)}% <= ` +
+          `market ${(targetPrice * 100).toFixed(0)}% + fee ${(effectiveFee * 100).toFixed(0)}%`,
+        )
+        return
+      }
+
+      // Size: use Kelly but cap at 2x normal trade size for snipe aggressiveness
+      const positionSize = await this.calculatePositionSize(snipe.confidence, targetPrice, false)
+      const maxSnipeSize = this.btcConfig.tradeSize * 2
+      const snipeSize = Math.min(positionSize, maxSnipeSize)
+
+      this.log(
+        `SNIPE: ${asset} ${snipe.direction.toUpperCase()} @ ${(targetPrice * 100).toFixed(0)}c ` +
+        `$${snipeSize.toFixed(2)} (Chainlink $${snipe.chainlinkPrice.toFixed(2)} vs ref $${entry.windowOpenPrice.toFixed(2)}, ` +
+        `${Math.round((entry.windowEndMs - Date.now()) / 1000)}s left)`,
+      )
+
+      // Execute with FOK — need immediate fill, no time for maker queue
+      const outcomeStr: 'yes' | 'no' = targetIndex === 0 ? 'yes' : 'no'
+      const result = await tradingService.placeBet(
+        market,
+        outcomeStr,
+        snipeSize,
+        {
+          skipGtcFallback: false,
+          outcomeIndex: targetIndex,
+          stopLossPercent: this.btcConfig.stopLossPercent,
+          takeProfitPercent: this.btcConfig.takeProfitPercent,
+          strategy: 'btc',
+        },
+      )
+
+      if (!result.success) {
+        activityLogger.logWarning(`BTC SNIPE ${asset} failed: ${result.error}`)
+        return
+      }
+
+      activityLogger.logTrade(
+        `SNIPE ${asset} ${snipe.direction.toUpperCase()} $${snipeSize.toFixed(2)} (Chainlink ${Math.round((entry.windowEndMs - Date.now()) / 1000)}s before close)`,
+        { marketId: market.id, orderId: result.orderId },
+      )
+      this.positionsByWindow.set(market.id, (this.positionsByWindow.get(market.id) ?? 0) + 1)
+      this.lastTradeTimes.set(market.id, Date.now())
+
+      // PLM tracking — snipe positions use same early exit setting as regular entries
+      const filledSize = result.filledSize ?? snipeSize / targetPrice
+      const { btcEarlyExitEnabled: snipeEarlyExit, btcEarlyExitTPPercent: snipeEarlyTP } = useSettingsStore.getState()
+      const snipeEffectiveTP = snipeEarlyExit ? snipeEarlyTP : this.btcConfig.takeProfitPercent
+      let snipeFeeBps: number | undefined
+      if (snipeEarlyExit) {
+        try {
+          const { dynamicFeeService } = await import('@/services/trading/DynamicFeeService')
+          snipeFeeBps = dynamicFeeService.estimateDynamicFee(targetPrice, true).feeRateBps
+        } catch { snipeFeeBps = 1000 }
+      }
+      import('@/services/trading/PositionLifecycleManager').then(m => {
+        m.positionLifecycleManager.trackPosition({
+          marketSlug: market.slug,
+          outcome: outcomeStr,
+          question: market.question,
+          entryPrice: targetPrice,
+          size: filledSize,
+          costBasis: snipeSize,
+          entryTime: Date.now(),
+          stopLossPercent: this.btcConfig.stopLossPercent,
+          takeProfitPercent: snipeEffectiveTP,
+          strategy: 'btc',
+          tokenId: market.clobTokenIds?.[targetIndex],
+          maxHoldMs: Math.round(this.btcConfig.maxHoldMs),
+          ...(snipeFeeBps != null && { takerFeeBps: snipeFeeBps }),
+        })
+      }).catch(err => console.warn('[BtcUpDown] PLM track failed (snipe):', err))
+
+      // TradeLogger
+      tradeLogger.logEntry({
+        marketId: market.id,
+        slug: market.slug,
+        question: market.question,
+        outcomes: market.outcomes,
+        strategy: 'btc',
+        side: 'BUY',
+        outcome: outcomeStr,
+        marketPrice: targetPrice,
+        kellyFraction: 0,
+        kellyBetSize: 0,
+        actualBetSize: snipeSize,
+        orderId: result.orderId,
+        orderType: 'FOK',
+        fillPrice: result.avgPrice,
+        filledSize: result.filledSize,
+        success: true,
+        modelProbability: snipe.confidence,
+        calibratedProbability: snipe.confidence,
+      })
+
+      this.emit('tradePlaced', { market, signal: { direction: snipe.direction, confidence: snipe.confidence }, result })
+    } catch (error) {
+      this.logError(`Snipe execution failed for ${entry.asset}`, error)
+    }
+  }
+
+  // ==========================================
   // LLM CONFIRMATION GATE
   // ==========================================
 
   /**
    * LLM confirmation gate — asks LLM to verify a mechanical signal before trade.
-   * Only called for longer windows (hourly/daily/9pm) where latency is acceptable.
+   * Only called for longer windows (hourly/daily) where latency is acceptable.
    * Returns adjusted confidence or null to veto the trade.
    * Fail-open: returns original confidence on any error (network, budget, parse).
    */
+  /**
+   * Call LLM for independent directional prediction (no mechanical signal in prompt).
+   * Returns null on failure or cooldown (fail-open).
+   */
+  private async llmFusion(
+    asset: string,
+    signalInput: SignalInput,
+    durationLabel: string,
+  ): Promise<LLMDirectionSignal | null> {
+    // Per-market cooldown: 60s min between LLM calls
+    const cooldownKey = `${asset}-${durationLabel}`
+    const lastCall = this.lastLLMFusionCallTimes.get(cooldownKey) ?? 0
+    if (Date.now() - lastCall < 60_000) return null
+
+    try {
+      const { openRouterService } = await import('@/services/llm/OpenRouterService')
+      const { binanceWSService } = await import('@/services/realtime/BinanceWSService')
+
+      // Build prompt WITHOUT mechanical signal factors — independent opinion
+      const bws = binanceWSService.getCachedPrice(asset as 'BTC' | 'ETH' | 'SOL' | 'XRP')
+      let binanceSection = ''
+      if (bws) {
+        const range = bws.high24h - bws.low24h
+        const rangePct = bws.priceUSD > 0 ? (range / bws.priceUSD * 100).toFixed(1) : '?'
+        binanceSection = `
+24H CONTEXT:
+- ${asset}: $${bws.priceUSD.toLocaleString()} | 24h: ${bws.priceChange24hPct > 0 ? '+' : ''}${bws.priceChange24hPct.toFixed(1)}%
+- Range: $${bws.low24h.toLocaleString()} – $${bws.high24h.toLocaleString()} (${rangePct}%)
+- Volume: $${(bws.volume24hUSD / 1e9).toFixed(2)}B`
+      }
+
+      const displacement = ((signalInput.currentPrice - signalInput.windowOpenPrice) / signalInput.windowOpenPrice * 100).toFixed(3)
+
+      const prompt = `Predict whether ${asset} price will be ABOVE or BELOW the reference price when this window closes.
+
+WINDOW: ${durationLabel}
+- Current ${asset}: $${signalInput.currentPrice.toFixed(2)}
+- Reference price: $${signalInput.windowOpenPrice.toFixed(2)}
+- Displacement: ${displacement}%${binanceSection}
+
+Based on current price action and market context, will ${asset} finish ABOVE (up) or BELOW (down) the reference price?
+
+Respond ONLY with JSON:
+{"direction":"up|down","confidence":0-100,"reasoning":"1-2 sentences"}`
+
+      this.lastLLMFusionCallTimes.set(cooldownKey, Date.now())
+
+      const settings = useSettingsStore.getState()
+      const model = settings.btcLLMModel || undefined
+      return await openRouterService.predictCryptoDirection(prompt, model)
+    } catch (error) {
+      console.warn(`[llmFusion] ${asset} ${durationLabel} failed:`, error instanceof Error ? error.message : error)
+      return null
+    }
+  }
+
   private async llmConfirmation(
     asset: string,
     signal: Signal,
@@ -1259,29 +1819,40 @@ Respond ONLY with JSON:
    * - Regime boost: +10% confidence in trending markets
    * - RSI filter: -15% confidence when entering overbought/oversold
    */
-  private computeSignal(input: SignalInput): Signal {
-    // Compute live order flow imbalance from MicrostructureAnalyzer
-    let imbalanceScore = 0
-    try {
-      const { microstructureAnalyzer } = require('@/services/trading/MicrostructureAnalyzer')
-      const firstSlug = input.market.slug
-      if (firstSlug) {
-        const signal = microstructureAnalyzer.getSignal(firstSlug)
-        if (signal && signal.signalConfidence > 0.3) {
-          const isFirstUp = input.market.outcomes[0] === 'Up' || input.market.question.toUpperCase().includes('UP')
-          const adjustedSignal = isFirstUp ? signal.compositeSignal : -signal.compositeSignal
-          const direction = ((input.currentPrice - input.windowOpenPrice) / input.windowOpenPrice) >= 0 ? 'up' : 'down'
-          imbalanceScore = direction === 'up' ? adjustedSignal : -adjustedSignal
-        }
+  private async computeSignal(input: SignalInput): Promise<Signal> {
+    const imbalanceScore = 0
+
+    // Determine effective fee: maker mode = 0% fee, taker mode = dynamic fee from model
+    const settingsSnapshot = useSettingsStore.getState()
+    const windowDurationKey = Object.entries(WINDOW_DURATIONS).find(([, ms]) => ms === input.windowDurationMs)?.[0] ?? ''
+    const makerModeMap2: Record<string, boolean> = {
+      '5m': settingsSnapshot.btcFiveMinMakerMode,
+      '15m': settingsSnapshot.btcFifteenMinMakerMode,
+      'hourly': settingsSnapshot.btcHourlyMakerMode,
+      '4h': settingsSnapshot.btcFourHourMakerMode,
+    }
+    const makerActive = makerModeMap2[windowDurationKey] ?? false
+
+    let effectiveFeeRateBps = 0
+    if (!makerActive) {
+      // Use DynamicFeeService's calibrated quadratic curve instead of hardcoded 1000 bps.
+      // The dynamic fee varies by price level: ~315 bps at 50¢, ~75 bps at 10¢.
+      // Falls back to 1000 bps if DynamicFeeService import fails.
+      try {
+        const { dynamicFeeService } = await import('@/services/trading/DynamicFeeService')
+        const targetPrice = input.upPrice <= input.downPrice ? input.upPrice : input.downPrice
+        const feeEstimate = dynamicFeeService.estimateDynamicFee(targetPrice, true)
+        effectiveFeeRateBps = feeEstimate.feeRateBps
+      } catch {
+        effectiveFeeRateBps = 1000 // Legacy fallback: 10% flat
       }
-    } catch {
-      // MicrostructureAnalyzer not available — continue without
     }
 
     return _computeSignal(input, {
       regimeFilterEnabled: this.btcConfig.regimeFilterEnabled,
       rsiFilterEnabled: this.btcConfig.rsiFilterEnabled,
       baselineWindowMs: BASELINE_WINDOW_MS,
+      feeRateBps: effectiveFeeRateBps,
     }, imbalanceScore)
   }
 
@@ -1305,7 +1876,7 @@ Respond ONLY with JSON:
   // POSITION SIZING
   // ==========================================
 
-  private calculatePositionSize(confidence: number, marketPrice: number): number {
+  private async calculatePositionSize(confidence: number, marketPrice: number, makerModeActive: boolean): Promise<number> {
     const pennyMode = useSettingsStore.getState().pennyTraderMode
     // Polymarket CLOB requires minimum 5 shares per order
     if (pennyMode) return Math.max(1.0, 5 * marketPrice)
@@ -1316,15 +1887,97 @@ Respond ONLY with JSON:
 
     const bankroll = useWalletStore.getState().balance
     const kellyFraction = useSettingsStore.getState().kellyFraction
-    // Crypto markets have 1000 bps (10%) taker fee — use fee-adjusted Kelly
+
+    // Use dynamic fee rate: 0 for maker mode, DynamicFeeService for taker, 1000 fallback
+    let feeRateBps = 1000
+    if (makerModeActive) {
+      feeRateBps = 0
+    } else {
+      try {
+        const { dynamicFeeService } = await import('@/services/trading/DynamicFeeService')
+        feeRateBps = dynamicFeeService.estimateDynamicFee(marketPrice, true).feeRateBps
+      } catch { /* keep 1000 bps fallback */ }
+    }
+
     const adaptiveProb = edgeTracker.getAdaptiveModelProb('btc', confidence)
-    const fStar = KellySizer.polymarketKellyWithFee(adaptiveProb, marketPrice, 1000)
-    return Math.round(KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar }) * 100) / 100
+
+    // Monte Carlo Kelly: bootstrap-adjusted sizing when enabled and sufficient data
+    const useMC = useSettingsStore.getState().btcUseMonteCarloKelly
+    if (useMC) {
+      try {
+        const records = tradeLogger.getRecords(200)
+        const btcReturns = records
+          .filter(r => r.strategy === 'btc' && r.pnlUSD !== undefined)
+          .map(r => r.pnlUSD!)
+        if (btcReturns.length >= 30) {
+          const mc = KellySizer.monteCarloKelly({ returns: btcReturns, marketPrice, feeRateBps })
+          if (mc.adjustedFraction > 0) {
+            const mcSized = KellySizer.sizeBet({ kellyFraction: 1, bankroll, fullKelly: mc.adjustedFraction })
+            const volScalar = this.getVolatilityScalar()
+            const raw = Math.round(mcSized * volScalar * 100) / 100
+            return Math.max(raw, 1.0, 5 * marketPrice)
+          }
+        }
+      } catch { /* fall through to point-estimate Kelly */ }
+    }
+
+    const fStar = KellySizer.polymarketKellyWithFee(adaptiveProb, marketPrice, feeRateBps)
+    const sized = KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar })
+
+    // Volatility-based exposure cap: reduce size during high-vol periods
+    const volScalar = this.getVolatilityScalar()
+
+    // Floor at $1.00 (Polymarket minimum order size) to avoid repeated rejections.
+    // Also ensure minimum 5 shares (CLOB requirement).
+    const raw = Math.round(sized * volScalar * 100) / 100
+    const floored = Math.max(raw, 1.0, 5 * marketPrice)
+
+    // Cap to stay within RiskManager's per-market concentration limit.
+    // Without this, the 5-share floor can push small bankrolls past the limit.
+    const maxConcentration = 0.50  // Match RiskManager.maxPerMarketExposure default
+    const concentrationCap = Math.floor(bankroll * maxConcentration * 100) / 100
+    if (floored > concentrationCap) {
+      console.log(`[BTC Sizing] Capped $${floored.toFixed(2)} → $${concentrationCap.toFixed(2)} (${(maxConcentration * 100).toFixed(0)}% of $${bankroll.toFixed(2)})`)
+      return Math.max(concentrationCap, 1.0)
+    }
+    return floored
+  }
+
+  /**
+   * Compute a volatility scalar (0.25–1.0) from the high-frequency BinanceWS buffer.
+   * Uses 1-min return standard deviation over the last 30+ ticks.
+   * - Normal vol (sigma <= 0.001): 1.0 (no reduction)
+   * - High vol (sigma > 0.002): 0.50 (halve position)
+   * - Extreme vol (sigma > 0.003): 0.25 (quarter position)
+   */
+  private getVolatilityScalar(): number {
+    // Use BTC high-freq buffer as the volatility proxy (most liquid)
+    const buffer = this.highFreqPrices.get('BTC')
+    if (!buffer || buffer.length < 30) return 1.0
+
+    // Compute return std dev from last 30 ticks
+    const recent = buffer.slice(-30)
+    const returns: number[] = []
+    for (let i = 1; i < recent.length; i++) {
+      returns.push((recent[i].price - recent[i - 1].price) / recent[i - 1].price)
+    }
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length
+    const variance = returns.reduce((a, r) => a + (r - mean) ** 2, 0) / returns.length
+    const sigma = Math.sqrt(variance)
+
+    if (sigma > 0.003) return 0.25   // extreme vol: quarter size
+    if (sigma > 0.002) return 0.50   // high vol: half size
+    return 1.0
   }
 
   // ==========================================
   // DASHBOARD DATA API
   // ==========================================
+
+  /** Get high-frequency price buffer for an asset (used by AS pricer for vol estimation). */
+  getHighFreqPrices(asset: string): Array<{ price: number; timestamp: number }> {
+    return this.highFreqPrices.get(asset) ?? []
+  }
 
   /** Get the latest computed signal for an asset (for dashboard gauge display) */
   getLastSignal(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'): { signal: Signal; windowOpenPrice: number; currentPrice: number } | null {
@@ -1359,6 +2012,14 @@ Respond ONLY with JSON:
       windowDurationMs: entry.windowDurationMs,
       marketId: id,
     }))
+  }
+
+  /** Get the Market object for a given asset (for DualSideHedge cancel/replace) */
+  getActiveMarket(asset: string): Market | undefined {
+    for (const entry of this.activeMarkets.values()) {
+      if (entry.asset === asset) return entry.market
+    }
+    return undefined
   }
 
   // ==========================================

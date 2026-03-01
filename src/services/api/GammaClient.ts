@@ -49,6 +49,13 @@ function normalizeMarket(raw: any): Market {
  * Endpoint: https://gamma-api.polymarket.com
  */
 export class GammaClient extends BaseApiClient {
+  // Response caches — multiple strategies scan the same data every 15-60s.
+  // Short TTLs deduplicate redundant API calls while keeping data fresh.
+  private marketsCache: { key: string; data: Market[]; expiresAt: number } | null = null
+  private eventSlugCache = new Map<string, { data: GammaEvent | null; expiresAt: number }>()
+  private static MARKETS_CACHE_TTL_MS = 30_000
+  private static EVENT_CACHE_TTL_MS = 15_000
+
   constructor() {
     super(import.meta.env.VITE_GAMMA_API_URL || (import.meta.env.DEV ? '/api/gamma' : 'https://gamma-api.polymarket.com'), {
       maxRequestsPerMinute: 100,
@@ -90,13 +97,27 @@ export class GammaClient extends BaseApiClient {
       params.set('next_cursor', cursor)
     }
 
+    // Check TTL cache — multiple strategies scan the same market list every 15-60s
+    const cacheKey = params.toString()
+    if (this.marketsCache && this.marketsCache.key === cacheKey && Date.now() < this.marketsCache.expiresAt) {
+      return this.marketsCache.data
+    }
+
     try {
       const response = await this.get<Market[] | GammaMarketsResponse>(`/markets?${params.toString()}`)
 
       // Handle both array response and object response
       const markets = Array.isArray(response) ? response : (response.markets || [])
+      const normalized = markets.map(normalizeMarket)
 
-      return markets.map(normalizeMarket)
+      // Cache the result
+      this.marketsCache = {
+        key: cacheKey,
+        data: normalized,
+        expiresAt: Date.now() + GammaClient.MARKETS_CACHE_TTL_MS,
+      }
+
+      return normalized
     } catch (error) {
       console.error('Failed to fetch markets:', error)
       throw error
@@ -129,16 +150,50 @@ export class GammaClient extends BaseApiClient {
     }
   }
 
+  /** Track whether /search has returned 401/403 so we skip it on subsequent calls */
+  private searchDisabled = false
+
   /**
-   * Search markets by query
+   * Search markets by query.
+   * Falls back to slug-based lookup via /markets if /search returns 401.
+   * After a single auth failure, skips /search entirely to avoid log spam.
    */
   async searchMarkets(query: string, limit = 20): Promise<Market[]> {
+    // If /search already failed with 401/403, go straight to slug fallback
+    if (this.searchDisabled) {
+      return this.getMarketsBySlug(query)
+    }
+
     try {
       const response = await this.get<{ markets?: Market[] }>(`/search?q=${encodeURIComponent(query)}&limit=${limit}`)
       // Normalize raw API response — /search returns JSON-string fields just like /events
       return (response.markets || []).map(normalizeMarket)
     } catch (error) {
+      // /search may require auth — fall back to slug-based lookup
+      const status = (error as { status?: number }).status
+      if (status === 401 || status === 403) {
+        console.warn(`[GammaClient] /search returned ${status}, permanently falling back to /markets?slug=`)
+        this.searchDisabled = true
+        return this.getMarketsBySlug(query)
+      }
       console.error('Failed to search markets:', error)
+      return []
+    }
+  }
+
+  /**
+   * Look up markets by exact slug via the /markets endpoint.
+   * This endpoint doesn't require auth, unlike /search.
+   */
+  async getMarketsBySlug(slug: string): Promise<Market[]> {
+    try {
+      const response = await this.get<Market[] | { markets?: Market[] }>(
+        `/markets?slug=${encodeURIComponent(slug)}`
+      )
+      const markets = Array.isArray(response) ? response : (response.markets || [])
+      return markets.map(normalizeMarket)
+    } catch (error) {
+      console.error(`[GammaClient] Failed to fetch market by slug ${slug}:`, error)
       return []
     }
   }
@@ -172,8 +227,9 @@ export class GammaClient extends BaseApiClient {
       const seenIds = new Set<string>()
 
       for (const event of events) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Gamma API event shape is loosely typed
         const markets = (event as any).markets || []
-        // Event-level negRisk flag applies to all child markets
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Gamma API negRisk field varies
         const eventNegRisk = Boolean((event as any).enableNegRisk ?? (event as any).negRisk ?? false)
         for (const raw of markets) {
           if (seenIds.has(raw.id)) continue
@@ -230,6 +286,10 @@ export class GammaClient extends BaseApiClient {
    * follow the pattern: {asset}-updown-15m-{windowStartUnix}
    */
   async getEventBySlug(slug: string): Promise<GammaEvent | null> {
+    // Check cache — usePolymarketPrices + strategies both call this for the same slug
+    const cached = this.eventSlugCache.get(slug)
+    if (cached && Date.now() < cached.expiresAt) return cached.data
+
     try {
       const response = await this.get<GammaEventsResponse | GammaEvent[]>(
         `/events?slug=${encodeURIComponent(slug)}`
@@ -243,6 +303,7 @@ export class GammaClient extends BaseApiClient {
       const event = events[0]
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rawMarkets = (event as any).markets || []
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Gamma API negRisk field varies
       const eventNegRisk = Boolean((event as any).enableNegRisk ?? (event as any).negRisk ?? false)
 
       // Normalize nested markets (same pattern as getActiveMarkets)
@@ -254,6 +315,7 @@ export class GammaClient extends BaseApiClient {
         return normalizeMarket(raw)
       })
 
+      this.eventSlugCache.set(slug, { data: event, expiresAt: Date.now() + GammaClient.EVENT_CACHE_TTL_MS })
       return event
     } catch (error) {
       console.error(`[GammaClient] Failed to fetch event by slug ${slug}:`, error)

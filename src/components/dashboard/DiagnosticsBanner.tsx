@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useSettingsStore, useWalletStore } from '@/stores'
 import { riskManager, rejectionTracker, readinessChecker, positionLifecycleManager } from '@/services/trading'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime/RealtimeService'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import type { RejectionSummary } from '@/services/trading/RejectionTracker'
@@ -56,7 +56,7 @@ export const DiagnosticsBanner: React.FC = () => {
     strategies,
     dryRun,
     rejections,
-    pmCredentials: polymarketUSClient.hasCredentials(),
+    pmCredentials: polymarketClient.hasCredentials(),
     wsConnected,
   })
 
@@ -156,6 +156,10 @@ function computeBanner(ctx: {
       severity: 'yellow',
       message: 'NO STRATEGIES ENABLED',
       detail: 'Enable and start strategies from the dropdown above.',
+      action: {
+        label: 'Enable Strategies',
+        onClick: () => window.dispatchEvent(new Event('open-strategy-dropdown')),
+      },
     }
   }
   if (!anyRunning && anyEnabled) {
@@ -180,7 +184,7 @@ function computeBanner(ctx: {
     return {
       severity: 'cyan',
       message: 'PM WS NOT CONFIGURED',
-      detail: 'Showing Binance spot prices. Add Polymarket US keys in Settings for live markets.',
+      detail: 'Showing Binance spot prices. Connect wallet in Settings for live markets.',
       action: {
         label: 'Settings',
         onClick: () => { window.location.hash = ''; window.location.pathname = '/settings' },
@@ -211,9 +215,9 @@ function computeBanner(ctx: {
       if (stalePositions.length > 0) {
         action = {
           label: `Clean ${stalePositions.length} Stale`,
-          onClick: () => {
+          onClick: async () => {
             for (const p of stalePositions) {
-              positionLifecycleManager.abandonPosition(p.tokenId)
+              await positionLifecycleManager.abandonPosition(p.marketSlug)
             }
           },
         }

@@ -5,7 +5,7 @@ import { walletService } from '@/services/wallet'
 
 interface WalletStore extends WalletState {
   // Actions
-  connect: (keyId: string, secretKey: string) => Promise<boolean>
+  connect: (seedPhrase: string) => Promise<boolean>
   disconnect: () => void
   syncBalances: () => Promise<void>
   startPolling: () => void
@@ -20,19 +20,20 @@ export const useWalletStore = create<WalletStore>()(
   persist(
     (set) => ({
       // Initial state
-      keyId: null,
+      address: null,
       isConnected: false,
       isConnecting: false,
       balance: 0,
       buyingPower: 0,
+      proxyAddress: null,
       lastSync: null,
       error: null,
 
       // Actions
-      connect: async (keyId: string, secretKey: string) => {
+      connect: async (input: string) => {
         set({ isConnecting: true, error: null })
 
-        const success = await walletService.connect(keyId, secretKey)
+        const success = await walletService.connectAuto(input)
         const state = walletService.getState()
 
         set({
@@ -46,7 +47,8 @@ export const useWalletStore = create<WalletStore>()(
       disconnect: () => {
         walletService.disconnect()
         set({
-          keyId: null,
+          address: null,
+          proxyAddress: null,
           isConnected: false,
           isConnecting: false,
           balance: 0,
@@ -83,8 +85,8 @@ export const useWalletStore = create<WalletStore>()(
     {
       name: 'alphapolybot-wallet',
       partialize: (state) => ({
-        // Only persist non-sensitive data (keyId is not secret, but secretKey is never stored)
-        keyId: state.keyId,
+        // Only persist the wallet address (seed phrase is in .env, not stored)
+        address: state.address,
       }),
     }
   )

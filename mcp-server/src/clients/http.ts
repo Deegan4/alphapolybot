@@ -79,7 +79,7 @@ export class HttpClient {
         if (!response.ok) {
           const errorText = await response.text().catch(() => '');
           const error = new Error(`HTTP ${response.status}: ${errorText}`);
-          (error as any).status = response.status;
+          (error as Record<string, unknown>).status = response.status;
 
           // Don't retry 4xx (client errors) except 429 (rate limit)
           if (response.status >= 400 && response.status < 500 && response.status !== 429) {
@@ -113,7 +113,8 @@ export class HttpClient {
         }
 
         // Don't retry non-retryable errors
-        if ((lastError as any)?.status >= 400 && (lastError as any)?.status < 500 && (lastError as any)?.status !== 429) {
+        const errStatus = (lastError as Record<string, unknown>)?.status as number | undefined;
+        if (errStatus && errStatus >= 400 && errStatus < 500 && errStatus !== 429) {
           throw lastError;
         }
 

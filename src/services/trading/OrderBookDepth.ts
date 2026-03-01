@@ -8,8 +8,7 @@
  * at the desired price level before committing capital.
  */
 
-import { polymarketUSClient } from '@/services/api'
-import type { OrderBook } from '@/types'
+import { polymarketClient } from '@/services/api'
 
 export interface DepthCheck {
   /** Whether sufficient liquidity exists at the target price */
@@ -33,17 +32,17 @@ export class OrderBookDepthAnalyzer {
    * Walks the ask side of the order book to determine how much
    * can fill at the target price ± slippage tolerance.
    *
-   * @param slug - The market slug
+   * @param tokenId - CLOB token ID (or slug — auto-detects and resolves)
    * @param orderSizeUSD - Desired order size in USD
    * @param maxSlippage - Maximum acceptable slippage (0.02 = 2%)
    * @returns DepthCheck with liquidity analysis
    */
   async checkBuyDepth(
-    slug: string,
+    tokenId: string,
     orderSizeUSD: number,
     maxSlippage = 0.02,
   ): Promise<DepthCheck> {
-    const book = await polymarketUSClient.getOrderBook(slug)
+    const book = await this.resolveOrderBook(tokenId)
     if (!book || book.asks.length === 0) {
       return {
         sufficient: false,
@@ -63,11 +62,11 @@ export class OrderBookDepthAnalyzer {
    * Walks the bid side of the order book.
    */
   async checkSellDepth(
-    slug: string,
+    tokenId: string,
     orderSizeShares: number,
     maxSlippage = 0.02,
   ): Promise<DepthCheck> {
-    const book = await polymarketUSClient.getOrderBook(slug)
+    const book = await this.resolveOrderBook(tokenId)
     if (!book || book.bids.length === 0) {
       return {
         sufficient: false,
@@ -88,11 +87,11 @@ export class OrderBookDepthAnalyzer {
    * Useful for Kelly-sizing cap: min(kellySize, maxFillable).
    */
   async getMaxFillableSize(
-    slug: string,
+    tokenId: string,
     side: 'BUY' | 'SELL',
     maxSlippage = 0.02,
   ): Promise<number> {
-    const book = await polymarketUSClient.getOrderBook(slug)
+    const book = await this.resolveOrderBook(tokenId)
     if (!book) return 0
 
     const levels = side === 'BUY' ? book.asks : book.bids
@@ -111,6 +110,20 @@ export class OrderBookDepthAnalyzer {
     }
 
     return totalFillable
+  }
+
+  /**
+   * Resolve a token ID or slug to an order book.
+   * Token IDs are all-numeric strings; slugs contain letters/hyphens.
+   */
+  private async resolveOrderBook(tokenIdOrSlug: string) {
+    // CLOB token IDs are long numeric strings (e.g. "108773396196930868...")
+    // Slugs contain letters/hyphens (e.g. "will-btc-go-up-5m-1234")
+    const isTokenId = /^\d+$/.test(tokenIdOrSlug)
+    if (isTokenId) {
+      return polymarketClient.getOrderBook(tokenIdOrSlug)
+    }
+    return polymarketClient.getOrderBookBySlug(tokenIdOrSlug)
   }
 
   /**

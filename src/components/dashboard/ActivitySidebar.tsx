@@ -85,6 +85,20 @@ export const ActivitySidebar: React.FC<{ collapsed?: boolean; onToggle?: () => v
     )
   }, [activities, filter])
 
+  // Collapse consecutive identical messages into groups
+  const groupedEntries = useMemo(() => {
+    const result: Array<typeof filtered[0] & { count: number }> = []
+    for (const entry of filtered) {
+      const prev = result[result.length - 1]
+      if (prev && prev.message === entry.message && prev.type === entry.type) {
+        prev.count++
+      } else {
+        result.push({ ...entry, count: 1 })
+      }
+    }
+    return result
+  }, [filtered])
+
   // Auto-scroll when new items arrive — scrolls to bottom so newest entry is visible
   useEffect(() => {
     const hasNewItems = filtered.length > prevCountRef.current
@@ -179,7 +193,7 @@ export const ActivitySidebar: React.FC<{ collapsed?: boolean; onToggle?: () => v
             </div>
           ) : (
             <div className="space-y-0.5">
-              {filtered.map((a) => (
+              {groupedEntries.map((a) => (
                 <div
                   key={a.id}
                   className="flex gap-1.5 py-0.5 leading-tight border-b border-agent-border/10 last:border-b-0 animate-fade-in"
@@ -192,6 +206,9 @@ export const ActivitySidebar: React.FC<{ collapsed?: boolean; onToggle?: () => v
                     className={`text-[10px] font-mono ${typeColor[a.type] || 'text-agent-text-muted'} break-all leading-snug`}
                   >
                     {a.message}
+                    {a.count > 1 && (
+                      <span className="ml-1 text-agent-text-label opacity-60">(×{a.count})</span>
+                    )}
                   </span>
                 </div>
               ))}

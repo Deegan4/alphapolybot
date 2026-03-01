@@ -1,13 +1,13 @@
 // ==========================================
-// POLYMARKET US — MARKET & TRADING TYPES
+// POLYMARKET — MARKET & TRADING TYPES
 // ==========================================
 
 export interface Market {
-  id: string            // numeric string (US API returns number, we normalize)
-  slug: string           // primary identifier for US API (e.g. "btc-100k-2025")
-  question: string       // mapped from title
+  id: string
+  slug: string
+  question: string
   description?: string
-  outcomes: string[]     // derived from event's markets (e.g. ['Yes', 'No'])
+  outcomes: string[]
   active: boolean
   closed: boolean
   endDate: string
@@ -21,9 +21,12 @@ export interface Market {
   resolutionSource?: string
   category?: string
   tags?: string[]
-  // US-specific
+  // CLOB identifiers
+  clobTokenIds?: string[]    // per-outcome CLOB token IDs (hex)
+  conditionId?: string       // market condition ID
+  negRisk?: boolean          // NegRisk market flag
+  // Legacy / compatibility
   eventSlug?: string
-  outcomeSlugs?: string[]   // per-outcome SDK market slugs (for BBO lookups)
   bestBid?: number
   bestAsk?: number
   spread?: number
@@ -32,7 +35,9 @@ export interface Market {
 }
 
 export interface OrderBook {
-  marketSlug: string
+  marketSlug?: string
+  marketId?: string       // CLOB market/condition ID
+  tokenId?: string        // CLOB token ID this book was fetched for
   bids: OrderBookEntry[]
   asks: OrderBookEntry[]
   lastUpdate: number
@@ -71,10 +76,10 @@ export interface PriceUpdate {
 
 export interface Order {
   id: string
-  marketSlug: string
+  marketSlug?: string
+  tokenId?: string           // CLOB token ID
   side: 'BUY' | 'SELL'
   type: 'FOK' | 'GTC' | 'GTD' | 'IOC'
-  intent: USOrderIntent
   price: number
   size: number
   filledSize?: number
@@ -87,15 +92,19 @@ export interface Order {
 }
 
 export interface OrderRequest {
-  marketSlug: string
-  outcome: 'yes' | 'no'
+  marketSlug?: string
+  tokenId?: string           // CLOB token ID (required for international CLOB)
+  outcome?: 'yes' | 'no'
   side: 'BUY' | 'SELL'
   price: number
   size: number
-  type?: 'FOK' | 'GTC' | 'GTD' | 'IOC'
-  expiration?: string   // ISO8601 for GTD goodTillTime
-  /** Post-only flag — participateDontInitiate in US API */
+  type?: 'FOK' | 'GTC' | 'GTD' | 'IOC' | 'FAK'
+  negRisk?: boolean          // NegRisk flag for EIP-712 domain selection
+  expiration?: string | number   // ISO8601 for GTD or Unix timestamp
+  /** Post-only flag */
   postOnly?: boolean
+  /** Deferred execution (CLOB) */
+  deferExec?: boolean
   /** Internal: marks retry — prevents infinite loops */
   _retried?: boolean
 }
@@ -103,6 +112,7 @@ export interface OrderRequest {
 export interface OrderResult {
   success: boolean
   orderId?: string
+  txHash?: string       // CLOB transaction hash
   error?: string
   filledSize?: number
   avgPrice?: number
@@ -128,12 +138,15 @@ export interface PendingGtcOrder {
   price: number
   size: number
   costBasis: number           // USD locked
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool'
   stopLossPercent: number     // SL to apply when filled
   takeProfitPercent: number   // TP to apply when filled
   placedAt: number            // Date.now() at placement
   expiresAt: number           // Unix timestamp (ms) — matches goodTillTime
   status: 'pending' | 'filled' | 'cancelled' | 'expired'
+  tokenId?: string            // CLOB token ID (passed to PLM on fill for WS subscribe)
+  maxHoldMs?: number          // Max hold duration for PLM (passed on fill)
+  takerFeeBps?: number        // Per-position taker fee for PLM
 }
 
 export interface Trade {
@@ -208,11 +221,13 @@ export interface AnalysisRecord {
 }
 
 export interface LLMConfig {
-  provider: 'openrouter' | 'openai' | 'anthropic'
+  provider: 'openrouter' | 'openai' | 'anthropic' | 'ollama'
   model: string
   temperature: number
   maxTokens: number
   webSearchEnabled: boolean
+  // Ollama — local model base URL (default: http://localhost:11434/v1)
+  ollamaBaseUrl?: string
   // Premium model tiering
   premiumModel?: string            // e.g. 'openai/gpt-4o' — empty = disabled
   premiumModelThreshold?: number   // min qualityScore to use premium (default: 25)
@@ -223,7 +238,7 @@ export interface LLMConfig {
 // STRATEGY TYPES
 // ==========================================
 
-export type StrategyType = 'mechanical' | 'ai' | 'arbitrage' | 'copy'
+export type StrategyType = 'mechanical' | 'ai' | 'arbitrage'
 export type StrategyStatus = 'idle' | 'running' | 'paused' | 'error'
 
 export interface StrategyStats {
@@ -361,9 +376,9 @@ export interface BtcUpDownConfig {
   // Window duration toggles
   enable5m: boolean            // Trade 5-minute windows (default true)
   enable15m: boolean           // Trade 15-minute windows (default true)
-  enableHourly: boolean        // Trade hourly windows (default false)
+  enableHourly: boolean        // Trade hourly windows (default true — primary focus)
+  enable4h: boolean            // Trade 4-hour windows (default true — primary focus)
   enableDaily: boolean         // Trade daily windows (default false)
-  enable9pm: boolean           // Trade 9PM ET daily events (default false)
   // Bet sizing
   tradeSize: number            // Fixed USDC per bet (default 2.0)
   useKellySizing: boolean      // Override tradeSize with Kelly (default true)
@@ -387,20 +402,8 @@ export interface BtcUpDownConfig {
   maxHoldMs: number            // Force exit before resolution (default 840000 = 14min) — auto-scaled for 5m
   // LLM confirmation
   useLLMConfirmation: boolean  // Use LLM to verify signals on hourly+ windows (default false)
-}
-
-export interface MicroMomentumConfig {
-  minCompositeSignal: number    // |compositeSignal| threshold to trade (default 0.4)
-  minSignalConfidence: number   // signalConfidence threshold (default 0.5)
-  maxSpreadFraction: number     // Reject wide-spread markets (default 0.08)
-  tradeSize: number             // USDC per trade (default 2.0, penny mode: $1)
-  scanIntervalMs: number        // Check signals every N ms (default 20000)
-  maxConcurrentPositions: number // Max simultaneous positions (default 3)
-  cooldownMs: number            // Per-market cooldown ms (default 60000)
-  stopLossPercent: number       // SL for positions (default 0.15)
-  takeProfitPercent: number     // TP for positions (default 0.20)
-  maxHoldMs: number             // Force exit after N ms (default 1800000 = 30min)
-  marketBatchSize: number       // Markets to track per scan (default 40)
+  // LLM signal fusion — independent LLM directional prediction fused with mechanical signal
+  useLLMFusion: boolean        // Enable LLM fusion (takes priority over confirmation) (default false)
 }
 
 // LLM Prediction specific types
@@ -434,73 +437,33 @@ export interface LLMPredictionConfig {
 }
 
 // ==========================================
-// POLYMARKET US — API RESPONSE TYPES
+// GAMMA API TYPES (market discovery)
 // ==========================================
 
-export interface USEvent {
-  id: number
+export interface GammaEvent {
+  id: string | number
   slug: string
   title: string
   description?: string
-  startTime?: string
-  endTime?: string
-  active: boolean
-  closed: boolean
-  archived?: boolean
-  featured?: boolean
-  liquidity?: number
-  volume?: number
-  markets?: USMarketDetail[]
-  tags?: Array<{ id: number; slug: string; label: string }>
-}
-
-export interface USMarketDetail {
-  id: number
-  slug: string
-  title: string
-  outcome: string        // e.g. "Yes", "No"
-  description?: string
+  startDate?: string
+  endDate?: string
   active: boolean
   closed: boolean
   liquidity?: number
   volume?: number
-  eventSlug?: string
+  markets?: Market[]
+  tags?: Array<{ id?: number; slug: string; label: string }>
+  enableNegRisk?: boolean
+  negRisk?: boolean
 }
 
-// ==========================================
-// POLYMARKET US — ORDER INTENT TYPES
-// ==========================================
-
-export type USOrderIntent =
-  | 'ORDER_INTENT_BUY_LONG'    // Buy YES
-  | 'ORDER_INTENT_SELL_LONG'   // Sell YES
-  | 'ORDER_INTENT_BUY_SHORT'   // Buy NO
-  | 'ORDER_INTENT_SELL_SHORT'  // Sell NO
-
-export type USOrderType = 'ORDER_TYPE_LIMIT' | 'ORDER_TYPE_MARKET'
-export type USTimeInForce =
-  | 'TIME_IN_FORCE_GOOD_TILL_CANCEL'
-  | 'TIME_IN_FORCE_GOOD_TILL_DATE'
-  | 'TIME_IN_FORCE_IMMEDIATE_OR_CANCEL'
-  | 'TIME_IN_FORCE_FILL_OR_KILL'
-
-/**
- * Maps (side, outcome) to a US API order intent.
- * US API price is always YES-side. For NO orders, API price = 1.0 - desired price.
- */
-export function resolveIntent(side: 'BUY' | 'SELL', outcome: 'yes' | 'no'): USOrderIntent {
-  if (side === 'BUY' && outcome === 'yes') return 'ORDER_INTENT_BUY_LONG'
-  if (side === 'SELL' && outcome === 'yes') return 'ORDER_INTENT_SELL_LONG'
-  if (side === 'BUY' && outcome === 'no') return 'ORDER_INTENT_BUY_SHORT'
-  return 'ORDER_INTENT_SELL_SHORT'
+export interface GammaMarketsResponse {
+  markets: Market[]
+  next_cursor?: string
 }
 
-/**
- * Convert a desired outcome price to the API YES-side price.
- * US API always quotes in YES terms.
- */
-export function toApiPrice(price: number, outcome: 'yes' | 'no'): number {
-  return outcome === 'yes' ? price : 1.0 - price
+export interface GammaEventsResponse {
+  events: GammaEvent[]
 }
 
 // ==========================================
@@ -611,7 +574,8 @@ export interface AdvancedSettings {
 // ==========================================
 
 export interface SpreadData {
-  marketSlug: string
+  marketSlug?: string
+  tokenId?: string
   bid: number
   ask: number
   spread: number
@@ -619,31 +583,52 @@ export interface SpreadData {
 }
 
 // ==========================================
-// WEBSOCKET PRIVATE CHANNEL TYPES (US API)
+// WEBSOCKET CHANNEL TYPES (CLOB)
 // ==========================================
 
-/** US WebSocket order execution event */
-export interface USOrderExecution {
-  id: string
-  orderId: string
-  marketSlug: string
-  side: string
-  intent: USOrderIntent
-  lastShares?: string
-  lastPx?: number
-  type: string         // ExecutionType
-  transactTime?: string
-  tradeId?: string
-  aggressor?: boolean
+/** CLOB WebSocket market price change event */
+export interface CLOBPriceChange {
+  asset_id: string       // token ID
+  price: string          // string decimal
+  best_bid?: string
+  best_ask?: string
+  changes?: Array<{ price: string; side: string; size: string }>
 }
 
-/** US WebSocket position update */
-export interface USPositionUpdate {
-  marketSlug: string
-  netPosition: string
-  cost: number
-  realized: number
-  cashValue?: number
+/** CLOB WebSocket trade event (user channel) */
+export interface CLOBTradeEvent {
+  id: string
+  asset_id: string
+  maker_address?: string
+  taker_address?: string
+  side: string
+  price: string
+  size: string
+  timestamp: string
+  status: string
+  trade_owner?: string
+  type?: string
+  /** Maker orders involved in this trade (for fill matching) */
+  maker_orders?: Array<{ order_id: string; matched_amount?: string; asset_id?: string }>
+  /** Market slug (if provided by server or resolved locally) */
+  market_slug?: string
+}
+
+/** CLOB WebSocket order event (user channel) */
+export interface CLOBOrderEvent {
+  id: string
+  asset_id: string
+  side: string
+  price: string
+  original_size: string
+  size_matched: string
+  status: string
+  maker_address?: string
+  timestamp?: string
+  /** Event type (e.g., 'CANCELLATION', 'PLACEMENT') */
+  event_type?: string
+  /** Order ID (may differ from id for some event shapes) */
+  order_id?: string
 }
 
 // ==========================================
@@ -670,79 +655,16 @@ export interface RTDSCryptoPricePayload {
   volume24h?: number
 }
 
-// ==========================================
-// MEAN REVERSION / COINBASE TYPES
-// ==========================================
-
-export interface MeanRevConfig {
-  enableBtc: boolean
-  enableEth: boolean
-  enableSol: boolean
-  lookbackPeriod: number        // Rolling window size (default 20)
-  entryZScore: number           // Z-score threshold to enter (default 2.0)
-  exitZScore: number            // Z-score threshold to exit (default 0.5)
-  bollingerMultiplier: number   // StdDev multiplier for bands (default 2.0)
-  tradeSize: number             // USD per trade (default 10.0)
-  scanIntervalMs: number        // Signal check interval (default 10_000)
-  maxConcurrentPositions: number // Per asset (default 1)
-  cooldownMs: number            // Per-symbol cooldown (default 60_000)
-  stopLossPercent: number       // Hard SL (default 0.03 = 3%)
-  takeProfitPercent: number     // Hard TP (default 0.02 = 2%)
-  maxHoldMs: number             // Force exit after N ms (default 3_600_000 = 1hr)
-}
-
-export interface SpotPosition {
-  symbol: string
-  side: 'LONG'
-  entryPrice: number
-  quantity: number
-  costBasis: number       // USD spent
-  entryTime: number
-  orderId?: string
-  currentPrice: number
-  unrealizedPnl: number
-  unrealizedPnlPercent: number
-}
-
-export interface MeanRevSignal {
-  symbol: string
-  action: 'buy' | 'sell' | 'hold'
-  zScore: number
-  mean: number
-  stdDev: number
-  upperBand: number
-  lowerBand: number
-  currentPrice: number
-  confidence: number      // 0-1 mapped from Z-score magnitude
-  timestamp: number
-}
-
-export interface CoinbaseOrderResult {
-  success: boolean
-  orderId?: string
-  productId?: string
-  side?: 'BUY' | 'SELL'
-  filledSize?: number
-  filledValue?: number
-  avgPrice?: number
-  status?: string
-  error?: string
-}
-
-export interface CoinbaseAccountBalance {
-  currency: string
-  available: number
-  hold: number
-  total: number
-}
-
-export interface CoinbaseCandle {
-  start: number     // Unix timestamp
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
+export interface DualSideConfig {
+  enabled: boolean
+  tradeSize: number           // USD total for both legs combined
+  biasRatio: number           // 0-1, fraction allocated to predicted winner
+  makerOnly: boolean          // postOnly=true on GTC orders
+  maxCombinedAsk: number      // reject if yesAsk + noAsk >= this
+  requireBothLegs: boolean    // cancel filled leg if other doesn't fill
+  limitPriceOffset: number    // cents below ask for maker status
+  maxWaitForFillMs: number    // fill timeout before cancel
+  minSignalConfidence: number // minimum signal.confidence to proceed
 }
 
 // ==========================================

@@ -89,7 +89,13 @@ export class HistoricalEnrichment {
         dayOfWeekWinRate,
       }
     } catch (err) {
-      console.warn('[HistoricalEnrichment] Failed to compute enrichment:', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      // Suppress full stack for known non-bug conditions (402 = credits exhausted)
+      if (msg.includes('402')) {
+        console.debug('[HistoricalEnrichment] Skipped — API credits exhausted')
+      } else {
+        console.warn('[HistoricalEnrichment] Failed to compute enrichment:', msg)
+      }
       return this.emptyEnrichment()
     }
   }

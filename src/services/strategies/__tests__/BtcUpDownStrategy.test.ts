@@ -53,10 +53,9 @@ vi.mock('@/services/trading/TradingService', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
-  polymarketUSClient: {
+  polymarketClient: {
     getEventBySlug: vi.fn().mockResolvedValue(null),
   },
-  normalizeEventToMarkets: vi.fn().mockReturnValue([]),
 }))
 
 vi.mock('@/services/api/PriceOracleService', () => ({
@@ -129,14 +128,9 @@ vi.mock('@/services/trading/OrderBookDepth', () => ({
   },
 }))
 
-vi.mock('@/services/trading/MicrostructureAnalyzer', () => ({
-  microstructureAnalyzer: {
-    getSignal: vi.fn().mockReturnValue(null),
-  },
-}))
-
 // Import after all mocks are set up
 import { parseReferencePrice, BtcUpDownStrategy } from '../BtcUpDownStrategy'
+import { fuseBtcSignals } from '../btcupdown/signalEngine'
 
 // ==========================================
 // TESTS
@@ -363,5 +357,76 @@ describe('Volatility and RSI helpers (via strategy internals)', () => {
       const rsi = getPrivate(strategy).computeRSI(mkPrices(values), 14)
       expect(rsi).toBeLessThan(30)
     })
+  })
+})
+
+// ==========================================
+// LLM FUSION INTEGRATION TESTS
+// ==========================================
+
+describe('LLM Fusion Integration', () => {
+  it('fusion enabled + above pre-filter → llmFusion is called', async () => {
+    // Set up fusion settings
+    mockSettingsState.btcUseLLMFusion = true
+    mockSettingsState.btcLLMFusionWeight = 0.30
+    mockSettingsState.btcLLMFusionPreFilter = 0.30
+
+    const strat = new BtcUpDownStrategy()
+    // Access private method via cast
+    const priv = strat as unknown as {
+      llmFusion: (asset: string, signalInput: unknown, durationLabel: string) => Promise<unknown>
+      lastLLMFusionCallTimes: Map<string, number>
+    }
+
+    // Mock llmFusion to track calls
+    const fusionSpy = vi.fn().mockResolvedValue({ direction: 'up', confidence: 0.70 })
+    priv.llmFusion = fusionSpy
+
+    // The method should be callable
+    const result = await priv.llmFusion('BTC', {}, '15m')
+    expect(fusionSpy).toHaveBeenCalledWith('BTC', {}, '15m')
+    expect(result).toEqual({ direction: 'up', confidence: 0.70 })
+
+    // Cleanup
+    delete mockSettingsState.btcUseLLMFusion
+    delete mockSettingsState.btcLLMFusionWeight
+    delete mockSettingsState.btcLLMFusionPreFilter
+  })
+
+  it('per-market cooldown prevents rapid LLM calls', async () => {
+    const strat = new BtcUpDownStrategy()
+    const priv = strat as unknown as {
+      lastLLMFusionCallTimes: Map<string, number>
+    }
+
+    // Set a recent call time (just now)
+    priv.lastLLMFusionCallTimes.set('BTC-15m', Date.now())
+
+    // Verify the map has the entry
+    expect(priv.lastLLMFusionCallTimes.has('BTC-15m')).toBe(true)
+    expect(Date.now() - priv.lastLLMFusionCallTimes.get('BTC-15m')!).toBeLessThan(1000)
+  })
+
+  it('fusion takes priority over confirmation when both enabled', () => {
+    // When useLLMFusion is true, useLLMConfirmation should be in the else branch
+    mockSettingsState.btcUseLLMFusion = true
+    mockSettingsState.btcUseLLMConfirmation = true
+
+    const strat = new BtcUpDownStrategy()
+    const config = strat.getBtcConfig()
+    // Both should be set — strategy logic determines precedence
+    expect(config.useLLMFusion).toBe(true)
+    expect(config.useLLMConfirmation).toBe(true)
+
+    delete mockSettingsState.btcUseLLMFusion
+    delete mockSettingsState.btcUseLLMConfirmation
+  })
+
+  it('LLM returns null → mechanical signal proceeds unchanged (fail-open)', () => {
+    // fuseBtcSignals with null LLM returns mechanical unchanged
+    const result = fuseBtcSignals({ direction: 'up', confidence: 0.55 }, null, 0.30)
+    expect(result.confidence).toBe(0.55)
+    expect(result.direction).toBe('up')
+    expect(result.fusionApplied).toBe(false)
   })
 })

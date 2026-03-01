@@ -59,8 +59,8 @@ export function loadConfig(): Config {
     binanceBaseUrl: getEnv('BINANCE_API_URL', 'https://api.binance.com/api/v3'),
     coingeckoBaseUrl: getEnv('COINGECKO_API_URL', 'https://api.coingecko.com/api/v3'),
 
-    polygonRpcUrl: getEnv('POLYGON_RPC_URL', 'https://polygon-rpc.com'),
-    polygonRpcFallback: getEnv('POLYGON_RPC_FALLBACK', 'https://rpc-mainnet.matic.network'),
+    polygonRpcUrl: getEnv('POLYGON_RPC_URL', 'https://polygon-bor-rpc.publicnode.com'),
+    polygonRpcFallback: getEnv('POLYGON_RPC_FALLBACK', 'https://polygon.llamarpc.com'),
     chainId: parseInt(getEnv('POLYMARKET_CHAIN_ID', '137'), 10),
 
     walletSeedPhrase: getEnv('WALLET_SEED_PHRASE') || null,

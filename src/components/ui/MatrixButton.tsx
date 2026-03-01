@@ -70,6 +70,7 @@ export const MatrixButton: React.FC<MatrixButtonProps> = ({
       whileTap={!isDisabled ? { scale: 0.97 } : undefined}
       whileHover={!isDisabled ? { scale: 1.02 } : undefined}
       transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- framer-motion props passthrough
       {...(props as any)}
     >
       {loading ? (

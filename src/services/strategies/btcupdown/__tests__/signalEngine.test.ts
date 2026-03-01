@@ -585,3 +585,75 @@ describe('computeOrderbookImbalance', () => {
     expect(topAll).toBeGreaterThan(top1)
   })
 })
+
+// ==========================================
+// RSI hard veto (two-tier filter)
+// ==========================================
+
+describe('RSI two-tier filter', () => {
+  it('hard vetoes when RSI > 80 and direction is up (confidence = 0)', () => {
+    // 25 monotonically rising prices → RSI = 100 (all gains, zero losses)
+    const prices: Array<{ price: number; timestamp: number }> = []
+    for (let i = 0; i < 25; i++) {
+      prices.push({ price: 60000 + i * 200, timestamp: i * 1000 })
+    }
+    const input = makeInput({
+      currentPrice: 64800,
+      windowOpenPrice: 60000,
+      recentPriceHistory: prices,
+    })
+    const signal = computeSignal(input, { ...defaultConfig, rsiFilterEnabled: true })
+    expect(signal.direction).toBe('up')
+    expect(signal.confidence).toBe(0)
+  })
+
+  it('hard vetoes when RSI < 20 and direction is down (confidence = 0)', () => {
+    // 25 monotonically falling prices → RSI = 0 (all losses, zero gains)
+    const prices: Array<{ price: number; timestamp: number }> = []
+    for (let i = 0; i < 25; i++) {
+      prices.push({ price: 70000 - i * 200, timestamp: i * 1000 })
+    }
+    const input = makeInput({
+      currentPrice: 65200,
+      windowOpenPrice: 70000,
+      recentPriceHistory: prices,
+    })
+    const signal = computeSignal(input, { ...defaultConfig, rsiFilterEnabled: true })
+    expect(signal.direction).toBe('down')
+    expect(signal.confidence).toBe(0)
+  })
+
+  it('graduated fade in 75-80 zone (confidence reduced but not zero)', () => {
+    // Need 20+ entries where RSI lands in [75, 80].
+    // Strategy: 6 flat prices then 15 points with 10 up +50, 4 down -40 → RSI ~75.8
+    const prices: Array<{ price: number; timestamp: number }> = []
+    // 6 flat entries to get above the 20-entry minimum
+    for (let i = 0; i < 6; i++) {
+      prices.push({ price: 65000, timestamp: i * 1000 })
+    }
+    // 15 more points with deltas targeting RSI ~76 (10 ups, 4 downs over 14 deltas)
+    let p = 65000
+    const deltas = [50, 50, -40, 50, 50, -40, 50, 50, -40, 50, 50, -40, 50, 50]
+    for (let i = 0; i < deltas.length; i++) {
+      p += deltas[i]
+      prices.push({ price: p, timestamp: (6 + i + 1) * 1000 })
+    }
+
+    // Verify our RSI is in the 75-80 zone (computeRSI uses last 15 entries)
+    const rsi = computeRSI(prices, 14)
+    expect(rsi).toBeGreaterThanOrEqual(75)
+    expect(rsi).toBeLessThanOrEqual(80)
+
+    // Need current price above window open for 'up' direction
+    const input = makeInput({
+      currentPrice: p,
+      windowOpenPrice: 65000,
+      recentPriceHistory: prices,
+    })
+    const withRSI = computeSignal(input, { ...defaultConfig, rsiFilterEnabled: true })
+    const noRSI = computeSignal(input, { ...defaultConfig, rsiFilterEnabled: false })
+    // Should be faded (< noRSI) but NOT zero
+    expect(withRSI.confidence).toBeLessThan(noRSI.confidence)
+    expect(withRSI.confidence).toBeGreaterThan(0)
+  })
+})

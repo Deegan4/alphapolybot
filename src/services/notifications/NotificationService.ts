@@ -147,8 +147,9 @@ export class NotificationService {
         body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
       })
       return res.ok
-    } catch {
-      console.warn('[NotificationService] Telegram send failed')
+    } catch (err) {
+      console.warn('[NotificationService] Telegram send failed:', err)
+      activityLogger.logWarning(`Telegram notification failed: ${err instanceof Error ? err.message : 'unknown'}`)
       return false
     }
   }
@@ -164,8 +165,9 @@ export class NotificationService {
         body: JSON.stringify({ content }),
       })
       return res.ok || res.status === 204
-    } catch {
-      console.warn('[NotificationService] Discord send failed')
+    } catch (err) {
+      console.warn('[NotificationService] Discord send failed:', err)
+      activityLogger.logWarning(`Discord notification failed: ${err instanceof Error ? err.message : 'unknown'}`)
       return false
     }
   }

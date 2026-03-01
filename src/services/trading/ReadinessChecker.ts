@@ -10,7 +10,7 @@
 
 import { useWalletStore } from '@/stores/walletStore'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 import { strategyManager } from '@/services/strategies'
 import { realtimeService } from '@/services/realtime'
 
@@ -49,17 +49,17 @@ class ReadinessCheckerService {
   getReport(): ReadinessReport {
     const checks: ReadinessCheck[] = []
 
-    // 1. PM US credentials connected
+    // 1. Wallet connected
     try {
       const walletState = useWalletStore.getState()
       checks.push({
         id: 'credentials',
-        label: 'PM US credentials',
+        label: 'Wallet connected',
         severity: 'critical',
         status: walletState.isConnected ? 'pass' : 'fail',
         detail: walletState.isConnected
-          ? `Key ID: ${walletState.keyId?.slice(0, 8)}...`
-          : 'No credentials configured',
+          ? `Address: ${walletState.address?.slice(0, 10)}...`
+          : 'No wallet connected',
         action: walletState.isConnected ? undefined : { label: 'Connect', route: '/settings' },
       })
 
@@ -67,10 +67,10 @@ class ReadinessCheckerService {
       const balance = walletState.balance ?? 0
       checks.push({
         id: 'usd_balance',
-        label: 'USD balance',
+        label: 'USDC.e balance',
         severity: 'critical',
         status: balance > 0 ? 'pass' : 'fail',
-        detail: balance > 0 ? `$${balance.toFixed(2)}` : 'No USD balance — deposit funds on polymarket.us',
+        detail: balance > 0 ? `$${balance.toFixed(2)}` : 'No USDC.e balance — deposit on Polygon',
         action: balance > 0 ? undefined : { label: 'Check balance', route: '/settings' },
       })
 
@@ -88,25 +88,25 @@ class ReadinessCheckerService {
     } catch {
       checks.push({
         id: 'credentials',
-        label: 'PM US credentials',
+        label: 'Wallet connected',
         severity: 'critical',
         status: 'fail',
         detail: 'Wallet store unavailable',
       })
     }
 
-    // 4. API credentials configured
+    // 4. CLOB API credentials derived
     {
-      const hasCreds = polymarketUSClient.hasCredentials()
+      const hasCreds = polymarketClient.hasCredentials()
       checks.push({
         id: 'api_creds',
-        label: 'API credentials',
+        label: 'CLOB API credentials',
         severity: 'critical',
         status: hasCreds ? 'pass' : 'fail',
         detail: hasCreds
-          ? 'Ed25519 key configured'
-          : 'Enter PM US Key ID + Secret in Settings',
-        action: hasCreds ? undefined : { label: 'Add credentials', route: '/settings' },
+          ? 'HMAC credentials derived from wallet'
+          : 'Connect wallet to derive CLOB API credentials',
+        action: hasCreds ? undefined : { label: 'Connect wallet', route: '/settings' },
       })
     }
 

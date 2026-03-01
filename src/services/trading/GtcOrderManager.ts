@@ -1,5 +1,5 @@
 import type { PendingGtcOrder } from '@/types'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
 
@@ -9,7 +9,7 @@ type OrderChangeCallback = (orders: PendingGtcOrder[]) => void
  * GTC Order Manager
  *
  * Tracks pending GTD (Good-Til-Date) limit orders that were submitted as
- * fallback when FOK orders were killed due to liquidity. Polls the PM US
+ * fallback when FOK orders were killed due to liquidity. Polls the CLOB
  * API for fill status and hands off to PLM on fill.
  *
  * Lifecycle: initialize() once from App.tsx, destroy() on teardown.
@@ -124,15 +124,16 @@ export class GtcOrderManager {
   }
 
   /**
-   * Poll PM US API for order status — batch via single getOpenOrders() call
+   * Poll CLOB API for order status — batch via single getOpenOrders() call
    */
   private async pollOrders(): Promise<void> {
     if (this.orders.size === 0) return
 
     try {
-      // Collect slugs for efficient batch query
-      const slugs = [...new Set([...this.orders.values()].map(o => o.marketSlug))]
-      const openOrders = await polymarketUSClient.getOpenOrders(slugs)
+      // Fetch all open orders (CLOB returns all for authenticated user)
+      const rawResponse = await polymarketClient.getOpenOrders()
+      // Defensive: API may return {orders:[...]} wrapper or non-array on error
+      const openOrders = Array.isArray(rawResponse) ? rawResponse : []
       const openOrderIds = new Set(openOrders.map(o => o.id))
 
       for (const [orderId, pending] of this.orders) {
@@ -160,6 +161,7 @@ export class GtcOrderManager {
     } catch (error) {
       // Poll failures are non-critical — will retry next interval
       console.warn('[GtcOrderManager] Poll failed:', error)
+      activityLogger.logWarning(`GTC order poll failed: ${error instanceof Error ? error.message : 'unknown'}`)
     }
   }
 
@@ -195,10 +197,13 @@ export class GtcOrderManager {
         stopLossPercent: order.stopLossPercent,
         takeProfitPercent: order.takeProfitPercent,
         strategy: order.strategy,
-        takerFeeBps: 10, // Flat 10bps on PM US
+        takerFeeBps: order.takerFeeBps ?? 10,
+        tokenId: order.tokenId,
+        maxHoldMs: order.maxHoldMs,
       })
     } catch (err) {
       console.warn('[GtcOrderManager] Failed to hand off to PLM:', err)
+      activityLogger.logWarning(`GTC order PLM handoff failed: ${err instanceof Error ? err.message : 'unknown'}`)
     }
 
     this.removeOrder(order.orderId)
@@ -222,14 +227,14 @@ export class GtcOrderManager {
    * Cancel all pending orders for a specific strategy
    * Called when a strategy is stopped
    */
-  async cancelAllForStrategy(strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'): Promise<number> {
+  async cancelAllForStrategy(strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool' | 'impulse'): Promise<number> {
     let cancelled = 0
 
     for (const [orderId, order] of this.orders) {
       if (order.strategy !== strategy || order.status !== 'pending') continue
 
       try {
-        await polymarketUSClient.cancelOrder(orderId, order.marketSlug)
+        await polymarketClient.cancelOrder(orderId)
       } catch {
         // Best-effort — the GTD will expire server-side anyway
       }
@@ -249,14 +254,11 @@ export class GtcOrderManager {
    * Cancel ALL pending orders (emergency stop)
    */
   async cancelAll(): Promise<number> {
-    // Batch cancel via API if we have slugs
-    const slugs = [...new Set([...this.orders.values()].filter(o => o.status === 'pending').map(o => o.marketSlug))]
-    if (slugs.length > 0) {
-      try {
-        await polymarketUSClient.cancelAllOrders(slugs)
-      } catch {
-        // Best-effort
-      }
+    // Batch cancel all open orders via API
+    try {
+      await polymarketClient.cancelAllOrders()
+    } catch {
+      // Best-effort
     }
 
     let cancelled = 0

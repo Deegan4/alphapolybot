@@ -128,4 +128,148 @@ export class KellySizer {
   static updateHighWaterMark(current: number, previousHWM: number): number {
     return Math.max(current, previousHWM)
   }
+
+  // ─────────────────────────────────────────────────────
+  // Monte Carlo Kelly — confidence-adjusted position sizing
+  // ─────────────────────────────────────────────────────
+
+  /**
+   * Bootstrap confidence interval for edge (mean return).
+   *
+   * Resamples the returns array N times, computes mean of each resample,
+   * and returns [lower, upper] percentile bounds.
+   *
+   * @param returns   Per-trade P&L values (dollars or fractions)
+   * @param confidence Confidence level (default 0.95 = 95% CI)
+   * @param nResamples Number of bootstrap resamples (default 5000)
+   * @param rng       Seeded random function for deterministic tests
+   */
+  static bootstrapEdgeCI(
+    returns: number[],
+    confidence = 0.95,
+    nResamples = 5000,
+    rng: () => number = Math.random,
+  ): [number, number] {
+    if (returns.length < 2) return [0, 0]
+
+    const n = returns.length
+    const means: number[] = new Array(nResamples)
+
+    for (let i = 0; i < nResamples; i++) {
+      let sum = 0
+      for (let j = 0; j < n; j++) {
+        sum += returns[Math.floor(rng() * n)]
+      }
+      means[i] = sum / n
+    }
+
+    means.sort((a, b) => a - b)
+    const alpha = (1 - confidence) / 2
+    const lowerIdx = Math.floor(alpha * nResamples)
+    const upperIdx = Math.floor((1 - alpha) * nResamples)
+
+    return [means[lowerIdx], means[upperIdx]]
+  }
+
+  /**
+   * Monte Carlo Kelly: confidence-adjusted position sizing via bootstrap resampling.
+   *
+   * Instead of trusting a point-estimate win rate, this method:
+   * 1. Computes raw Kelly from observed win rate
+   * 2. Bootstraps the return distribution to estimate CV (coefficient of variation) of edge
+   * 3. Adjusts Kelly by (1 - CV_edge) — higher uncertainty → smaller bet
+   * 4. Simulates N wealth paths to measure 95th percentile max drawdown
+   *
+   * Formula: f_empirical = f_kelly × (1 - min(CV_edge, 1))
+   *
+   * Returns adjustedFraction=0 with insufficient data (<10 trades).
+   */
+  static monteCarloKelly(params: {
+    returns: number[]       // Historical per-trade P&L (from TradeLogger)
+    marketPrice: number     // Current market price (for Kelly odds computation)
+    feeRateBps: number      // Taker fee in basis points
+    nResamples?: number     // Bootstrap resamples (default 5000)
+    nPaths?: number         // Drawdown simulation paths (default 1000)
+    rng?: () => number      // Seeded random for deterministic tests
+  }): MonteCarloKellyResult {
+    const {
+      returns,
+      marketPrice,
+      feeRateBps,
+      nResamples = 5000,
+      nPaths = 1000,
+      rng = Math.random,
+    } = params
+
+    // Insufficient data fallback
+    if (returns.length < 10) {
+      return { adjustedFraction: 0, rawKelly: 0, cvEdge: 1, confidenceInterval: [0, 0], drawdown95: 1 }
+    }
+
+    // 1. Point-estimate Kelly from observed win rate
+    const wins = returns.filter(r => r > 0).length
+    const winRate = wins / returns.length
+    const rawKelly = KellySizer.polymarketKellyWithFee(winRate, marketPrice, feeRateBps)
+
+    if (rawKelly <= 0) {
+      return { adjustedFraction: 0, rawKelly: 0, cvEdge: 1, confidenceInterval: [0, 0], drawdown95: 1 }
+    }
+
+    // 2. Bootstrap edge estimates to measure uncertainty
+    const n = returns.length
+    const edgeEstimates: number[] = new Array(nResamples)
+
+    for (let i = 0; i < nResamples; i++) {
+      let sumWins = 0
+      for (let j = 0; j < n; j++) {
+        if (returns[Math.floor(rng() * n)] > 0) sumWins++
+      }
+      edgeEstimates[i] = sumWins / n - marketPrice  // edge = p_estimated - cost
+    }
+
+    // 3. Coefficient of variation of edge
+    const meanEdge = edgeEstimates.reduce((a, b) => a + b, 0) / nResamples
+    let variance = 0
+    for (let i = 0; i < nResamples; i++) {
+      variance += (edgeEstimates[i] - meanEdge) ** 2
+    }
+    variance /= nResamples
+    const stdEdge = Math.sqrt(variance)
+    const cvEdge = meanEdge !== 0 ? Math.abs(stdEdge / meanEdge) : 1
+
+    // 4. Adjusted fraction: shrink by uncertainty
+    const adjustedFraction = Math.max(0, rawKelly * (1 - Math.min(cvEdge, 1)))
+
+    // 5. Confidence interval on raw returns
+    const ci = KellySizer.bootstrapEdgeCI(returns, 0.95, nResamples, rng)
+
+    // 6. Drawdown simulation — N paths using adjusted Kelly sizing
+    const maxDrawdowns: number[] = new Array(nPaths)
+    for (let p = 0; p < nPaths; p++) {
+      let wealth = 1.0
+      let peak = 1.0
+      let maxDD = 0
+      for (let t = 0; t < n; t++) {
+        const ret = returns[Math.floor(rng() * n)]
+        // Normalize return by market price for Kelly bet fraction
+        wealth *= (1 + adjustedFraction * (ret / marketPrice))
+        if (wealth > peak) peak = wealth
+        const dd = (peak - wealth) / peak
+        if (dd > maxDD) maxDD = dd
+      }
+      maxDrawdowns[p] = maxDD
+    }
+    maxDrawdowns.sort((a, b) => a - b)
+    const drawdown95 = maxDrawdowns[Math.floor(0.95 * nPaths)]
+
+    return { adjustedFraction, rawKelly, cvEdge, confidenceInterval: ci, drawdown95 }
+  }
+}
+
+export interface MonteCarloKellyResult {
+  adjustedFraction: number       // f_kelly × (1 - CV_edge), the recommended sizing fraction
+  rawKelly: number               // Point-estimate full Kelly (before confidence adjustment)
+  cvEdge: number                 // Coefficient of variation of edge estimates (higher = less certain)
+  confidenceInterval: [number, number]  // 95% CI on mean P&L
+  drawdown95: number             // 95th percentile max drawdown across simulated paths
 }

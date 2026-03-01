@@ -6,7 +6,7 @@ import { useWalletStore } from '@/stores/walletStore'
  */
 export function useWallet() {
   const {
-    keyId,
+    address,
     balance,
     buyingPower,
     isConnected,
@@ -20,7 +20,7 @@ export function useWallet() {
 
   return {
     // State
-    keyId,
+    address,
     balance,
     buyingPower,
     isConnected,
@@ -29,7 +29,7 @@ export function useWallet() {
     error,
 
     // Derived state
-    shortKeyId: keyId ? `${keyId.slice(0, 8)}...` : null,
+    shortAddress: address ? `${address.slice(0, 6)}...${address.slice(-4)}` : null,
 
     // Actions
     connect,

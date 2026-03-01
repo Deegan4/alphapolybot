@@ -10,7 +10,7 @@ import { HttpClient } from './http.js';
 import { appConfig } from '../config.js';
 import { initWallet, type WalletInfo } from '../auth/wallet.js';
 import { buildL1Headers, buildL2Headers, type ApiKeyCreds } from '../auth/clob-auth.js';
-import { buildSignedOrder, type OrderParams, type OrderPreview, type SignedOrderPayload } from '../auth/order-signer.js';
+import { buildSignedOrder, type OrderParams, type OrderPreview } from '../auth/order-signer.js';
 
 // ─── Client ─────────────────────────────────────────────────
 

@@ -11,7 +11,9 @@ import {
 import { useWalletStore } from '@/stores'
 import { useBalanceHistoryStore } from '@/stores/balanceHistoryStore'
 import { tradeLogger, positionLifecycleManager } from '@/services/trading'
+import { dataClient } from '@/services/api/DataClient'
 import type { BacktestSummary } from '@/services/trading/TradeLogger'
+import type { PortfolioSummary } from '@/types'
 
 export const PortfolioPanel: React.FC = () => {
   const balance = useWalletStore((s) => s.balance)
@@ -20,7 +22,9 @@ export const PortfolioPanel: React.FC = () => {
   const simulatedBalance = useBalanceHistoryStore((s) => s.simulatedBalance)
   const [summary, setSummary] = useState<BacktestSummary>(tradeLogger.getSummary())
   const [unrealizedPnl, setUnrealizedPnl] = useState(0)
+  const [apiSummary, setApiSummary] = useState<PortfolioSummary | null>(null)
 
+  // Bot stats — fast interval (5s)
   useEffect(() => {
     const tick = () => {
       setSummary(tradeLogger.getSummary())
@@ -31,14 +35,31 @@ export const PortfolioPanel: React.FC = () => {
     return () => clearInterval(id)
   }, [])
 
+  // All-source P&L from Polymarket Data API — slower interval (30s)
+  useEffect(() => {
+    const fetchApiPnl = async () => {
+      try {
+        const result = await dataClient.getPortfolioSummary()
+        if (result) setApiSummary(result)
+      } catch { /* graceful fallback — bot-only P&L still shows */ }
+    }
+    fetchApiPnl()
+    const id = setInterval(fetchApiPnl, 30_000)
+    return () => clearInterval(id)
+  }, [])
+
   const displayBalance = simulatedBalance > 0 ? simulatedBalance : balance
-  // Total PnL = realized (closed trades) + unrealized (open positions)
-  const todayPnl = summary.totalPnlUSD + unrealizedPnl
+  // Primary P&L: all-source (API) if available, otherwise bot-only
+  const botPnl = summary.totalPnlUSD + unrealizedPnl
+  const todayPnl = apiSummary ? apiSummary.totalPnl : botPnl
+  const hasApiData = apiSummary !== null
 
   const data = snapshots.map((s) => ({
     time: s.timestamp,
     balance: s.balance,
   }))
+
+  const isFlat = data.length >= 2 && data.every(d => d.balance === data[0].balance)
 
   const formatTime = (ts: number) => {
     const d = new Date(ts)
@@ -55,14 +76,28 @@ export const PortfolioPanel: React.FC = () => {
               Portfolio
             </div>
             <div className="text-2xl font-mono font-bold text-agent-text leading-tight">
-              ${displayBalance.toFixed(2)}
+              ${(displayBalance ?? 0).toFixed(2)}
             </div>
           </div>
           <div className="text-right">
-            <div className={`text-sm font-mono font-semibold ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
-              {todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)}
+            <div className={`text-sm font-mono font-semibold ${(todayPnl ?? 0) >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
+              {(todayPnl ?? 0) >= 0 ? '+' : ''}${(todayPnl ?? 0).toFixed(2)}
             </div>
-            <div className="text-[10px] text-agent-text-muted font-sans">today</div>
+            <div className="text-[10px] text-agent-text-muted font-sans">
+              {hasApiData ? (summary.totalTrades === 0 ? 'all trades (manual)' : 'all trades') : 'bot only'}
+            </div>
+            {/* Show bot P&L separately when API data dominates and bot has no trades */}
+            {hasApiData && summary.totalTrades === 0 && (
+              <div className="text-[9px] text-agent-text-label font-mono mt-0.5">
+                Bot: {botPnl >= 0 ? '+' : ''}${botPnl.toFixed(2)}
+              </div>
+            )}
+            {/* Show API total when bot has its own trades */}
+            {hasApiData && summary.totalTrades > 0 && (
+              <div className="text-[9px] text-agent-text-label font-mono mt-0.5">
+                All: {(apiSummary?.totalPnl ?? 0) >= 0 ? '+' : ''}${(apiSummary?.totalPnl ?? 0).toFixed(2)}
+              </div>
+            )}
           </div>
         </div>
 
@@ -81,13 +116,13 @@ export const PortfolioPanel: React.FC = () => {
           <div className="text-center">
             <div className="text-[9px] text-agent-text-muted font-sans uppercase">Avg</div>
             <div className={`text-xs font-mono font-semibold ${summary.avgPnlPerTrade >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
-              {summary.totalTrades > 0 ? `${summary.avgPnlPerTrade >= 0 ? '+' : ''}$${summary.avgPnlPerTrade.toFixed(2)}` : '--'}
+              {summary.totalTrades > 0 ? `${(summary.avgPnlPerTrade ?? 0) >= 0 ? '+' : ''}$${(summary.avgPnlPerTrade ?? 0).toFixed(2)}` : '--'}
             </div>
           </div>
           <div className="text-center">
             <div className="text-[9px] text-agent-text-muted font-sans uppercase">DD</div>
             <div className="text-xs font-mono font-semibold text-agent-red">
-              {summary.maxDrawdownPercent > 0 ? `-${summary.maxDrawdownPercent.toFixed(1)}%` : '--'}
+              {(summary.maxDrawdownPercent ?? 0) > 0 ? `-${(summary.maxDrawdownPercent ?? 0).toFixed(1)}%` : '--'}
             </div>
           </div>
         </div>
@@ -104,6 +139,11 @@ export const PortfolioPanel: React.FC = () => {
             data.length < 2 ? (
               <div className="h-full flex items-center justify-center text-agent-text-label text-[11px] font-mono">
                 Collecting data...
+              </div>
+            ) : isFlat ? (
+              <div className="h-full flex flex-col items-center justify-center text-center gap-1">
+                <span className="text-lg opacity-20">📈</span>
+                <span className="text-[11px] font-mono text-agent-text-label">Start trading to see your equity curve</span>
               </div>
             ) : (
               <ResponsiveContainer width={w} height={h}>

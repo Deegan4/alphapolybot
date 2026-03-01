@@ -11,6 +11,13 @@ import type { Market } from '@/types'
 // TYPES
 // ==========================================
 
+/** Price snapshot from a correlated asset for cross-asset signal */
+export interface CrossAssetSnapshot {
+  asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'
+  currentPrice: number
+  windowOpenPrice: number  // Price at start of the same window
+}
+
 export interface SignalInput {
   asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'
   currentPrice: number       // Live asset price from oracle
@@ -18,10 +25,12 @@ export interface SignalInput {
   upPrice: number            // Current Up outcome price (0-1)
   downPrice: number          // Current Down outcome price (0-1)
   timeIntoWindowMs: number   // Elapsed ms since window start
-  windowDurationMs: number   // 15 * 60 * 1000 or longer for 9PM events
+  windowDurationMs: number   // 15 * 60 * 1000 (or longer for hourly/daily)
   recentPriceHistory: Array<{ price: number; timestamp: number }>
   /** Optional long-term price history for dual-timeframe regime detection */
   recentPriceHistoryLongTerm?: Array<{ price: number; timestamp: number }>
+  /** Optional cross-asset snapshots for correlation signal */
+  crossAssets?: CrossAssetSnapshot[]
   market: Market
 }
 
@@ -31,6 +40,7 @@ export interface SignalFactors {
   timeDecay: number  // 0 to 1
   valueBet: number   // 0 to 1
   orderFlow: number  // -1 to 1
+  crossAsset: number // -1 to 1: correlated assets moving same direction boosts signal
   regime: 'choppy' | 'trending' | 'neutral'
   regimeEfficiency: number // 0-1 short-term efficiency ratio
   regimeEfficiencyLongTerm: number // 0-1 long-term efficiency (same as ST if no LT data)
@@ -48,6 +58,8 @@ export interface SignalEngineConfig {
   regimeFilterEnabled: boolean
   rsiFilterEnabled: boolean
   baselineWindowMs: number    // 900_000 for 15m
+  /** Taker fee in basis points — used for fee-aware confidence floor. Default 0 (disabled). */
+  feeRateBps?: number
 }
 
 // ==========================================
@@ -117,19 +129,45 @@ export function computeSignal(
   const targetPrice = direction === 'up' ? upPrice : downPrice
   const cheapness = Math.max(0, Math.min(1, 1 - targetPrice))
 
+  // === Factor 6: CROSS-ASSET CORRELATION ===
+  // When other crypto assets move in the same direction, it's more likely a
+  // macro move than asset-specific noise. Compute average directional agreement.
+  let crossAssetScore = 0
+  if (input.crossAssets && input.crossAssets.length > 0) {
+    let agreementSum = 0
+    let count = 0
+    for (const peer of input.crossAssets) {
+      if (peer.asset === input.asset) continue // skip self
+      const peerDelta = (peer.currentPrice - peer.windowOpenPrice) / peer.windowOpenPrice
+      // Agreement: same sign as our direction? Positive = correlated move
+      const agreement = direction === 'up' ? peerDelta : -peerDelta
+      // Normalize: typical crypto move ~0.5-2% in 15min → scale to [-1, 1]
+      agreementSum += Math.tanh(agreement * 100) // 1% move → tanh(1) ≈ 0.76
+      count++
+    }
+    crossAssetScore = count > 0 ? agreementSum / count : 0
+  }
+
   // === COMPOSITE with dynamic weights ===
-  const wMomentum = 0.25
-  const wVelocity = 0.25
-  const wTime     = 0.20
-  const wValue    = 0.15
-  const wFlow     = 0.15
+  // orderFlow only gets weight when imbalanceScore is actually provided (non-zero).
+  // Live strategy passes 0 (MicrostructureAnalyzer removed); BacktestRunner passes
+  // real orderbook imbalance. When flow=0, its 15% redistributes proportionally.
+  const hasCrossData = input.crossAssets && input.crossAssets.length > 0
+  const hasFlowData = imbalanceScore !== 0
+  const wMomentum = hasCrossData ? (hasFlowData ? 0.22 : 0.27) : (hasFlowData ? 0.25 : 0.30)
+  const wVelocity = hasCrossData ? (hasFlowData ? 0.22 : 0.27) : (hasFlowData ? 0.25 : 0.30)
+  const wTime     = hasFlowData ? 0.20 : 0.22
+  const wValue    = hasFlowData ? 0.15 : 0.18
+  const wFlow     = hasFlowData ? 0.15 : 0.00
+  const wCross    = hasCrossData ? 0.06 : 0.00
 
   const rawScore =
     momentumScore * wMomentum +
     velocityScore * wVelocity +
     timeDecayBoost * wTime +
     cheapness * wValue +
-    imbalanceScore * wFlow
+    imbalanceScore * wFlow +
+    crossAssetScore * wCross
 
   // Sqrt scaling: stretches [0, 0.5] → [0, 0.7]
   const amplifiedScore = Math.sign(rawScore) * Math.sqrt(Math.abs(rawScore))
@@ -153,9 +191,13 @@ export function computeSignal(
   }
 
   // === RSI FILTER ===
+  // Two tiers: hard veto at extreme RSI (>80/<20) prevents trading into obvious
+  // mean-reversion setups; graduated 15% fade in the 75-80/20-25 zone.
   const rsi = recentPriceHistory.length >= 20 ? computeRSI(recentPriceHistory, 14) : 50
   if (config.rsiFilterEnabled && recentPriceHistory.length >= 20) {
-    if ((rsi > 75 && direction === 'up') || (rsi < 25 && direction === 'down')) {
+    if ((rsi > 80 && direction === 'up') || (rsi < 20 && direction === 'down')) {
+      confidence = 0  // Hard veto: extreme RSI = mean-reversion territory
+    } else if ((rsi > 75 && direction === 'up') || (rsi < 25 && direction === 'down')) {
       confidence *= 0.85
     }
   }
@@ -167,6 +209,29 @@ export function computeSignal(
     confidence *= earlyPenalty
   }
 
+  // === LATE-WINDOW MOMENTUM AMPLIFIER ===
+  // When >60% into the window with strong directional momentum, the remaining
+  // time makes reversal less likely. Boost confidence proportional to both
+  // time elapsed and momentum strength — max +12% at end of window with
+  // perfect momentum alignment.
+  if (timeRatio > 0.60 && Math.abs(momentumScore) > 0.3) {
+    const lateBoost = (timeRatio - 0.60) / 0.40  // 0→1 over last 40% of window
+    const momentumStrength = Math.min(1, Math.abs(momentumScore))
+    confidence = Math.min(1, confidence * (1 + 0.12 * lateBoost * momentumStrength))
+  }
+
+  // === FEE-AWARE CONFIDENCE FLOOR ===
+  // With a 10% fee (1000 bps), we need p > 1/(1+b) where b = (0.90 - price)/price.
+  // Signals below this floor are guaranteed negative EV — zero them out so Kelly
+  // sizes them at $0 rather than losing money on a structurally unprofitable trade.
+  if (config.feeRateBps && config.feeRateBps > 0) {
+    const effectivePayout = 1.0 - config.feeRateBps / 10_000
+    const breakeven = targetPrice / effectivePayout  // min prob to break even
+    if (confidence < breakeven) {
+      confidence = 0  // Hard floor — no trade below breakeven
+    }
+  }
+
   return {
     direction,
     confidence,
@@ -176,6 +241,7 @@ export function computeSignal(
       timeDecay: timeDecayBoost,
       valueBet: cheapness,
       orderFlow: imbalanceScore,
+      crossAsset: crossAssetScore,
       regime,
       regimeEfficiency,
       regimeEfficiencyLongTerm,
@@ -356,6 +422,60 @@ export function linearRegressionSlope(
   const denom = n * sumXX - sumX * sumX
   if (Math.abs(denom) < 1e-12) return 0
   return (n * sumXY - sumX * sumY) / denom
+}
+
+// ==========================================
+// LLM SIGNAL FUSION
+// ==========================================
+
+/** Independent LLM directional prediction (no mechanical factors in prompt) */
+export interface LLMDirectionSignal {
+  direction: 'up' | 'down'
+  confidence: number  // 0-1
+}
+
+/**
+ * Fuse a mechanical signal with an independent LLM directional prediction.
+ *
+ * - **LLM null** → return mechanical unchanged, `fusionApplied: false`
+ * - **Agreement** (same direction): blend of weighted average + geometric mean, capped at 0.95
+ * - **Disagreement**: penalty proportional to LLM conviction × weight
+ * - **Direction always follows mechanical** (it has structural weight by default)
+ *
+ * @param mechanical   5-factor mechanical signal
+ * @param llm          Independent LLM prediction (null = skip fusion)
+ * @param llmWeight    LLM weight in blend (0-1, typically 0.30 = 70% mechanical / 30% LLM)
+ */
+export function fuseBtcSignals(
+  mechanical: Signal,
+  llm: LLMDirectionSignal | null,
+  llmWeight: number,
+): { direction: 'up' | 'down'; confidence: number; fusionApplied: boolean } {
+  if (!llm) {
+    return { direction: mechanical.direction, confidence: mechanical.confidence, fusionApplied: false }
+  }
+
+  const mechWeight = 1 - llmWeight
+  const mechConf = mechanical.confidence
+  const llmConf = llm.confidence
+  const agree = mechanical.direction === llm.direction
+
+  let confidence: number
+  if (agree) {
+    // Weighted average blended with geometric mean for agreement bonus
+    const weightedAvg = mechConf * mechWeight + llmConf * llmWeight
+    const geoMean = Math.sqrt(mechConf * llmConf)
+    confidence = 0.80 * weightedAvg + 0.20 * geoMean
+    confidence = Math.min(0.95, confidence)
+  } else {
+    // Penalty proportional to LLM conviction and its weight
+    confidence = mechConf * (1 - llmConf * llmWeight)
+  }
+
+  // Never go negative
+  confidence = Math.max(0, confidence)
+
+  return { direction: mechanical.direction, confidence, fusionApplied: true }
 }
 
 /**

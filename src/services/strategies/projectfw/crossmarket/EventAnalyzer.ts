@@ -1,6 +1,6 @@
 import type { Market } from '@/types'
 import type { MarketGroup } from './types'
-import { polymarketUSClient, normalizeEventToMarkets } from '@/services/api'
+import { polymarketClient } from '@/services/api'
 
 /**
  * EventAnalyzer
@@ -8,7 +8,7 @@ import { polymarketUSClient, normalizeEventToMarkets } from '@/services/api'
  * Events naturally group related markets (e.g., "2024 Pennsylvania Election"
  * contains candidate-specific markets that are mutually exclusive).
  *
- * Zero LLM cost — uses existing PolymarketUSClient.getEvents() data structure.
+ * Zero LLM cost — uses Gamma API event data structure.
  */
 export class EventAnalyzer {
   private groupCache: Map<string, MarketGroup> = new Map()
@@ -28,12 +28,12 @@ export class EventAnalyzer {
       return Array.from(this.groupCache.values())
     }
 
-    const events = await polymarketUSClient.getEvents({ active: true, limit: 100 })
+    const events = await polymarketClient.getEvents({ active: true, limit: 100 })
     const groups: MarketGroup[] = []
 
     for (const event of events) {
-      const normalized = normalizeEventToMarkets(event as any)
-      const active = normalized.filter(m => m.active && !m.closed)
+      // Gamma events have markets array directly
+      const active = (event.markets || []).filter(m => m.active && !m.closed)
       if (active.length < 2) continue
 
       const totalLiquidity = active.reduce((sum, m) => sum + m.liquidity, 0)

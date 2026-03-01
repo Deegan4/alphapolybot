@@ -14,7 +14,6 @@
 export type RejectionCategory =
   | 'confidence'
   | 'calibration'
-  | 'microstructure'
   | 'risk'
   | 'balance'
   | 'approval'
@@ -28,7 +27,7 @@ export type RejectionCategory =
 
 export interface RejectionEvent {
   category: RejectionCategory
-  strategy: string   // 'llm' | 'btc' | 'dip' | 'fw' | 'micro' | 'system'
+  strategy: string   // 'llm' | 'btc' | 'dip' | 'fw' | 'dual-side' | 'system'
   reason: string
   timestamp: number
 }
