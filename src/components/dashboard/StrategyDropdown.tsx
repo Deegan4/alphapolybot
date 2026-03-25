@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { strategyManager, type StrategyState } from '@/services/strategies'
+import { strategyManager, type StrategyState } from '@/services/strategies/StrategyManager'
 import { useSettingsStore } from '@/stores'
 
 interface StrategyDropdownProps {
@@ -9,7 +9,7 @@ interface StrategyDropdownProps {
 /** Short display labels for each strategy */
 const SHORT_NAMES: Record<string, string> = {
   'llm-prediction': 'LLM',
-  'btc-updown': 'BTC Up/Down',
+  'btc-updown': 'Crypto Up/Down',
   'project-fw': 'FW Arb',
   'dip-arb': 'Dip Arb',
   'dual-side': 'Dual-Side',
@@ -19,11 +19,11 @@ const SHORT_NAMES: Record<string, string> = {
 /** Subtitle descriptions for each strategy */
 const SUBTITLES: Record<string, string> = {
   'llm-prediction': 'AI analysis',
-  'btc-updown': '15m crypto',
+  'btc-updown': '1h/4h crypto (core)',
   'project-fw': 'Spread arb (rare)',
   'dip-arb': 'Dip arb (rare)',
-  'dual-side': 'Maker hedge',
-  'gabagool': 'Merge arb',
+  'dual-side': 'Maker hedge (needs Crypto Up/Down)',
+  'gabagool': 'Merge arb (needs Crypto Up/Down)',
 }
 
 /** Display order — most likely to trade first */
@@ -127,7 +127,7 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
       </div>
 
       {/* Strategy rows */}
-      <div className="py-1">
+      <div className="py-1 stagger-fade">
         {[...strategies].sort((a, b) => {
           const ai = STRATEGY_ORDER.indexOf(a.id)
           const bi = STRATEGY_ORDER.indexOf(b.id)
@@ -141,7 +141,7 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
             title={s.enabled ? `Disable ${s.name}` : `Enable ${s.name}`}
           >
             <div className="flex items-center gap-2">
-              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[s.status] || STATUS_DOT.idle}`} />
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[s.status] || STATUS_DOT.idle} ${s.status === 'running' ? 'dot-ping' : ''}`} />
               <div className="flex flex-col items-start">
                 <span className="text-xs font-mono text-agent-text leading-tight">
                   {SHORT_NAMES[s.id] || s.name}

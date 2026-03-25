@@ -301,6 +301,11 @@ export class TradeLogger {
     import('@/services/storage').then(({ indexedDBService }) => {
       indexedDBService.storeTradeRecord?.(record)
     }).catch(() => {})
+
+    // Dual-write to Supabase (fire-and-forget)
+    import('@/services/storage/SupabaseService').then(({ supabaseService }) => {
+      supabaseService.upsertTradeRecord(record)
+    }).catch(() => {})
   }
 }
 

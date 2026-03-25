@@ -30,7 +30,7 @@ export async function handleGetBalance(_args: {
 }): Promise<BalanceResult | { error: string }> {
   const ok = await clobClient.init();
   if (!ok) {
-    return { error: 'Wallet not configured — set VITE_WALLET_SEED_PHRASE in .env' };
+    return { error: 'Wallet not configured — set WALLET_SEED_PHRASE in .env or use secure runtime entry.' };
   }
 
   const info = clobClient.getWalletInfo();

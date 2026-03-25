@@ -22,7 +22,18 @@ export interface BinancePriceUpdate {
   source: 'binance-ws'
 }
 
+/** Binance aggTrade — individual trade with buyer/seller maker flag */
+export interface BinanceTradeUpdate {
+  symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'
+  price: number
+  quantity: number
+  quoteQuantity: number   // price × quantity (USD value)
+  isBuyerMaker: boolean   // true = sell aggressor (buyer was maker), false = buy aggressor
+  timestamp: number
+}
+
 type PriceCallback = (price: BinancePriceUpdate) => void
+type TradeCallback = (trade: BinanceTradeUpdate) => void
 type ConnectionCallback = (status: 'connected' | 'disconnected' | 'error') => void
 
 /** Binance mini ticker payload (24hr rolling window) */
@@ -38,7 +49,10 @@ interface MiniTickerEvent {
   E: number   // Event time
 }
 
-const STREAMS = ['btcusdt@miniTicker', 'ethusdt@miniTicker', 'solusdt@miniTicker', 'xrpusdt@miniTicker']
+const STREAMS = [
+  'btcusdt@miniTicker', 'ethusdt@miniTicker', 'solusdt@miniTicker', 'xrpusdt@miniTicker',
+  'btcusdt@aggTrade', 'ethusdt@aggTrade', 'solusdt@aggTrade', 'xrpusdt@aggTrade',
+]
 const STREAM_PATH = `/stream?streams=${STREAMS.join('/')}`
 
 // In dev, route through Vite's WebSocket proxy to avoid browser Origin-header rejections.
@@ -69,6 +83,7 @@ export class BinanceWSService {
 
   private prices = new Map<string, BinancePriceUpdate>()
   private priceCallbacks = new Set<PriceCallback>()
+  private tradeCallbacks = new Set<TradeCallback>()
   private connectionCallbacks = new Set<ConnectionCallback>()
 
   /**
@@ -173,6 +188,12 @@ export class BinanceWSService {
     return () => this.priceCallbacks.delete(callback)
   }
 
+  /** Subscribe to individual trade updates (aggTrade). Returns unsubscribe function. */
+  onTradeUpdate(callback: TradeCallback): () => void {
+    this.tradeCallbacks.add(callback)
+    return () => this.tradeCallbacks.delete(callback)
+  }
+
   /** Subscribe to connection status changes. Returns unsubscribe function. */
   onConnectionChange(callback: ConnectionCallback): () => void {
     this.connectionCallbacks.add(callback)
@@ -190,24 +211,33 @@ export class BinanceWSService {
     try {
       // Combined stream wraps each event: { stream: "ethusdt@miniTicker", data: { ... } }
       const envelope = JSON.parse(raw)
-      const data = envelope.data as MiniTickerEvent
-      if (!data || data.e !== '24hrMiniTicker') return
+      const data = envelope.data
+      if (!data) return
 
-      const symbol = PAIR_TO_SYMBOL[data.s]
+      // Route by event type
+      if (data.e === 'aggTrade') {
+        this.handleAggTrade(data)
+        return
+      }
+
+      if (data.e !== '24hrMiniTicker') return
+
+      const ticker = data as MiniTickerEvent
+      const symbol = PAIR_TO_SYMBOL[ticker.s]
       if (!symbol) return
 
-      const close = parseFloat(data.c)
-      const open = parseFloat(data.o)
+      const close = parseFloat(ticker.c)
+      const open = parseFloat(ticker.o)
       if (close <= 0) return
 
       const update: BinancePriceUpdate = {
         symbol,
         priceUSD: close,
         priceChange24hPct: open > 0 ? ((close - open) / open) * 100 : 0,
-        volume24hUSD: parseFloat(data.q) || 0,
-        high24h: parseFloat(data.h) || close,
-        low24h: parseFloat(data.l) || close,
-        timestamp: data.E || Date.now(),
+        volume24hUSD: parseFloat(ticker.q) || 0,
+        high24h: parseFloat(ticker.h) || close,
+        low24h: parseFloat(ticker.l) || close,
+        timestamp: ticker.E || Date.now(),
         source: 'binance-ws',
       }
 
@@ -218,6 +248,36 @@ export class BinanceWSService {
       }
     } catch {
       // Ignore malformed messages
+    }
+  }
+
+  /**
+   * Handle Binance aggTrade event — individual aggregated trades.
+   * Fields: { e: 'aggTrade', s: 'BTCUSDT', p: '97000.50', q: '0.001', m: true, T: 1234567890 }
+   * m = true means buyer was the maker → sell aggressor (taker sold into bid)
+   * m = false means seller was the maker → buy aggressor (taker bought from ask)
+   */
+  private handleAggTrade(data: Record<string, unknown>): void {
+    const pair = data.s as string
+    if (!pair) return
+    const symbol = PAIR_TO_SYMBOL[pair]
+    if (!symbol) return
+
+    const price = parseFloat(data.p as string)
+    const quantity = parseFloat(data.q as string)
+    if (price <= 0 || quantity <= 0) return
+
+    const trade: BinanceTradeUpdate = {
+      symbol,
+      price,
+      quantity,
+      quoteQuantity: price * quantity,
+      isBuyerMaker: Boolean(data.m),
+      timestamp: (data.T as number) || Date.now(),
+    }
+
+    for (const cb of this.tradeCallbacks) {
+      try { cb(trade) } catch (e) { console.error('[BinanceWS] Trade callback error:', e) }
     }
   }
 

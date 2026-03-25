@@ -38,3 +38,8 @@ https:/
 
 # Local Netlify folder
 .netlify
+
+# MLX fine-tuning artifacts
+training/
+*.gguf
+llama.cpp/

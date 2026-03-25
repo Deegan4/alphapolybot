@@ -8,8 +8,14 @@
 
 AlphaPolyBot is a **React-based client-side trading dashboard** with a sophisticated backend service layer for automated trading. The architecture follows strict separation between **UI rendering** and **trading services**, where services operate independently and asynchronously with their own state management.
 
+
 **Key Characteristics:**
-- Client-side only — no backend server (trades execute through public APIs)
+- Hybrid architecture: client and trusted backend service
+- Backend holds encrypted credentials and API keys (never stored client-side)
+- Backend performs server-side validation of trades (e.g., `validateTradeRequest()`, `executeOrder()`)
+- Backend maintains immutable audit log for all trade events (`auditLog` service)
+- Backend provides session management, rate limiting, and fraud detection middlewares
+- Sensitive operations (private key handling, trade execution) must happen server-side; client only presents authenticated requests to backend endpoints
 - Multi-service architecture with independent lifecycle management
 - Zustand stores for persistent UI state (settings, wallet, notifications)
 - Autonomous trading strategies running in parallel with independent ON/OFF controls
@@ -32,12 +38,20 @@ AlphaPolyBot is a **React-based client-side trading dashboard** with a sophistic
 - Depends on: Zustand stores, real-time services, API clients
 - Used by: React components throughout the application
 
+
 **State Management Layer (Zustand):**
 - Purpose: Persistent application state (settings, wallet, notifications, backtest results)
 - Location: `src/stores/`
 - Contains: `settingsStore`, `walletStore`, `backtestStore`, `notificationStore`, `balanceHistoryStore`
 - Depends on: None (standalone)
 - Used by: Components, services (read-only for settings), hooks
+
+**Sensitive Data Encryption:**
+- Sensitive fields (wallet addresses/balances, API keys, trading credentials) are encrypted before persisting to localStorage.
+- Encryption/decryption is handled by a storage adapter or middleware integrated into the zustand persist config for these stores.
+- Uses AES-GCM via Web Crypto, with a key derived from user authentication or a securely stored key (never hard-coded or stored in localStorage/source).
+- Handles migrations and decryption errors gracefully (fallback to re-auth or wipe).
+- Store initialization (persist config) uses the adapter so all reads/writes go through encryption.
 
 **Services Layer - API Clients:**
 - Purpose: HTTP API communication with Polymarket, Gamma, Binance, CoinGecko
@@ -122,11 +136,20 @@ AlphaPolyBot is a **React-based client-side trading dashboard** with a sophistic
 4. Strategies update internal market snapshots
 5. Hooks subscribe to price updates → trigger React re-renders
 
+
 **State Persistence:**
 
 - **Zustand stores:** Settings, wallet address/balances → persisted to localStorage automatically
-- **IndexedDB:** Trade records, activity logs, balance history → persisted via `indexedDBService`
-- **In-memory:** Strategy states, order registry, risk manager buckets → lost on refresh (but activity log restored)
+- **IndexedDB:** Trade records, activity logs, balance history, **critical runtime trading state** (order registry, RiskManager buckets, in-flight capital allocations) → persisted via `indexedDBService` on every change and shutdown
+- **In-memory:** Strategy states (hydrated from IndexedDB on startup)
+
+On app startup, the OrderRegistry and RiskManager components restore their full state from IndexedDB (using a versioned key/schema for migrations). After restoration, a reconciliation flow runs:
+
+- **ReconciliationService.startupReconcile:**
+   - Queries exchange APIs and wallet for open orders and balances
+   - Compares against persisted OrderRegistry and RiskManager buckets
+   - Reconciles differences: marks missing orders, reallocates/releases capital, and surfaces alerts
+   - Activity log restoration remains, but is now supplemented by persistent trading state and reconciliation so refreshes do not lose active trading state
 
 ## Key Abstractions
 
@@ -201,11 +224,23 @@ AlphaPolyBot is a **React-based client-side trading dashboard** with a sophistic
    - Binance WS down → fallback to HTTP polling
    - GTD fallback: FOK order expires → resubmit as GTD (if enabled)
 
+
 5. **Position Recovery:**
-   - PositionLifecycleManager hydrates from IndexedDB on refresh
-   - Stop-loss/take-profit orders continue executing even if browser crashes
+   - PositionLifecycleManager hydrates state from IndexedDB on refresh
+   - **Stop-loss/take-profit (SL/TP) logic only runs while the client (browser) is active.**
+   - There is a downtime gap: SL/TP orders will not trigger until the app restarts after a crash or browser close.
+   - For continuous execution, use one of:
+       - A 24/7 backend monitoring service
+       - Exchange-native stop-loss/take-profit orders via the CLOB API
+
 
 ## Cross-Cutting Concerns
+
+**Secure Storage and Environment Variables:**
+- OpenRouter API keys are stored unencrypted in localStorage via Zustand persistence ("Zustand" and "localStorage").
+- **Security Warning:** API keys in localStorage are exposed to XSS and browser DevTools.
+- Build-time environment variables (e.g., VITE_*) are bundled into the client and exposed; do not use for secrets.
+- Recommended mitigations: require per-session key entry or implement encryption with a user-provided passphrase.
 
 **Logging:**
 - Activity/event logging via `ActivityLogger` (central event bus)

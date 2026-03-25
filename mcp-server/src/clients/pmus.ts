@@ -129,13 +129,13 @@ export class PmusClient {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async placeOrder(params: Record<string, any>): Promise<any> {
     const sdk = this.requireAuth();
-    return sdk.orders.create(params);
+    return sdk.orders.create(params as any);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async previewOrder(params: Record<string, any>): Promise<any> {
     const sdk = this.requireAuth();
-    return sdk.orders.preview(params);
+    return sdk.orders.preview(params as any);
   }
 
   async cancelOrder(orderId: string, marketSlug: string): Promise<void> {

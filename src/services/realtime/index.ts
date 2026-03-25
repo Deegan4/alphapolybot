@@ -1,4 +1,5 @@
 export { RealtimeService, realtimeService } from './RealtimeService'
 export { UserChannelService, userChannelService } from './UserChannelService'
 export { RTDSService, rtdsService } from './RTDSService'
-export { BinanceWSService, binanceWSService } from './BinanceWSService'
+export { BinanceWSService, binanceWSService, type BinancePriceUpdate, type BinanceTradeUpdate } from './BinanceWSService'
+export { HyperliquidWSService, hyperliquidWSService } from './HyperliquidWSService'

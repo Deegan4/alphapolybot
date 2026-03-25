@@ -2,6 +2,18 @@
   command = "npm ci && npm run build"
   publish = "dist"
 
+# Security headers for all responses
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    X-XSS-Protection = "1; mode=block"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' wss://ws-subscriptions-clob.polymarket.com wss://ws-live-data.polymarket.com wss://stream.binance.com:9443 wss://api.hyperliquid.xyz https://api.telegram.org https://discord.com; img-src 'self' data:; frame-ancestors 'none';"
+
 # SPA redirect — all routes to index.html
 [[redirects]]
   from = "/*"

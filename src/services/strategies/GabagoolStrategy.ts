@@ -1,7 +1,7 @@
 /**
  * Gabagool Strategy — Direction-Agnostic Accumulation Merge Arbitrage
  *
- * Buys whichever side (YES or NO) of a BTC 15-min binary market is
+ * Buys whichever side (YES or NO) of a BTC binary market is
  * temporarily cheap, accumulating small maker-only positions across
  * the window. Tracks cost basis and locks profit when:
  *
@@ -16,17 +16,27 @@
  * - Multiple small entries per window, tracking running cost basis
  * - Balance-aware: caps imbalance to keep hedge tight
  * - Merges paired tokens on-chain via MergeService for instant recovery
+ *
+ * v2 Upgrades:
+ * - Multi-duration: 15m, 1h, 4h windows (configurable)
+ * - Order book depth-aware sizing: scales orders to available liquidity
+ * - Adaptive cheapness: widens threshold when ask sum is far below $1.00
+ * - Cross-window capital recycling: sells orphaned one-sided positions
+ * - Fill-rate feedback: EMA on fill latency adjusts limit price offset
+ * - Spread monitoring: skips tight-spread markets where maker fills are unlikely
  */
 
 import { BaseStrategy } from './BaseStrategy'
 import type { Market } from '@/types'
-import { ASSET_SLUG_PATTERNS } from './BtcUpDownStrategy'
+import { buildHourlySlug, ASSET_SLUG_PATTERNS } from './BtcUpDownStrategy'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import { useSettingsStore } from '@/stores/settingsStore'
 
 // ==========================================
 // TYPES
 // ==========================================
+
+export type GabagoolDuration = '15m' | '1h' | '4h'
 
 export interface GabagoolConfig {
   enabled: boolean
@@ -39,6 +49,11 @@ export interface GabagoolConfig {
   limitPriceOffset: number
   minWindowRemainingMs: number
   staleOrderMs: number
+  durations: GabagoolDuration[]
+  depthAwareSizing: boolean
+  adaptiveCheapness: boolean
+  fillRateFeedback: boolean
+  spreadMinWidth: number
 }
 
 export interface AccumulationFill {
@@ -57,6 +72,7 @@ export interface WindowAccumulator {
   yesTokenId: string
   noTokenId: string
   windowEndMs: number
+  duration: GabagoolDuration
   // Accumulation
   qtyYes: number
   qtyNo: number
@@ -74,13 +90,30 @@ export interface WindowAccumulator {
   stopped: boolean
 }
 
+/** Per-duration timing config */
+const DURATION_TIMING: Record<GabagoolDuration, { minWindowRemainingMs: number; staleOrderMs: number }> = {
+  '15m': { minWindowRemainingMs: 60_000, staleOrderMs: 15_000 },    // 1 min min remaining, 15s stale
+  '1h':  { minWindowRemainingMs: 300_000, staleOrderMs: 60_000 },   // 5 min min remaining, 60s stale
+  '4h':  { minWindowRemainingMs: 900_000, staleOrderMs: 120_000 },  // 15 min min remaining, 2m stale
+}
+
+// ==========================================
+// FILL RATE TRACKER
+// ==========================================
+
+interface FillRateState {
+  emaFillLatencyMs: number   // EMA of time from order placement to fill
+  totalFills: number
+  totalOrders: number
+}
+
 // ==========================================
 // STRATEGY
 // ==========================================
 
 export class GabagoolStrategy extends BaseStrategy {
   name = 'Gabagool Accumulator'
-  description = 'Direction-agnostic accumulation merge arb on BTC 15m markets'
+  description = 'Direction-agnostic accumulation merge arb on BTC markets'
   strategyType = 'mechanical' as const
 
   private accumulators = new Map<string, WindowAccumulator>()
@@ -91,6 +124,11 @@ export class GabagoolStrategy extends BaseStrategy {
   private realtimeServiceRef: any = null
   private tokenToMarketMap = new Map<string, { marketId: string; side: 'yes' | 'no' }>()
   private orderSideMap = new Map<string, 'yes' | 'no'>()  // orderId → side for fill attribution
+  private orderPlacedAt = new Map<string, number>()  // orderId → timestamp for fill latency
+
+  // Fill-rate feedback state (shared across all windows)
+  private fillRate: FillRateState = { emaFillLatencyMs: 5000, totalFills: 0, totalOrders: 0 }
+  private static readonly FILL_EMA_ALPHA = 0.3  // Weight of new observation
 
   // ==========================================
   // CONFIG
@@ -107,8 +145,13 @@ export class GabagoolStrategy extends BaseStrategy {
       minProfitMargin: s.gabagoolMinProfitMargin ?? 0.98,
       cooldownMs: s.gabagoolCooldownMs ?? 3000,
       limitPriceOffset: 0.01,
-      minWindowRemainingMs: 120_000,
-      staleOrderMs: 30_000,
+      minWindowRemainingMs: 300_000,
+      staleOrderMs: 60_000,
+      durations: s.gabagoolDurations ?? ['1h'],
+      depthAwareSizing: s.gabagoolDepthAwareSizing ?? false,
+      adaptiveCheapness: s.gabagoolAdaptiveCheapness ?? true,
+      fillRateFeedback: s.gabagoolFillRateFeedback ?? false,
+      spreadMinWidth: s.gabagoolSpreadMinWidth ?? 0.02,
     }
   }
 
@@ -124,7 +167,8 @@ export class GabagoolStrategy extends BaseStrategy {
     if (!this._enabled) return
     if (this._status === 'running') return
     this._status = 'running'
-    this.log('Gabagool strategy started — scanning for 15m BTC markets')
+    const config = this.gabagoolConfig
+    this.log(`Gabagool strategy started — durations: ${config.durations.join(', ')}`)
 
     // Connect to RealtimeService for live CLOB prices
     try {
@@ -167,6 +211,7 @@ export class GabagoolStrategy extends BaseStrategy {
     this.accumulators.clear()
     this.tokenToMarketMap.clear()
     this.orderSideMap.clear()
+    this.orderPlacedAt.clear()
     this.realtimeServiceRef = null
 
     this.log('Gabagool strategy stopped')
@@ -233,6 +278,9 @@ export class GabagoolStrategy extends BaseStrategy {
       acc.fills.push({ side, price, qty, cost, orderId, timestamp: Date.now() })
       acc.pendingOrderIds.delete(orderId)
 
+      // Update fill-rate feedback
+      this.updateFillRate(orderId)
+
       // Recompute derived fields
       this.recomputeDerived(acc)
 
@@ -242,6 +290,9 @@ export class GabagoolStrategy extends BaseStrategy {
       )
       this.emit('accumulationFill', { marketId: acc.marketId, side, price, qty, cost, pairCost: acc.pairCost })
 
+      // Hyperliquid hedge: when imbalance exceeds threshold, hedge the unpaired exposure
+      this.manageHedge(acc, side, cost).catch(err => this.log(`Hedge management failed: ${err}`))
+
       // Check profit lock
       if (acc.lockedProfit > 0 && !acc.stopped) {
         acc.stopped = true
@@ -249,13 +300,27 @@ export class GabagoolStrategy extends BaseStrategy {
         activityLogger.logTrade(`Gabagool PROFIT LOCKED: $${acc.lockedProfit.toFixed(2)}`)
         this.emit('profitLocked', { marketId: acc.marketId, profit: acc.lockedProfit, pairCost: acc.pairCost })
         this.attemptMerge(acc).catch(err => this.log(`Merge after profit lock failed: ${err}`))
+        // Close any open hedge — exposure is now paired
+        this.closeHedgeForAccumulator(acc.marketId).catch(() => {})
       }
 
       return // Found the accumulator, done
     }
   }
 
-  private recomputeDerived(acc: WindowAccumulator): void {
+  private updateFillRate(orderId: string): void {
+    const placedAt = this.orderPlacedAt.get(orderId)
+    if (!placedAt) return
+    this.orderPlacedAt.delete(orderId)
+
+    const latency = Date.now() - placedAt
+    this.fillRate.totalFills++
+    this.fillRate.emaFillLatencyMs =
+      GabagoolStrategy.FILL_EMA_ALPHA * latency +
+      (1 - GabagoolStrategy.FILL_EMA_ALPHA) * this.fillRate.emaFillLatencyMs
+  }
+
+  recomputeDerived(acc: WindowAccumulator): void {
     const minQty = Math.min(acc.qtyYes, acc.qtyNo)
     const maxQty = Math.max(acc.qtyYes, acc.qtyNo)
     const totalCost = acc.costYes + acc.costNo
@@ -263,6 +328,72 @@ export class GabagoolStrategy extends BaseStrategy {
     acc.pairCost = minQty > 0 ? totalCost / minQty : Infinity
     acc.lockedProfit = minQty > 0 ? minQty - totalCost : -totalCost
     acc.imbalance = maxQty > 0 ? Math.abs(acc.qtyYes - acc.qtyNo) / maxQty : 0
+  }
+
+  // ==========================================
+  // HYPERLIQUID HEDGE MANAGEMENT
+  // ==========================================
+
+  /** hedgeId per accumulator marketId */
+  private activeHedges = new Map<string, string>()
+
+  /**
+   * Open or close a Hyperliquid hedge based on current imbalance.
+   *
+   * When one side fills but the other hasn't, we have directional BTC exposure.
+   * Hedge on Hyperliquid to neutralize until the paired fill arrives.
+   */
+  private async manageHedge(acc: WindowAccumulator, fillSide: 'yes' | 'no', fillCostUSD: number): Promise<void> {
+    const config = this.gabagoolConfig
+
+    // Only hedge if imbalance exceeds threshold and we don't already have a hedge
+    if (acc.imbalance <= config.maxImbalance) {
+      // Imbalance is acceptable — close any existing hedge
+      if (this.activeHedges.has(acc.marketId)) {
+        await this.closeHedgeForAccumulator(acc.marketId)
+      }
+      return
+    }
+
+    // Already hedged for this accumulator
+    if (this.activeHedges.has(acc.marketId)) return
+
+    try {
+      const { hyperliquidHedgeService } = await import('@/services/trading/HyperliquidHedgeService')
+      if (!hyperliquidHedgeService.isReady()) return
+
+      // Determine hedge direction:
+      // If we filled YES (bullish BTC), we're long → hedge by shorting
+      // If we filled NO (bearish BTC), we're short → hedge by going long
+      const heavySide = acc.qtyYes > acc.qtyNo ? 'yes' : 'no'
+      const hedgeSide = heavySide === 'yes' ? 'short' : 'long'
+
+      // Hedge size = cost of the unpaired portion
+      const unpairedUSD = Math.abs(acc.costYes - acc.costNo)
+      if (unpairedUSD < 0.50) return  // Not worth hedging tiny amounts
+
+      const result = await hyperliquidHedgeService.openHedge('BTC', hedgeSide, unpairedUSD, acc.marketId)
+      if (result.success && result.hedgeId) {
+        this.activeHedges.set(acc.marketId, result.hedgeId)
+        this.log(`HEDGE OPENED: ${hedgeSide} BTC $${unpairedUSD.toFixed(2)} for ${acc.marketId} (imbal=${(acc.imbalance * 100).toFixed(0)}%)`)
+      }
+    } catch {
+      // Hedge service not available — proceed without hedge (original behavior)
+    }
+  }
+
+  private async closeHedgeForAccumulator(marketId: string): Promise<void> {
+    const hedgeId = this.activeHedges.get(marketId)
+    if (!hedgeId) return
+
+    try {
+      const { hyperliquidHedgeService } = await import('@/services/trading/HyperliquidHedgeService')
+      await hyperliquidHedgeService.closeHedge(hedgeId)
+      this.activeHedges.delete(marketId)
+      this.log(`HEDGE CLOSED for ${marketId}`)
+    } catch {
+      // Best effort — hedge will expire or be closed manually
+    }
   }
 
   // ==========================================
@@ -298,6 +429,10 @@ export class GabagoolStrategy extends BaseStrategy {
           if (acc.qtyYes > 0 && acc.qtyNo > 0) {
             this.attemptMerge(acc).catch(err => this.log(`Merge on eviction failed: ${err}`))
           }
+          // Attempt to sell orphaned one-sided positions
+          if ((acc.qtyYes > 0) !== (acc.qtyNo > 0)) {
+            this.recycleOrphanedPosition(acc).catch(err => this.log(`Recycle failed: ${err}`))
+          }
           // Log final stats
           if (acc.fills.length > 0) {
             activityLogger.logTrade(
@@ -314,7 +449,7 @@ export class GabagoolStrategy extends BaseStrategy {
         await this.evaluateAndOrder(acc)
       }
 
-      // 4. Cancel stale pending orders (older than 30s without fill)
+      // 4. Cancel stale pending orders (older than staleOrderMs without fill)
       await this.cancelStaleOrders()
 
     } catch (err) {
@@ -329,74 +464,164 @@ export class GabagoolStrategy extends BaseStrategy {
   // ==========================================
 
   private async discoverMarkets(): Promise<void> {
-    const prefix = ASSET_SLUG_PATTERNS['BTC']?.['15m']
-    if (!prefix) return
+    const config = this.gabagoolConfig
 
-    const intervalSec = 900 // 15 minutes
-    const nowSec = Math.floor(Date.now() / 1000)
-    const currentWindowStart = Math.floor(nowSec / intervalSec) * intervalSec
-    const nextWindowStart = currentWindowStart + intervalSec
+    for (const duration of config.durations) {
+      if (duration === '1h') {
+        await this.discoverHourlyMarkets()
+      } else {
+        await this.discoverSlugMarkets(duration)
+      }
+    }
+
+    // Also scan weather markets if enabled
+    await this.discoverWeatherMarkets()
+  }
+
+  /** Discover weather markets via WeatherMarketAdapter */
+  private async discoverWeatherMarkets(): Promise<void> {
+    try {
+      const { weatherMarketAdapter } = await import('./WeatherMarketAdapter')
+      const markets = weatherMarketAdapter.getActiveMarkets()
+
+      for (const m of markets) {
+        // Skip if already tracking, inactive, or no token IDs
+        if (this.accumulators.has(m.id)) continue
+        if (!m.active || m.closed) continue
+        if (!m.clobTokenIds || m.clobTokenIds.length < 2) continue
+
+        const windowEndMs = new Date(m.endDate).getTime()
+        // Weather markets typically resolve in 24h+ — use 1h timing
+        if (windowEndMs - Date.now() < DURATION_TIMING['1h'].minWindowRemainingMs) continue
+
+        const acc: WindowAccumulator = {
+          marketId: m.id,
+          market: m,
+          conditionId: m.conditionId,
+          yesTokenId: m.clobTokenIds[0],
+          noTokenId: m.clobTokenIds[1],
+          windowEndMs,
+          duration: '1h', // use 1h timing for weather (most conservative)
+          qtyYes: 0, qtyNo: 0,
+          costYes: 0, costNo: 0,
+          fills: [],
+          pairCost: Infinity,
+          lockedProfit: 0,
+          imbalance: 0,
+          pendingOrderIds: new Set(),
+          lastOrderTime: 0,
+          totalOrders: 0,
+          stopped: false,
+        }
+
+        this.accumulators.set(m.id, acc)
+        this.tokenToMarketMap.set(m.clobTokenIds[0], { marketId: m.id, side: 'yes' })
+        this.tokenToMarketMap.set(m.clobTokenIds[1], { marketId: m.id, side: 'no' })
+
+        if (this.realtimeServiceRef) {
+          this.realtimeServiceRef.subscribeMarket(m.clobTokenIds)
+        }
+
+        this.log(`Tracking [weather] ${m.question || m.id} (liq: $${m.liquidity.toFixed(0)})`)
+      }
+    } catch {
+      // Weather adapter not available — proceed with crypto-only
+    }
+  }
+
+  /** Discover hourly markets using buildHourlySlug */
+  private async discoverHourlyMarkets(): Promise<void> {
+    const now = new Date()
+    const nextHour = new Date(now.getTime() + 60 * 60 * 1000)
 
     const slugs = [
-      `${prefix}${currentWindowStart}`,
-      `${prefix}${nextWindowStart}`,
-    ]
+      buildHourlySlug('BTC', now),
+      buildHourlySlug('BTC', nextHour),
+    ].filter(Boolean)
 
     for (const slug of slugs) {
-      try {
-        const { polymarketClient } = await import('@/services/api/PolymarketClient')
-        const event = await polymarketClient.getEventBySlug(slug)
-        if (!event) continue
+      await this.discoverBySlug(slug, '1h')
+    }
+  }
 
-        const eventMarkets = event.markets || []
-        for (const m of eventMarkets) {
-          // Skip if already tracking, inactive, or no token IDs
-          if (this.accumulators.has(m.id)) continue
-          if (!m.active || m.closed) continue
-          if (!m.clobTokenIds || m.clobTokenIds.length < 2) continue
+  /** Discover 15m/4h markets via ASSET_SLUG_PATTERNS */
+  private async discoverSlugMarkets(duration: '15m' | '4h'): Promise<void> {
+    const prefix = ASSET_SLUG_PATTERNS.BTC?.[duration]
+    if (!prefix) return
 
-          const windowEndMs = new Date(m.endDate).getTime()
-          const now = Date.now()
+    const intervalSec = duration === '15m' ? 900 : 14400
+    const nowSec = Math.floor(Date.now() / 1000)
 
-          // Skip if not enough time remaining
-          if (windowEndMs - now < this.gabagoolConfig.minWindowRemainingMs) continue
+    // Current window + next window
+    const currentStart = Math.floor(nowSec / intervalSec) * intervalSec
+    const nextStart = currentStart + intervalSec
 
-          // Create accumulator
-          const acc: WindowAccumulator = {
-            marketId: m.id,
-            market: m,
-            conditionId: m.conditionId,
-            yesTokenId: m.clobTokenIds[0],
-            noTokenId: m.clobTokenIds[1],
-            windowEndMs,
-            qtyYes: 0, qtyNo: 0,
-            costYes: 0, costNo: 0,
-            fills: [],
-            pairCost: Infinity,
-            lockedProfit: 0,
-            imbalance: 0,
-            pendingOrderIds: new Set(),
-            lastOrderTime: 0,
-            totalOrders: 0,
-            stopped: false,
-          }
+    for (const startSec of [currentStart, nextStart]) {
+      const slug = `${prefix}${startSec}`
+      await this.discoverBySlug(slug, duration)
+    }
+  }
 
-          this.accumulators.set(m.id, acc)
+  /** Shared discovery logic: resolve slug → create accumulators */
+  private async discoverBySlug(slug: string, duration: GabagoolDuration): Promise<void> {
+    const config = this.gabagoolConfig
+    const timing = DURATION_TIMING[duration]
 
-          // Map token IDs for fill detection
-          this.tokenToMarketMap.set(m.clobTokenIds[0], { marketId: m.id, side: 'yes' })
-          this.tokenToMarketMap.set(m.clobTokenIds[1], { marketId: m.id, side: 'no' })
+    try {
+      const { polymarketClient } = await import('@/services/api/PolymarketClient')
+      const event = await polymarketClient.getEventBySlug(slug)
+      if (!event) return
 
-          // Subscribe to live CLOB prices
-          if (this.realtimeServiceRef) {
-            this.realtimeServiceRef.subscribeMarket(m.clobTokenIds)
-          }
+      const eventMarkets = event.markets || []
+      for (const m of eventMarkets) {
+        // Skip if already tracking, inactive, or no token IDs
+        if (this.accumulators.has(m.id)) continue
+        if (!m.active || m.closed) continue
+        if (!m.clobTokenIds || m.clobTokenIds.length < 2) continue
 
-          this.log(`Tracking ${m.question || slug} (ends ${new Date(windowEndMs).toLocaleTimeString()})`)
+        const windowEndMs = new Date(m.endDate).getTime()
+
+        // Skip if not enough time remaining (use per-duration timing)
+        if (windowEndMs - Date.now() < timing.minWindowRemainingMs) continue
+
+        // Create accumulator
+        const acc: WindowAccumulator = {
+          marketId: m.id,
+          market: m,
+          conditionId: m.conditionId,
+          yesTokenId: m.clobTokenIds[0],
+          noTokenId: m.clobTokenIds[1],
+          windowEndMs,
+          duration,
+          qtyYes: 0, qtyNo: 0,
+          costYes: 0, costNo: 0,
+          fills: [],
+          pairCost: Infinity,
+          lockedProfit: 0,
+          imbalance: 0,
+          pendingOrderIds: new Set(),
+          lastOrderTime: 0,
+          totalOrders: 0,
+          stopped: false,
         }
-      } catch {
-        // Slug not found — expected for future windows
+
+        this.accumulators.set(m.id, acc)
+
+        // Map token IDs for fill detection
+        this.tokenToMarketMap.set(m.clobTokenIds[0], { marketId: m.id, side: 'yes' })
+        this.tokenToMarketMap.set(m.clobTokenIds[1], { marketId: m.id, side: 'no' })
+
+        // Subscribe to live CLOB prices
+        if (this.realtimeServiceRef) {
+          this.realtimeServiceRef.subscribeMarket(m.clobTokenIds)
+        }
+
+        // Compute max exposure per window based on duration
+        const exposureLabel = `$${config.maxExposurePerWindow}`
+        this.log(`Tracking [${duration}] ${m.question || slug} (ends ${new Date(windowEndMs).toLocaleTimeString()}) max=${exposureLabel}`)
       }
+    } catch {
+      // Slug not found — expected for future windows
     }
   }
 
@@ -409,9 +634,10 @@ export class GabagoolStrategy extends BaseStrategy {
 
     const config = this.gabagoolConfig
     const now = Date.now()
+    const timing = DURATION_TIMING[acc.duration]
 
-    // Gate: window ending soon
-    if (acc.windowEndMs - now < config.minWindowRemainingMs) {
+    // Gate: window ending soon (per-duration timing)
+    if (acc.windowEndMs - now < timing.minWindowRemainingMs) {
       acc.stopped = true
       this.log(`Window ending soon for ${acc.marketId} — stopping`)
       return
@@ -428,6 +654,20 @@ export class GabagoolStrategy extends BaseStrategy {
     if (acc.lockedProfit > 0) {
       acc.stopped = true
       return
+    }
+
+    // Gate: hopeless imbalance — past 50% of window with only one side filled.
+    // Continuing to accumulate just builds orphan exposure. Stop early and let
+    // recycleOrphanedPosition() recover what it can at market close.
+    const windowElapsedPct = (now - (acc.windowEndMs - this.durationMs(acc.duration))) / this.durationMs(acc.duration)
+    if (windowElapsedPct > 0.50 && totalExposure > 0) {
+      const minQty = Math.min(acc.qtyYes, acc.qtyNo)
+      const maxQty = Math.max(acc.qtyYes, acc.qtyNo)
+      if (maxQty > 0 && minQty / maxQty < 0.25) {
+        acc.stopped = true
+        this.log(`Hopeless imbalance for ${acc.marketId}: ${(minQty / maxQty * 100).toFixed(0)}% paired at ${(windowElapsedPct * 100).toFixed(0)}% elapsed — stopping`)
+        return
+      }
     }
 
     // Gate: cooldown
@@ -457,11 +697,22 @@ export class GabagoolStrategy extends BaseStrategy {
 
     if (yesAsk <= 0 || noAsk <= 0) return
 
-    // Check staleness (>30s old data is unreliable)
-    if (this.realtimeServiceRef.isStale?.(acc.yesTokenId, 30_000)) return
-    if (this.realtimeServiceRef.isStale?.(acc.noTokenId, 30_000)) return
+    // Check staleness (per-duration: 30s for short, relaxed for longer windows)
+    const stalenessMs = acc.duration === '4h' ? 60_000 : 30_000
+    if (this.realtimeServiceRef.isStale?.(acc.yesTokenId, stalenessMs)) return
+    if (this.realtimeServiceRef.isStale?.(acc.noTokenId, stalenessMs)) return
 
-    // Determine which side to buy
+    // Gate: spread monitoring — skip if spread is too tight for maker fills
+    const yesSpread = yesAsk - (yesPrice.bid || 0)
+    const noSpread = noAsk - (noPrice.bid || 0)
+    if (config.spreadMinWidth > 0) {
+      const relevantSpread = Math.max(yesSpread, noSpread)
+      if (relevantSpread < config.spreadMinWidth) {
+        return // Spread too tight — makers competing, low fill probability
+      }
+    }
+
+    // Determine which side to buy (with adaptive cheapness)
     const side = this.chooseSide(acc, yesAsk, noAsk, config)
     if (!side) return
 
@@ -469,7 +720,7 @@ export class GabagoolStrategy extends BaseStrategy {
     const bidPrice = side === 'yes' ? (yesPrice.bid || 0) : (noPrice.bid || 0)
 
     // Place below ask for maker status. AS pricer when enabled, static offset fallback.
-    let naiveLimit = askPrice - config.limitPriceOffset
+    let naiveLimit = askPrice - this.effectiveLimitOffset(config)
 
     if (useSettingsStore.getState().useAvellanedaStoikov) {
       try {
@@ -477,7 +728,7 @@ export class GabagoolStrategy extends BaseStrategy {
         const { btcUpDownStrategy } = await import('./BtcUpDownStrategy')
         const settings = useSettingsStore.getState()
         const highFreq = btcUpDownStrategy.getHighFreqPrices('BTC')
-        const vol = AvellanedaStoikovPricer.estimateVolatility(highFreq.map(p => p.price), 1000, 900_000)
+        const vol = AvellanedaStoikovPricer.estimateVolatility(highFreq.map(p => p.price), 1000, 3_600_000)
         const targetQty = config.maxExposurePerWindow / askPrice
         const inventory = AvellanedaStoikovPricer.gabagoolInventory(acc.qtyYes, acc.qtyNo, targetQty)
 
@@ -485,7 +736,7 @@ export class GabagoolStrategy extends BaseStrategy {
           midPrice: askPrice,
           inventory: side === 'yes' ? inventory : -inventory,
           sigma: vol.sigma,
-          timeRemaining: Math.max(0, (acc.windowEndMs - now) / (15 * 60_000)),
+          timeRemaining: Math.max(0, (acc.windowEndMs - now) / (60 * 60_000)),
           gamma: settings.asRiskAversion,
           kappa: settings.asOrderArrivalRate,
         })
@@ -503,8 +754,16 @@ export class GabagoolStrategy extends BaseStrategy {
       return
     }
 
+    // Compute order size (depth-aware or flat)
     const remainingBudget = config.maxExposurePerWindow - totalExposure
-    const orderUSD = Math.min(config.orderSize, remainingBudget)
+    let orderUSD = Math.min(config.orderSize, remainingBudget)
+
+    if (config.depthAwareSizing) {
+      orderUSD = await this.depthAdjustedSize(
+        side === 'yes' ? acc.yesTokenId : acc.noTokenId,
+        orderUSD,
+      )
+    }
 
     if (orderUSD < 0.50) return // Below CLOB minimum practical size
 
@@ -518,21 +777,25 @@ export class GabagoolStrategy extends BaseStrategy {
         strategy: 'gabagool',
         postOnly: true,
         limitPrice,
+        asset: 'BTC',
       })
 
       if (result.orderId) {
         acc.pendingOrderIds.add(result.orderId)
         acc.lastOrderTime = now
         acc.totalOrders++
+        this.fillRate.totalOrders++
 
-        // Store orderId→side for fill attribution and tokenId→market for fallback
+        // Store orderId→side for fill attribution and timestamp for latency tracking
         this.orderSideMap.set(result.orderId, side)
+        this.orderPlacedAt.set(result.orderId, now)
         const tokenId = side === 'yes' ? acc.yesTokenId : acc.noTokenId
         this.tokenToMarketMap.set(tokenId, { marketId: acc.marketId, side })
 
         this.log(
-          `ORDER ${side.toUpperCase()} $${orderUSD.toFixed(2)} @ ${(limitPrice * 100).toFixed(0)}c ` +
-          `(ask=${(askPrice * 100).toFixed(0)}c) ${acc.market.question?.slice(0, 30) || acc.marketId}`,
+          `ORDER [${acc.duration}] ${side.toUpperCase()} $${orderUSD.toFixed(2)} @ ${(limitPrice * 100).toFixed(0)}c ` +
+          `(ask=${(askPrice * 100).toFixed(0)}c spread=${(askPrice - bidPrice).toFixed(3)}) ` +
+          `${acc.market.question?.slice(0, 30) || acc.marketId}`,
         )
         this.emit('orderPlaced', { marketId: acc.marketId, side, price: limitPrice, size: orderUSD })
       }
@@ -559,6 +822,9 @@ export class GabagoolStrategy extends BaseStrategy {
    * 2. Buy whichever side is below cheapness threshold
    * 3. Dynamic threshold: buy if adding to this side keeps pair cost < target
    * 4. If both cheap → buy the cheaper one
+   *
+   * Adaptive cheapness: when ask sum is far below $1.00, the threshold
+   * widens proportionally — more aggressive buying when the arb edge is large.
    */
   chooseSide(
     acc: WindowAccumulator,
@@ -567,6 +833,17 @@ export class GabagoolStrategy extends BaseStrategy {
     config: GabagoolConfig,
   ): 'yes' | 'no' | null {
     const HARD_CAP = 0.55 // Never buy above 55c regardless
+
+    // Adaptive cheapness: widen threshold when ask sum signals strong arb edge
+    let effectiveThreshold = config.cheapnessThreshold
+    if (config.adaptiveCheapness) {
+      const askSum = yesAsk + noAsk
+      if (askSum < 0.95) {
+        // askSum of 0.90 → +3c boost, 0.85 → +5c boost, etc.
+        const boost = Math.min(0.07, (0.95 - askSum) * 0.5)
+        effectiveThreshold = Math.min(HARD_CAP, effectiveThreshold + boost)
+      }
+    }
 
     // Priority 1: Rebalance if imbalance is too high
     if (acc.qtyYes > 0 && acc.qtyNo > 0 && acc.imbalance > config.maxImbalance) {
@@ -579,8 +856,8 @@ export class GabagoolStrategy extends BaseStrategy {
     }
 
     // Determine cheapness for each side
-    const yesIsCheap = yesAsk < config.cheapnessThreshold && yesAsk < HARD_CAP
-    const noIsCheap = noAsk < config.cheapnessThreshold && noAsk < HARD_CAP
+    const yesIsCheap = yesAsk < effectiveThreshold && yesAsk < HARD_CAP
+    const noIsCheap = noAsk < effectiveThreshold && noAsk < HARD_CAP
 
     // Dynamic threshold: if we have an avg on the other side, check if this
     // buy would keep pair cost below target
@@ -604,11 +881,114 @@ export class GabagoolStrategy extends BaseStrategy {
       return yesAsk <= noAsk ? 'yes' : 'no'
     }
 
-    // Priority 3: One side cheap
-    if (yesIsCheap) return 'yes'
-    if (noIsCheap) return 'no'
+    // Priority 3: One side cheap — but only if the OTHER side's ask makes a
+    // sub-$1.00 pair plausible. Without this, we build one-sided exposure that
+    // resolves as a 50/50 directional bet rather than a guaranteed merge arb.
+    if (yesIsCheap && yesAsk + noAsk < 1.00) return 'yes'
+    if (noIsCheap && yesAsk + noAsk < 1.00) return 'no'
 
-    return null // Nothing cheap enough
+    return null // Nothing cheap enough or no merge edge
+  }
+
+  // ==========================================
+  // DEPTH-AWARE SIZING
+  // ==========================================
+
+  /**
+   * Scale order size to available book depth. Returns the lesser of
+   * desired size and 50% of available liquidity within 2% slippage.
+   */
+  private async depthAdjustedSize(tokenId: string, desiredUSD: number): Promise<number> {
+    try {
+      const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')
+      const depth = await orderBookDepth.checkBuyDepth(tokenId, desiredUSD, 0.02)
+      if (!depth.sufficient && depth.maxFillableUSD > 0) {
+        // Cap at 50% of available liquidity to avoid moving the book
+        return Math.max(0.50, Math.min(desiredUSD, depth.maxFillableUSD * 0.5))
+      }
+      return desiredUSD
+    } catch {
+      return desiredUSD // Depth check failed, use original size
+    }
+  }
+
+  // ==========================================
+  // FILL-RATE FEEDBACK
+  // ==========================================
+
+  /**
+   * Adjust limit price offset based on fill-rate feedback.
+   * Fast fills (< 2s) → widen offset (leaving money on table).
+   * Slow fills (> 10s) → tighten offset (improve fill rate).
+   */
+  private durationMs(duration: GabagoolDuration): number {
+    switch (duration) {
+      case '15m': return 15 * 60_000
+      case '1h':  return 60 * 60_000
+      case '4h':  return 4 * 60 * 60_000
+    }
+  }
+
+  private effectiveLimitOffset(config: GabagoolConfig): number {
+    if (!config.fillRateFeedback || this.fillRate.totalFills < 3) {
+      return config.limitPriceOffset
+    }
+
+    const ema = this.fillRate.emaFillLatencyMs
+    if (ema < 2000) {
+      // Fills too fast — we're under-pricing, widen offset for better entry
+      return Math.min(0.03, config.limitPriceOffset + 0.005)
+    }
+    if (ema > 10000) {
+      // Fills too slow — tighten offset to improve fill probability
+      return Math.max(0.002, config.limitPriceOffset - 0.003)
+    }
+    return config.limitPriceOffset
+  }
+
+  // ==========================================
+  // CROSS-WINDOW CAPITAL RECYCLING
+  // ==========================================
+
+  /**
+   * When a window expires with only one side filled, try to sell
+   * the orphaned position at market. Better than waiting for resolution
+   * on a 50/50 outcome.
+   */
+  private async recycleOrphanedPosition(acc: WindowAccumulator): Promise<void> {
+    const orphanSide = acc.qtyYes > 0 ? 'yes' : 'no'
+    const orphanQty = orphanSide === 'yes' ? acc.qtyYes : acc.qtyNo
+    const orphanCost = orphanSide === 'yes' ? acc.costYes : acc.costNo
+
+    if (orphanQty <= 0) return
+
+    // Only sell if we can recover meaningful capital (> 80% of cost)
+    const tokenId = orphanSide === 'yes' ? acc.yesTokenId : acc.noTokenId
+    if (!this.realtimeServiceRef) return
+
+    const priceData = this.realtimeServiceRef.getPrice(tokenId)
+    if (!priceData?.bid || priceData.bid <= 0) return
+
+    const recoverable = priceData.bid * orphanQty
+    if (recoverable < orphanCost * 0.80) {
+      this.log(`Recycle skip: ${orphanSide} bid ${priceData.bid.toFixed(3)} too low (would recover $${recoverable.toFixed(2)} vs cost $${orphanCost.toFixed(2)})`)
+      return
+    }
+
+    try {
+      const { tradingService } = await import('@/services/trading/TradingService')
+      await tradingService.placeBet(acc.market, orphanSide === 'yes' ? 'no' : 'yes', orphanQty, {
+        orderType: 'GTC',
+        strategy: 'gabagool-recycle',
+        postOnly: true,
+        limitPrice: priceData.bid,
+        asset: 'BTC',
+      })
+      this.log(`RECYCLE: selling ${orphanQty.toFixed(2)} ${orphanSide.toUpperCase()} @ ${priceData.bid.toFixed(3)} (recover ~$${recoverable.toFixed(2)})`)
+      this.emit('recycled', { marketId: acc.marketId, side: orphanSide, qty: orphanQty, bid: priceData.bid })
+    } catch (err) {
+      this.log(`Recycle failed (non-critical): ${err}`)
+    }
   }
 
   // ==========================================
@@ -643,7 +1023,8 @@ export class GabagoolStrategy extends BaseStrategy {
       const result = await mergeService.merge(acc.conditionId, mergeAmount)
 
       if (result.success) {
-        this.log(`MERGE SUCCESS: ${result.amountMerged?.toFixed(2)} USDC.e recovered`)
+        const via = result.via === 'relayer' ? '(gasless relayer)' : '(direct on-chain)'
+        this.log(`MERGE SUCCESS: ${result.amountMerged?.toFixed(2)} USDC.e recovered ${via}`)
         this.emit('merged', { marketId: acc.marketId, ...result })
       } else {
         this.log(`Merge failed (non-critical): ${result.error}`)
@@ -684,12 +1065,12 @@ export class GabagoolStrategy extends BaseStrategy {
   }
 
   private async cancelStaleOrders(): Promise<void> {
-    const config = this.gabagoolConfig
     const now = Date.now()
 
     for (const acc of this.accumulators.values()) {
       if (acc.pendingOrderIds.size === 0) continue
-      if (now - acc.lastOrderTime < config.staleOrderMs) continue
+      const timing = DURATION_TIMING[acc.duration]
+      if (now - acc.lastOrderTime < timing.staleOrderMs) continue
 
       // Snapshot and clear BEFORE cancelling — prevents double-cancel if
       // an overlapping scan cycle somehow enters this code path
@@ -698,6 +1079,7 @@ export class GabagoolStrategy extends BaseStrategy {
 
       for (const orderId of staleIds) {
         await this.cancelOrder(orderId)
+        this.orderPlacedAt.delete(orderId)
         this.log(`Cancelled stale order ${orderId}`)
       }
     }
@@ -719,6 +1101,11 @@ export class GabagoolStrategy extends BaseStrategy {
   /** Get stats for a specific window */
   getWindowStats(marketId: string): WindowAccumulator | undefined {
     return this.accumulators.get(marketId)
+  }
+
+  /** Expose fill rate for dashboard/testing */
+  getFillRate(): FillRateState {
+    return { ...this.fillRate }
   }
 }
 

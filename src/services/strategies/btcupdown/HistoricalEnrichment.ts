@@ -2,7 +2,7 @@
  * HistoricalEnrichment — cache-backed historical statistics from PolyBacktest.
  *
  * Provides win rates (overall, by time-of-day, by day-of-week) and average
- * spreads from resolved markets. Used by the live BTC Up/Down strategy to
+ * spreads from resolved markets. Used by the live Crypto Up/Down strategy to
  * make small, conservative confidence adjustments based on historical patterns.
  */
 import { polyBacktestClient } from '@/services/api/PolyBacktestClient'
@@ -18,9 +18,12 @@ interface CacheEntry {
 }
 
 const CACHE_TTL = 30 * 60 * 1000 // 30 minutes
+const FAILURE_BACKOFF_MS = 30 * 60 * 1000 // 30 minutes — suppress repeated API failures
 
 export class HistoricalEnrichment {
   private cache = new Map<string, CacheEntry>()
+  /** Timestamp of last API failure — prevents hammering a broken/invalid endpoint */
+  private lastFailureAt = 0
 
   /**
    * Get historical enrichment data for a market type + optional time pattern.
@@ -52,6 +55,11 @@ export class HistoricalEnrichment {
     hour?: number,
     dayOfWeek?: number,
   ): Promise<BacktestEnrichment> {
+    // Backoff after API failure — avoid hammering a broken endpoint every scan cycle
+    if (this.lastFailureAt && (Date.now() - this.lastFailureAt) < FAILURE_BACKOFF_MS) {
+      return this.emptyEnrichment()
+    }
+
     try {
       const markets = await polyBacktestClient.getResolvedMarkets(marketType)
 
@@ -89,12 +97,15 @@ export class HistoricalEnrichment {
         dayOfWeekWinRate,
       }
     } catch (err) {
+      this.lastFailureAt = Date.now()
       const msg = err instanceof Error ? err.message : String(err)
-      // Suppress full stack for known non-bug conditions (402 = credits exhausted)
+      // Suppress full stack for known non-bug conditions (402 = credits, 422 = invalid params)
       if (msg.includes('402')) {
-        console.debug('[HistoricalEnrichment] Skipped — API credits exhausted')
+        console.debug('[HistoricalEnrichment] Skipped — API credits exhausted (backoff 30m)')
+      } else if (msg.includes('422')) {
+        console.debug('[HistoricalEnrichment] Skipped — API rejected params (backoff 30m)')
       } else {
-        console.warn('[HistoricalEnrichment] Failed to compute enrichment:', msg)
+        console.warn('[HistoricalEnrichment] Failed to compute enrichment (backoff 30m):', msg)
       }
       return this.emptyEnrichment()
     }
@@ -102,7 +113,7 @@ export class HistoricalEnrichment {
 
   /**
    * Win rate = fraction of markets where "up" won.
-   * For BTC Up/Down, the "correct" direction depends on BTC price movement,
+   * For Crypto Up/Down, the "correct" direction depends on BTC price movement,
    * but we track the base rate of "up" outcomes to detect biases.
    */
   private computeWinRate(markets: PolyBacktestMarket[]): number {

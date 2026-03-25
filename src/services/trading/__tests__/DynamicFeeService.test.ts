@@ -42,10 +42,43 @@ describe('DynamicFeeService — fee curve model', () => {
     expect(at20).toBeGreaterThan(at10)
   })
 
-  it('returns flat 100 bps for standard (non-crypto) markets', () => {
+  it('backward compat: boolean false uses unknown category (worst-case)', () => {
     const est = svc.estimateDynamicFee(0.50, false)
-    expect(est.feeRateBps).toBe(100)
-    expect(est.isDynamic).toBe(false)
+    // 'unknown' maps to crypto multiplier (2500) as worst-case
+    expect(est.feeRateBps).toBe(156)
+    expect(est.isDynamic).toBe(true)
+  })
+
+  it('politics category has lower fees than crypto at 50¢', () => {
+    const crypto = svc.estimateDynamicFee(0.50, 'crypto')
+    const politics = svc.estimateDynamicFee(0.50, 'politics')
+    expect(crypto.feeRateBps).toBe(156)       // 2500 × 0.0625
+    expect(politics.feeRateBps).toBe(100)      // 1600 × 0.0625
+    expect(politics.feeRateBps).toBeLessThan(crypto.feeRateBps)
+  })
+
+  it('weather category matches politics (same multiplier)', () => {
+    const weather = svc.estimateDynamicFee(0.50, 'weather')
+    const politics = svc.estimateDynamicFee(0.50, 'politics')
+    expect(weather.feeRateBps).toBe(politics.feeRateBps)
+  })
+
+  it('economics/culture categories have lowest fees', () => {
+    const economics = svc.estimateDynamicFee(0.50, 'economics')
+    const culture = svc.estimateDynamicFee(0.50, 'culture')
+    // 1280 × 0.0625 = 80 bps
+    expect(economics.feeRateBps).toBe(80)
+    expect(culture.feeRateBps).toBe(80)
+  })
+
+  it('all categories produce dynamic fees', () => {
+    const categories = ['crypto', 'sports', 'politics', 'finance', 'weather', 'economics', 'culture', 'tech', 'science'] as const
+    for (const cat of categories) {
+      const est = svc.estimateDynamicFee(0.50, cat)
+      expect(est.isDynamic).toBe(true)
+      expect(est.source).toBe('model')
+      expect(est.feeRateBps).toBeGreaterThan(0)
+    }
   })
 
   it('handles edge case prices gracefully', () => {
@@ -69,6 +102,40 @@ describe('DynamicFeeService — fee curve model', () => {
     expect(svc.estimateDynamicFee(0.40, true).feeRateBps).toBe(144)
     // At p=0.20: 2500 × (0.16)² = 2500 × 0.0256 = 64
     expect(svc.estimateDynamicFee(0.20, true).feeRateBps).toBe(64)
+  })
+})
+
+// ==========================================
+// CATEGORY INFERENCE
+// ==========================================
+
+describe('DynamicFeeService — inferCategory', () => {
+  it('infers crypto from BTC slugs', () => {
+    expect(svc.inferCategory({ slug: 'btc-updown-1h-12345' })).toBe('crypto')
+    expect(svc.inferCategory({ slug: 'bitcoin-up-hourly' })).toBe('crypto')
+    expect(svc.inferCategory({ slug: 'eth-updown-15m-999' })).toBe('crypto')
+  })
+
+  it('infers weather from tags', () => {
+    expect(svc.inferCategory({ tags: ['weather', 'temperature'] })).toBe('weather')
+  })
+
+  it('infers sports from tags', () => {
+    expect(svc.inferCategory({ tags: ['sports', 'nba'] })).toBe('sports')
+  })
+
+  it('infers politics from category field', () => {
+    expect(svc.inferCategory({ category: 'politics' })).toBe('politics')
+  })
+
+  it('returns unknown for empty market', () => {
+    expect(svc.inferCategory({})).toBe('unknown')
+  })
+
+  it('getMultiplier returns correct values', () => {
+    expect(svc.getMultiplier('crypto')).toBe(2500)
+    expect(svc.getMultiplier('politics')).toBe(1600)
+    expect(svc.getMultiplier('economics')).toBe(1280)
   })
 })
 

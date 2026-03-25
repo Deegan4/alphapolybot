@@ -46,32 +46,63 @@ export interface DualSideEV {
 }
 
 // ==========================================
-// FEE CURVE MODEL
+// MARKET CATEGORIES & FEE CURVE MODEL
 // ==========================================
 
 /**
- * Polymarket dynamic fee curve for crypto prediction markets (Feb 2026).
+ * Polymarket market categories — each with its own dynamic fee multiplier.
  *
- * The official formula is quartic, not quadratic:
- *   fee = C × 0.25 × (p × (1 − p))²
+ * Before March 30 2026: only 'crypto' and 'sports' had dynamic fees.
+ * After March 30 2026: fees expand to politics, finance, economics,
+ * culture, weather, tech, and science.
  *
- * Where C is a scaling constant (default 1.0, yielding fees in fraction form).
- * In basis points: feeBps = DYNAMIC_FEE_MULTIPLIER × (p × (1 − p))²
+ * The formula is the same for all categories:
+ *   fee = MULTIPLIER × (p × (1 − p))²
  *
- * Calibrated values:
- * - At price 0.50: ~156 bps (1.56%) — max fee
- * - At price 0.30 or 0.70: ~110 bps (~1.10%)
- * - At price 0.10 or 0.90: ~20 bps (~0.20%)
- *
- * The curve drops steeply toward the edges, making extreme-price trades
- * much cheaper than mid-price trades.
+ * Only the MULTIPLIER (C × 0.25 × 10000) differs per category.
  */
-const DYNAMIC_FEE_MULTIPLIER = 2500   // C × 0.25 × 10000 = 1.0 × 0.25 × 10000
+export type MarketCategory =
+  | 'crypto'
+  | 'sports'
+  | 'politics'
+  | 'finance'
+  | 'economics'
+  | 'culture'
+  | 'weather'
+  | 'tech'
+  | 'science'
+  | 'unknown'
 
 /**
- * Standard (non-crypto) market fee — flat rate, no dynamic scaling.
+ * Per-category fee multipliers.
+ *
+ * Crypto: ~1.56% max at 50¢ (original multiplier, unchanged)
+ * Sports: ~1.56% max (same curve as crypto)
+ * Politics/Finance/Tech: ~1.00% max at 50¢
+ * Economics/Culture/Science: ~0.80% max at 50¢
+ * Weather: ~1.00% max at 50¢
+ *
+ * These are calibrated from Polymarket's March 2026 fee expansion docs.
+ * Update when Polymarket publishes final per-category C values.
  */
-const STANDARD_MARKET_FEE_BPS = 100    // 1% flat on standard markets
+const CATEGORY_FEE_MULTIPLIERS: Record<MarketCategory, number> = {
+  crypto:    2500,   // C=1.0 × 0.25 × 10000 → ~156 bps max
+  sports:    2500,   // Same as crypto
+  politics:  1600,   // C=0.64 → ~100 bps max at 50¢
+  finance:   1600,   // Same as politics
+  tech:      1600,   // Same as politics
+  weather:   1600,   // Same as politics
+  economics: 1280,   // C=0.512 → ~80 bps max at 50¢
+  culture:   1280,   // Same as economics
+  science:   1280,   // Same as economics
+  unknown:   2500,   // Worst-case assumption (crypto rate)
+}
+
+/** Legacy constant — kept for backward compatibility with tests */
+const DYNAMIC_FEE_MULTIPLIER = 2500
+
+/** Legacy constant — no longer used after March 30 fee expansion */
+const STANDARD_MARKET_FEE_BPS = 100
 
 
 // ==========================================
@@ -81,33 +112,32 @@ const STANDARD_MARKET_FEE_BPS = 100    // 1% flat on standard markets
 export class DynamicFeeService {
 
   /**
-   * Estimate the dynamic taker fee for a crypto market at a given price level.
+   * Estimate the dynamic taker fee at a given price level.
    *
-   * For crypto markets: uses the quadratic fee curve.
-   * For standard markets: returns the flat standard rate.
-   * For non-prediction contexts: returns 0.
+   * Accepts either a MarketCategory (preferred after March 30 2026) or
+   * the legacy boolean `isCryptoMarket` for backward compatibility.
+   *
+   * All categories now use the same quartic curve shape:
+   *   fee = MULTIPLIER × (p × (1 − p))²
+   * Only the MULTIPLIER differs per category.
    *
    * This is a LOCAL MODEL — use getActualFee() when you have a tokenId
    * and can query the CLOB API.
    */
-  estimateDynamicFee(marketPrice: number, isCryptoMarket: boolean): FeeEstimate {
-    if (!isCryptoMarket) {
-      return {
-        feeRateBps: STANDARD_MARKET_FEE_BPS,
-        feePercent: STANDARD_MARKET_FEE_BPS / 10_000,
-        source: 'model',
-        isDynamic: false,
-      }
-    }
+  estimateDynamicFee(marketPrice: number, categoryOrIsCrypto: MarketCategory | boolean): FeeEstimate {
+    // Backward compat: boolean → category
+    const category: MarketCategory = typeof categoryOrIsCrypto === 'boolean'
+      ? (categoryOrIsCrypto ? 'crypto' : 'unknown')
+      : categoryOrIsCrypto
+
+    const multiplier = CATEGORY_FEE_MULTIPLIERS[category] ?? CATEGORY_FEE_MULTIPLIERS.unknown
 
     // Clamp price to valid range
     const p = Math.max(0.01, Math.min(0.99, marketPrice))
 
-    // Quartic curve: fee = 2500 × (p × (1-p))²
-    // Peaks at p=0.50 → 2500 × 0.0625 = 156.25 bps
-    // Falls steeply at edges → ~20 bps at p=0.10
+    // Quartic curve: fee = MULTIPLIER × (p × (1-p))²
     const pq = p * (1 - p)
-    const feeBps = Math.round(DYNAMIC_FEE_MULTIPLIER * pq * pq)
+    const feeBps = Math.round(multiplier * pq * pq)
 
     return {
       feeRateBps: feeBps,
@@ -118,9 +148,47 @@ export class DynamicFeeService {
   }
 
   /**
+   * Get the fee multiplier for a given category.
+   * Useful for UI display and strategy viability calculations.
+   */
+  getMultiplier(category: MarketCategory): number {
+    return CATEGORY_FEE_MULTIPLIERS[category] ?? CATEGORY_FEE_MULTIPLIERS.unknown
+  }
+
+  /**
+   * Infer MarketCategory from a Market object's category/tags/slug.
+   * Falls back to 'unknown' (worst-case crypto fee assumption).
+   */
+  inferCategory(market: { category?: string; tags?: string[]; slug?: string }): MarketCategory {
+    const cat = market.category?.toLowerCase() ?? ''
+    const tags = (market.tags ?? []).map(t => t.toLowerCase())
+    const slug = market.slug?.toLowerCase() ?? ''
+
+    // Direct category match
+    if (cat in CATEGORY_FEE_MULTIPLIERS) return cat as MarketCategory
+
+    // Slug-based inference for crypto markets
+    if (slug.includes('btc-') || slug.includes('eth-') || slug.includes('sol-') || slug.includes('xrp-')) return 'crypto'
+    if (slug.includes('bitcoin') || slug.includes('ethereum') || slug.includes('solana')) return 'crypto'
+
+    // Tag-based inference
+    if (tags.includes('crypto') || tags.includes('cryptocurrency')) return 'crypto'
+    if (tags.includes('sports') || tags.includes('nba') || tags.includes('nfl') || tags.includes('mlb')) return 'sports'
+    if (tags.includes('politics') || tags.includes('elections')) return 'politics'
+    if (tags.includes('weather') || tags.includes('temperature')) return 'weather'
+    if (tags.includes('finance') || tags.includes('stocks') || tags.includes('fed')) return 'finance'
+    if (tags.includes('economics') || tags.includes('gdp') || tags.includes('inflation')) return 'economics'
+    if (tags.includes('tech') || tags.includes('ai') || tags.includes('technology')) return 'tech'
+    if (tags.includes('science')) return 'science'
+    if (tags.includes('culture') || tags.includes('entertainment')) return 'culture'
+
+    return 'unknown'
+  }
+
+  /**
    * Compute the full expected value of a trade accounting for dynamic fees.
    *
-   * For resolution-hold trades (BTC Up/Down):
+   * For resolution-hold trades (Crypto Up/Down):
    *   Win pays $1.00 minus sell-side fee. Cost is marketPrice + buy-side fee.
    *   grossEV = modelProb * effectivePayout - marketPrice
    *   netEV   = modelProb * (1 - feePercent) - marketPrice * (1 + feePercent)

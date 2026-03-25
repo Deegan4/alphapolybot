@@ -1,8 +1,8 @@
 /**
- * API client for PolyBacktest — historical BTC Up/Down market data and snapshots.
+ * API client for PolyBacktest — historical Crypto Up/Down market data and snapshots.
  *
  * Provides access to resolved/active markets, time-series price snapshots, and
- * full orderbook depth for backtesting the BTC Up/Down strategy.
+ * full orderbook depth for backtesting the Crypto Up/Down strategy.
  *
  * Docs: https://docs.polybacktest.com
  * Auth: X-API-Key header (keys from https://polybacktest.com/dashboard)
@@ -19,7 +19,8 @@ import type {
 
 export class PolyBacktestClient extends BaseApiClient {
   constructor() {
-    const apiKey = import.meta.env.VITE_POLYBACKTEST_API_KEY || ''
+    // API key loaded from secureStorage on app init, NOT from env (avoids client bundle exposure)
+    const apiKey = ''
     super(import.meta.env.VITE_POLYBACKTEST_API_URL || '/api/polybacktest', {
       maxRequestsPerMinute: 60,
       maxRetries: 3,

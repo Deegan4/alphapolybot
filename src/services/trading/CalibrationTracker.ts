@@ -304,6 +304,13 @@ export class CalibrationTracker {
     import('@/services/storage').then(({ indexedDBService }) => {
       indexedDBService.storeCalibrationData?.(this.predictions)
     }).catch(() => {})
+
+    // Dual-write to Supabase (fire-and-forget)
+    import('@/services/storage/SupabaseService').then(({ supabaseService }) => {
+      for (const pred of this.predictions) {
+        supabaseService.upsertCalibration(pred)
+      }
+    }).catch(() => {})
   }
 }
 

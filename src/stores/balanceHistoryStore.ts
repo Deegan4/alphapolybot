@@ -23,6 +23,8 @@ interface BalanceHistoryState {
   recordSell: (proceedsUsd: number) => void
   /** Sync simulated balance to real wallet balance (call when wallet refreshes) */
   syncSimulatedBalance: (realBalance: number) => void
+  /** Reset for mode switch (dry run <-> live) — clears snapshots and re-seeds */
+  resetForModeSwitch: (newInitialBalance: number) => void
 }
 
 const MAX_SNAPSHOTS = 500
@@ -51,6 +53,11 @@ export const useBalanceHistoryStore = create<BalanceHistoryState>()(
           }
           return { snapshots: next }
         })
+
+        // Dual-write to Supabase (fire-and-forget)
+        import('@/services/storage/SupabaseService').then(({ supabaseService }) => {
+          supabaseService.recordBalanceSnapshot(balance)
+        }).catch(() => {})
       },
 
       setInitialBalance: (balance: number) => {
@@ -92,6 +99,15 @@ export const useBalanceHistoryStore = create<BalanceHistoryState>()(
         if (realBalance > 0) {
           set({ simulatedBalance: realBalance })
         }
+      },
+
+      resetForModeSwitch: (newInitialBalance: number) => {
+        set({
+          snapshots: [],
+          initialBalance: newInitialBalance,
+          simulatedBalance: newInitialBalance,
+          startTime: Date.now(),
+        })
       },
     }),
     {

@@ -1,7 +1,7 @@
 /**
  * BTC Calibration Service
  *
- * Tracks actual win rate vs predicted confidence for BTC Up/Down trades.
+ * Tracks actual win rate vs predicted confidence for Crypto Up/Down trades.
  * Buckets closed trades by their entry `modelProbability` and computes
  * actual hit rate per bucket. When enough data accumulates (≥10 per bucket),
  * the calibrated value replaces raw signal confidence for edge checks and

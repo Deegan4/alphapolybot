@@ -19,7 +19,7 @@ const PROXY_IMPLEMENTATION = '0x44e999d5c2F66Ef0861317f9A4805AC2e90aEB4f';
 // ─── Wallet Setup ────────────────────────────────────────────
 
 export interface WalletInfo {
-  wallet: ethers.HDNodeWallet;
+  wallet: ethers.HDNodeWallet | ethers.Wallet;
   signerAddress: string;
   proxyAddress: string;
   signatureType: number;
@@ -35,7 +35,10 @@ export function initWallet(): WalletInfo | null {
   const seed = appConfig.walletSeedPhrase;
   if (!seed) return null;
 
-  const wallet = ethers.Wallet.fromPhrase(seed);
+  // Support both private keys (0x hex) and mnemonic seed phrases
+  const wallet = seed.startsWith('0x')
+    ? new ethers.Wallet(seed)
+    : ethers.Wallet.fromPhrase(seed);
   const signerAddress = wallet.address;
   const proxyAddress = computePolyProxyAddress(signerAddress);
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { tradeLogger } from '@/services/trading'
+import { tradeLogger } from '@/services/trading/TradeLogger'
 import type { TradeRecord } from '@/services/trading/TradeLogger'
 
 export const RecentTradesGrid: React.FC = () => {
@@ -63,7 +63,7 @@ export const RecentTradesGrid: React.FC = () => {
             return (
               <div
                 key={t.id}
-                className={`flex-shrink-0 rounded-md px-3 py-2 border transition-colors min-w-[130px] ${
+                className={`flex-shrink-0 rounded-md px-3 py-2 border transition-colors min-w-[130px] animate-slide-in-right ${
                   isWin
                     ? 'bg-agent-green/5 border-agent-green/20'
                     : 'bg-agent-red/5 border-agent-red/20'

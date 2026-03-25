@@ -1,10 +1,8 @@
 export { BaseStrategy } from './BaseStrategy'
-export { LLMPredictionStrategy, llmPredictionStrategy } from './LLMPredictionStrategy'
-export { DipArbStrategy, dipArbStrategy } from './DipArbStrategy'
 export { DipDetector, dipDetector, type DipEvent } from './DipDetector'
-export { ProjectFWStrategy, projectFWStrategy } from './ProjectFWStrategy'
-export { BtcUpDownStrategy, btcUpDownStrategy } from './BtcUpDownStrategy'
-export { GabagoolStrategy, gabagoolStrategy } from './GabagoolStrategy'
-export { DualSideHedgeStrategy, dualSideHedgeStrategy } from './DualSideHedgeStrategy'
-export { ImpulseSniperStrategy, impulseSniperStrategy } from './ImpulseSniperStrategy'
 export { StrategyManager, strategyManager, type StrategyState } from './StrategyManager'
+
+// Strategy classes/singletons are NOT re-exported here to enable code-splitting.
+// StrategyManager lazy-loads them via dynamic import() during initialize().
+// Consumers that need a typed strategy reference should import directly:
+//   import { llmPredictionStrategy } from './LLMPredictionStrategy'

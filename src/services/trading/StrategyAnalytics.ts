@@ -14,7 +14,7 @@
  * Pure logic, no UI. Reads from singletons, no state of its own.
  */
 
-import { tradeLogger, type TradeRecord } from './TradeLogger'
+import { tradeLogger } from './TradeLogger'
 import { edgeTracker, type StrategyEdge } from './EdgeTracker'
 
 export interface StrategyMetrics {
@@ -62,7 +62,7 @@ export interface PortfolioSummary {
   worstStrategy: string | null
 }
 
-const STRATEGY_IDS = ['llm', 'dip', 'fw', 'btc', 'dual-side', 'gabagool', 'impulse'] as const
+const STRATEGY_IDS = ['llm', 'dip', 'fw', 'btc', 'dual-side', 'gabagool', 'impulse', 'liquidation'] as const
 
 export class StrategyAnalytics {
   /**

@@ -2,9 +2,12 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixInput, MatrixButton, MatrixToggle, MatrixSelect, MatrixBadge, MatrixNumberInput, AnimatedCounter, MatrixSlider } from '@/components/ui'
 import { useWalletStore, useSettingsStore } from '@/stores'
+import { useBalanceHistoryStore } from '@/stores/balanceHistoryStore'
 import { strategyManager } from '@/services/strategies'
+import { llmPredictionStrategy } from '@/services/strategies/LLMPredictionStrategy'
+import { projectFWStrategy } from '@/services/strategies/ProjectFWStrategy'
+import { dipArbStrategy } from '@/services/strategies/DipArbStrategy'
 import { tradingService, riskManager } from '@/services/trading'
-import { openRouterService } from '@/services/llm'
 import { notificationService } from '@/services/notifications/NotificationService'
 import type { LLMPredictionConfig, DipArbConfig, ProjectFWConfig, WalletEntry } from '@/types'
 import type { RiskManagerStatus } from '@/services/trading'
@@ -20,7 +23,7 @@ const tabContentVariants = {
  * SettingsView - Application settings and configuration
  */
 export const SettingsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'dualside' | 'gabagool' | 'impulse' | 'alerts' | 'api'>('trading')
+  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'dualside' | 'gabagool' | 'impulse' | 'liquidation' | 'alerts' | 'api'>('trading')
 
   const tabs = useMemo(() => [
     { id: 'trading', label: 'Trading Mode' },
@@ -29,10 +32,11 @@ export const SettingsView: React.FC = () => {
     { id: 'llm', label: 'LLM Strategy' },
     { id: 'dip', label: 'Dip Arbitrage' },
     { id: 'projectfw', label: 'ProjectFW Arb' },
-    { id: 'btcupdown', label: 'BTC Up/Down' },
+    { id: 'btcupdown', label: 'Crypto Up/Down' },
     { id: 'dualside', label: 'Dual-Side' },
     { id: 'gabagool', label: 'Gabagool Arb' },
     { id: 'impulse', label: 'Impulse Sniper' },
+    { id: 'liquidation', label: 'Liq Momentum' },
     { id: 'alerts', label: 'Alerts' },
     { id: 'api', label: 'API Keys' },
   ], [])
@@ -96,8 +100,11 @@ export const SettingsView: React.FC = () => {
         {tabs.map(tab => (
           <button
             key={tab.id}
+            id={`settings-tab-${tab.id}`}
+            type="button"
             role="tab"
-            aria-selected={activeTab === tab.id}
+            aria-selected={activeTab === tab.id ? 'true' : 'false'}
+            aria-controls={`settings-panel-${tab.id}`}
             tabIndex={activeTab === tab.id ? 0 : -1}
             onClick={() => setActiveTab(tab.id as typeof activeTab)}
             className={cn(
@@ -121,7 +128,12 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {/* Content — animated tab transitions */}
-      <div className="flex-1 min-h-0 overflow-auto" role="tabpanel" aria-label={tabs.find(t => t.id === activeTab)?.label}>
+      <div
+        id={`settings-panel-${activeTab}`}
+        className="flex-1 min-h-0 overflow-auto"
+        role="tabpanel"
+        aria-labelledby={`settings-tab-${activeTab}`}
+      >
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -140,6 +152,7 @@ export const SettingsView: React.FC = () => {
             {activeTab === 'dualside' && <DualSideSettings />}
             {activeTab === 'gabagool' && <GabagoolSettings />}
             {activeTab === 'impulse' && <ImpulseSniperSettings />}
+            {activeTab === 'liquidation' && <LiquidationMomentumSettings />}
             {activeTab === 'alerts' && <AlertSettings />}
             {activeTab === 'api' && <APISettings />}
           </motion.div>
@@ -153,8 +166,9 @@ export const SettingsView: React.FC = () => {
  * Trading Mode Settings Panel - DRY RUN TOGGLE
  */
 const TradingModeSettings: React.FC = () => {
-  const { dryRun, setDryRun, pennyTraderMode, setPennyTraderMode, kellyFraction, setKellyFraction } = useSettingsStore()
+  const { dryRun, setDryRun, pennyTraderMode, setPennyTraderMode, kellyFraction, setKellyFraction, paperBalance, setPaperBalance } = useSettingsStore()
   const [confirmLive, setConfirmLive] = useState(false)
+  const [walletConnecting, setWalletConnecting] = useState(false)
 
   // Sync dry run state with trading service whenever it changes
   useEffect(() => {
@@ -166,17 +180,66 @@ const TradingModeSettings: React.FC = () => {
       // Turning OFF dry run (going live) - require confirmation
       setConfirmLive(true)
     } else {
-      // Turning ON dry run - safe, no confirmation needed
+      // Turning ON dry run - stop polling but keep wallet credentials intact
       setConfirmLive(false)
       setDryRun(true)
+      useWalletStore.getState().stopPolling()
+      useBalanceHistoryStore.getState().resetForModeSwitch(paperBalance)
+      console.log(`[Settings] Switched to dry run — polling stopped, paper balance $${paperBalance}`)
     }
   }
 
-  const confirmGoLive = () => {
+  const confirmGoLive = async () => {
     setDryRun(false)
     setConfirmLive(false)
     // Belt-and-suspenders: directly push to tradingService in same tick
     tradingService.setConfig({ dryRun: false })
+
+    // Auto-connect wallet when going live (mirrors App.tsx initializeApp flow)
+    if (!useWalletStore.getState().isConnected) {
+      setWalletConnecting(true)
+      try {
+        const { secureStorage } = await import('@/utils/secureStorage')
+        const walletCred = await secureStorage.get<string>('wallet_credential', true)
+        const envSeed = import.meta.env.VITE_WALLET_SEED_PHRASE
+        const credential = walletCred
+          || (envSeed && envSeed !== 'word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12' ? envSeed : null)
+        if (credential) {
+          const success = await useWalletStore.getState().connect(credential)
+          if (success) {
+            console.log('[Settings] Went live — wallet connected')
+
+            // DataClient setup (same as App.tsx)
+            const { dataClient } = await import('@/services/api/DataClient')
+            const proxyAddress = useWalletStore.getState().proxyAddress
+            const walletAddress = useWalletStore.getState().address
+            if (proxyAddress || walletAddress) {
+              dataClient.setWalletAddress((proxyAddress || walletAddress)!)
+            }
+
+            useWalletStore.getState().startPolling()
+
+            // User channel WebSocket
+            import('@/services/realtime').then(({ userChannelService }) => {
+              userChannelService.connect().then(connected => {
+                if (connected) {
+                  console.log('[Settings] User channel connected')
+                }
+              })
+            }).catch(() => {})
+          } else {
+            const storeError = useWalletStore.getState().error
+            console.warn(`[Settings] Wallet connect failed: ${storeError || 'check credentials'}`)
+          }
+        } else {
+          console.warn('[Settings] No wallet credential found — configure in Wallet tab or .env')
+        }
+      } catch (err) {
+        console.error('[Settings] Wallet auto-connect on go-live failed:', err)
+      } finally {
+        setWalletConnecting(false)
+      }
+    }
   }
 
   // Only show "live" appearance when actually live (not during pending confirmation)
@@ -268,10 +331,10 @@ const TradingModeSettings: React.FC = () => {
             <div className="flex items-start gap-3">
               <MatrixBadge variant="info" size="sm">DRY RUN</MatrixBadge>
               <ul className="text-agent-text-muted text-xs font-sans space-y-1">
+                <li>Tracked paper balance (starts at ${paperBalance.toLocaleString()})</li>
                 <li>Orders are logged but not sent to Polymarket</li>
-                <li>API calls are simulated</li>
+                <li>Wallet not connected — no real funds touched</li>
                 <li>Strategy logic runs normally for testing</li>
-                <li>Activity log shows simulated trades</li>
               </ul>
             </div>
 
@@ -286,6 +349,33 @@ const TradingModeSettings: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* Wallet connecting indicator */}
+        {walletConnecting && (
+          <div className="bg-agent-orange/10 border border-agent-orange/50 rounded-lg p-3 flex items-center gap-2">
+            <div className="w-4 h-4 border-2 border-agent-orange border-t-transparent rounded-full animate-spin" />
+            <span className="text-agent-orange text-sm font-mono">Connecting wallet...</span>
+          </div>
+        )}
+
+        {/* Paper Balance (dry run only) */}
+        {dryRun && (
+          <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
+            <h4 className="text-agent-green text-sm font-mono">PAPER BALANCE</h4>
+            <p className="text-agent-text-muted text-xs font-sans">
+              Starting balance for simulated trading. Tracks up/down with each trade.
+            </p>
+            <MatrixNumberInput
+              value={paperBalance}
+              onChange={setPaperBalance}
+              min={10}
+              max={1_000_000}
+              step={100}
+              prefix="$"
+              label="Paper Balance"
+            />
+          </div>
+        )}
 
         {/* Penny Trader Mode Toggle */}
         <motion.div
@@ -346,12 +436,13 @@ const TradingModeSettings: React.FC = () => {
         {/* Kelly Criterion Position Sizing */}
         <div className={`bg-agent-card/50 border border-agent-border rounded-lg p-4 ${pennyTraderMode ? 'opacity-50' : ''}`}>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-agent-text text-sm font-mono">Kelly Fraction</span>
+            <label htmlFor="kelly-fraction-slider" className="text-agent-text text-sm font-mono">Kelly Fraction</label>
             <span className="text-agent-green text-sm font-mono font-bold">
               {kellyFraction === 0 ? 'Off' : kellyFraction <= 0.25 ? `${(kellyFraction * 4).toFixed(0)}/4 Kelly` : `${(kellyFraction * 100).toFixed(0)}%`}
             </span>
           </div>
           <input
+            id="kelly-fraction-slider"
             type="range"
             min="0"
             max="1"
@@ -359,6 +450,8 @@ const TradingModeSettings: React.FC = () => {
             value={kellyFraction}
             onChange={(e) => setKellyFraction(parseFloat(e.target.value))}
             disabled={pennyTraderMode}
+            title="Kelly Fraction"
+            aria-label="Kelly Fraction"
             className="w-full h-2 bg-agent-border rounded-lg appearance-none cursor-pointer accent-agent-green disabled:cursor-not-allowed"
           />
           <div className="flex justify-between text-[10px] text-agent-text-muted mt-1 font-mono">
@@ -627,7 +720,8 @@ const WalletRegistryPanel: React.FC = () => {
     try {
       // Load seed from secure storage and connect
       const { secureStorage } = await import('@/utils/secureStorage')
-      const seed = await secureStorage.get(`wallet-seed-${wallet.id}`)
+      const storedSeed = await secureStorage.get(`wallet-seed-${wallet.id}`)
+      const seed = typeof storedSeed === 'string' ? storedSeed : ''
       if (seed) {
         const success = await connect(seed)
         if (success) {
@@ -760,23 +854,28 @@ const GtdFallbackSettings: React.FC = () => {
  * LLM Strategy Settings
  */
 const LLMSettings: React.FC = () => {
-  const strategy = strategyManager.getLLMStrategy()
+  const strategy = llmPredictionStrategy
   const [config, setConfig] = useState<LLMPredictionConfig>(strategy.getLLMConfig())
   const [saved, setSaved] = useState(false)
   const {
     pennyTraderMode,
-    llmWebSearchEnabled, setLlmWebSearchEnabled,
-    llmPremiumModel, setLlmPremiumModel,
-    llmPremiumThreshold, setLlmPremiumThreshold,
-    llmPremiumBudgetUSD, setLlmPremiumBudgetUSD,
     cryptoLLMEnabled, setCryptoLLMEnabled,
     cryptoModel, setCryptoModel,
     cryptoScanIntervalMs, setCryptoScanIntervalMs,
     cryptoMinConfidence, setCryptoMinConfidence,
-    llmProvider, setLlmProvider,
     ollamaBaseUrl, setOllamaBaseUrl,
     ollamaModel, setOllamaModel,
+    ollamaSecondaryModel, setOllamaSecondaryModel,
   } = useSettingsStore()
+
+  const [trainingCount, setTrainingCount] = useState(0)
+  const [exporting, setExporting] = useState(false)
+
+  useEffect(() => {
+    import('@/services/llm/LLMInteractionStore').then(m => {
+      m.llmInteractionStore.count().then(setTrainingCount)
+    })
+  }, [])
 
   // Safe number parsers — reject NaN from empty/invalid inputs
   const safeFloat = (val: string, fallback: number) => {
@@ -799,42 +898,34 @@ const LLMSettings: React.FC = () => {
   return (
     <MatrixCard title="LLM PREDICTION SETTINGS" subtitle="Configure AI-powered trading parameters" variant="glass">
       <div className="space-y-6">
-        {/* LLM Provider */}
+        {/* LLM Provider — Ollama Only */}
         <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">LLM Provider</h4>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Ollama Configuration</h4>
           <div className="grid grid-cols-2 gap-4">
-            <MatrixSelect
-              label="Provider"
-              value={llmProvider}
-              onChange={(e) => setLlmProvider(e.target.value as 'openrouter' | 'ollama')}
-              options={[
-                { value: 'openrouter', label: 'OpenRouter (cloud)' },
-                { value: 'ollama', label: 'Ollama (local)' },
-              ]}
+            <MatrixInput
+              label="Ollama Base URL"
+              value={ollamaBaseUrl}
+              onChange={(e) => setOllamaBaseUrl(e.target.value)}
+              hint="Default: http://localhost:11434/v1"
+              placeholder="http://localhost:11434/v1"
+            />
+            <MatrixInput
+              label="Primary Model"
+              value={ollamaModel}
+              onChange={(e) => setOllamaModel(e.target.value)}
+              hint="e.g. deepseek-r1:latest, llama3.1"
+              placeholder="deepseek-r1:latest"
+            />
+            <MatrixInput
+              label="Secondary Model (Signal Fusion)"
+              value={ollamaSecondaryModel}
+              onChange={(e) => setOllamaSecondaryModel(e.target.value)}
+              hint="Used for LLM signal fusion and confirmation"
+              placeholder="llama3.1:latest"
             />
           </div>
-          {llmProvider === 'ollama' && (
-            <div className="grid grid-cols-2 gap-4 mt-3">
-              <MatrixInput
-                label="Ollama Base URL"
-                value={ollamaBaseUrl}
-                onChange={(e) => setOllamaBaseUrl(e.target.value)}
-                hint="Default: http://localhost:11434/v1"
-                placeholder="http://localhost:11434/v1"
-              />
-              <MatrixInput
-                label="Model"
-                value={ollamaModel}
-                onChange={(e) => setOllamaModel(e.target.value)}
-                hint="e.g. deepseek-r1:latest, llama3.1"
-                placeholder="deepseek-r1:latest"
-              />
-            </div>
-          )}
           <p className="text-agent-text-muted text-xs mt-2 font-sans">
-            {llmProvider === 'ollama'
-              ? 'Uses your local Ollama instance. No API key required. Models stored on Samsung 1TB.'
-              : 'Routes through OpenRouter. Requires API key below. Supports web search and premium models.'}
+            Uses your local Ollama instance. No API key required. Models stored on Samsung 1TB.
           </p>
         </div>
 
@@ -882,19 +973,6 @@ const LLMSettings: React.FC = () => {
               hint="Minimum to trade"
             />
           </div>
-        </div>
-
-        {/* Web Search */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Web Search</h4>
-          <MatrixToggle
-            label="Enable Web Search"
-            enabled={llmWebSearchEnabled}
-            onChange={setLlmWebSearchEnabled}
-          />
-          <p className="text-agent-text-muted text-xs mt-2 font-sans">
-            When enabled, the LLM researches current news and data before predicting (~$0.013/call vs $0.001 without).
-          </p>
         </div>
 
         {/* Market Filters */}
@@ -981,48 +1059,6 @@ const LLMSettings: React.FC = () => {
           </p>
         </div>
 
-        {/* Premium Model Tiering */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Premium Model</h4>
-          <p className="text-agent-text-muted text-xs mb-3 font-sans">
-            Use a premium model for high-quality markets (quality score above threshold). Leave empty to disable.
-          </p>
-          <div className="grid grid-cols-2 gap-4">
-            <MatrixInput
-              label="Premium Model"
-              value={llmPremiumModel}
-              onChange={(e) => setLlmPremiumModel(e.target.value)}
-              hint="e.g. openai/gpt-4o"
-              placeholder="openai/gpt-4o"
-            />
-            <MatrixInput
-              label="Daily Budget ($)"
-              type="number"
-              step="0.10"
-              value={llmPremiumBudgetUSD.toString()}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value)
-                if (!isNaN(v)) setLlmPremiumBudgetUSD(Math.max(0.10, Math.min(5.0, v)))
-              }}
-              hint="$0.10 – $5.00"
-            />
-          </div>
-          <div className="mt-3">
-            <MatrixSlider
-              label="Quality Threshold"
-              min={15}
-              max={40}
-              step={1}
-              value={llmPremiumThreshold}
-              onChange={setLlmPremiumThreshold}
-              valueFormat={(v) => `${v} pts`}
-            />
-            <p className="text-agent-text-muted text-xs mt-1 font-sans">
-              Markets scoring above this threshold use the premium model. ~$0.007/call for GPT-4o.
-            </p>
-          </div>
-        </div>
-
         {/* Crypto LLM Mode */}
         <div>
           <h4 className="text-agent-green text-sm font-mono mb-3">Crypto LLM Mode</h4>
@@ -1067,6 +1103,34 @@ const LLMSettings: React.FC = () => {
           )}
         </div>
 
+        {/* Training Data Export */}
+        <div className="bg-black/30 border border-green-900/30 rounded-lg p-4">
+          <h4 className="text-green-400 font-mono text-sm mb-3">Training Data Pipeline</h4>
+          <p className="text-green-600 text-xs mb-3">{trainingCount} interactions recorded</p>
+          <div className="flex gap-2">
+            <button
+              className="px-3 py-1.5 bg-green-900/30 border border-green-700/50 rounded text-green-400 text-xs hover:bg-green-900/50 disabled:opacity-50"
+              disabled={exporting || trainingCount === 0}
+              onClick={async () => {
+                setExporting(true)
+                try {
+                  const { trainingDataExporter } = await import('@/services/llm/TrainingDataExporter')
+                  const { jsonl, stats } = await trainingDataExporter.exportAll()
+                  trainingDataExporter.downloadJsonl(jsonl)
+                  console.log('[Training] Exported:', stats)
+                } finally {
+                  setExporting(false)
+                }
+              }}
+            >
+              {exporting ? 'Exporting...' : 'Export JSONL'}
+            </button>
+          </div>
+          <p className="text-green-700 text-xs mt-2">
+            Exports ChatML JSONL for fine-tuning. Run: bash scripts/finetune.sh
+          </p>
+        </div>
+
         <MatrixButton onClick={handleSave} className="w-full">
           {saved ? 'Settings Saved' : 'Save Settings'}
         </MatrixButton>
@@ -1082,7 +1146,7 @@ const LLMSettings: React.FC = () => {
  * ProjectFW Arbitrage Settings
  */
 const ProjectFWSettings: React.FC = () => {
-  const strategy = strategyManager.getProjectFWStrategy()
+  const strategy = projectFWStrategy
   const { pennyTraderMode, fwEnableCrossMarket, fwCrossMarketBudgetUSD } = useSettingsStore()
 
   // Hydrate config from strategy defaults, overriding cross-market fields from persisted store
@@ -1330,16 +1394,8 @@ const CrossMarketDetails: React.FC<{
   config: ProjectFWConfig
   setConfig: (c: ProjectFWConfig) => void
 }> = ({ config, setConfig }) => {
-  const [budget, setBudget] = useState(openRouterService.getCostStats('crossMarket'))
+  const [budget] = useState({ dailyBudgetUSD: 0, dailySpendUSD: 0, callCountToday: 0 })
   const [showAdvanced, setShowAdvanced] = useState(false)
-
-  // Poll budget stats every 5 seconds
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setBudget(openRouterService.getCostStats('crossMarket'))
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [])
 
   const spentPct = budget.dailyBudgetUSD > 0
     ? Math.min(100, (budget.dailySpendUSD / budget.dailyBudgetUSD) * 100)
@@ -1363,12 +1419,12 @@ const CrossMarketDetails: React.FC<{
             {budget.callCountToday} calls
           </span>
         </div>
-        <div className="h-1.5 bg-black/50 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-agent-orange transition-all duration-300 rounded-full"
-            style={{ width: `${spentPct}%` }}
-          />
-        </div>
+        <progress
+          className="cross-market-budget-progress"
+          value={spentPct}
+          max={100}
+          aria-label="Cross-market budget usage"
+        />
       </div>
 
       {/* Advanced Settings Toggle */}
@@ -1430,7 +1486,7 @@ const CrossMarketDetails: React.FC<{
  * Dip Arbitrage Settings
  */
 const DipSettings: React.FC = () => {
-  const strategy = strategyManager.getDipStrategy()
+  const strategy = dipArbStrategy
   const [config, setConfig] = useState<DipArbConfig>(strategy.getDipConfig())
   const [saved, setSaved] = useState(false)
   const { pennyTraderMode } = useSettingsStore()
@@ -1691,40 +1747,34 @@ const AlertSettings: React.FC = () => {
  */
 const APISettings: React.FC = () => {
   const {
-    openRouterApiKey, setOpenRouterApiKey,
     polyBacktestApiKey, setPolyBacktestApiKey,
+    relayerApiKey, setRelayerApiKey,
   } = useSettingsStore()
   const isWalletConnected = useWalletStore(s => s.isConnected)
-  const [openRouterKey, setOpenRouterKey] = useState(openRouterApiKey || localStorage.getItem('OPENROUTER_API_KEY') || '')
-  const [llmModel, setLlmModel] = useState(localStorage.getItem('OPENROUTER_MODEL') || 'meta-llama/llama-3.1-70b-instruct')
-  const [tavilyKey, setTavilyKey] = useState(localStorage.getItem('TAVILY_API_KEY') || '')
+  const [tavilyKey, setTavilyKey] = useState('')
   const [polyBacktestKey, setPolyBacktestKey] = useState(polyBacktestApiKey || '')
+  const [relayerKey, setRelayerKey] = useState(relayerApiKey || '')
   const [saved, setSaved] = useState(false)
 
+  // Hydrate Tavily key from secureStorage on mount
+  useEffect(() => {
+    import('@/utils/secureStorage').then(m => m.secureStorage.get<string>('tavily_api_key', true)).then(key => {
+      if (key) setTavilyKey(key)
+    }).catch(() => {})
+  }, [])
+
   const handleSave = () => {
-    // Save to localStorage (legacy support)
-    localStorage.setItem('OPENROUTER_API_KEY', openRouterKey)
-    localStorage.setItem('TAVILY_API_KEY', tavilyKey)
-
-    // Save to settings store (primary storage)
-    setOpenRouterApiKey(openRouterKey)
+    import('@/utils/secureStorage').then(m => m.secureStorage.set('tavily_api_key', tavilyKey, { encrypt: true })).catch(() => {})
     setPolyBacktestApiKey(polyBacktestKey.trim())
-
-    // Apply model selection
-    localStorage.setItem('OPENROUTER_MODEL', llmModel)
-    openRouterService.setConfig({ model: llmModel })
-
-    // Refresh the OpenRouter service with the new API key
-    openRouterService.refreshApiKey()
+    setRelayerApiKey(relayerKey.trim())
 
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
   }
 
-  // Check if API key is configured
-  const isOpenRouterConfigured = !!(openRouterKey && openRouterKey.length > 10)
   const isTavilyConfigured = !!(tavilyKey && tavilyKey.length > 5)
   const isPolyBacktestConfigured = !!(polyBacktestKey && polyBacktestKey.length > 5)
+  const isRelayerConfigured = !!(relayerKey && relayerKey.length > 5)
   const isWalletConfigured = isWalletConnected
 
   return (
@@ -1741,12 +1791,6 @@ const APISettings: React.FC = () => {
           <h4 className="text-agent-green text-sm font-mono mb-3">API Status</h4>
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-agent-text-muted text-sm font-sans">OpenRouter</span>
-              <MatrixBadge variant={isOpenRouterConfigured ? 'success' : 'warning'} size="sm">
-                {isOpenRouterConfigured ? 'Configured' : 'Not Set'}
-              </MatrixBadge>
-            </div>
-            <div className="flex items-center justify-between">
               <span className="text-agent-text-muted text-sm font-sans">Tavily (Optional)</span>
               <MatrixBadge variant={isTavilyConfigured ? 'success' : 'default'} size="sm">
                 {isTavilyConfigured ? 'Configured' : 'Not Set'}
@@ -1756,6 +1800,12 @@ const APISettings: React.FC = () => {
               <span className="text-agent-text-muted text-sm font-sans">PolyBacktest (Optional)</span>
               <MatrixBadge variant={isPolyBacktestConfigured ? 'success' : 'default'} size="sm">
                 {isPolyBacktestConfigured ? 'Configured' : 'Not Set'}
+              </MatrixBadge>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-agent-text-muted text-sm font-sans">Relayer (Optional)</span>
+              <MatrixBadge variant={isRelayerConfigured ? 'success' : 'default'} size="sm">
+                {isRelayerConfigured ? 'Configured' : 'Not Set'}
               </MatrixBadge>
             </div>
             <div className="flex items-center justify-between">
@@ -1776,28 +1826,6 @@ const APISettings: React.FC = () => {
         </div>
 
         <MatrixInput
-          label="OpenRouter API Key"
-          type="password"
-          value={openRouterKey}
-          onChange={(e) => setOpenRouterKey(e.target.value)}
-          placeholder="sk-or-v1-..."
-          hint="Required for LLM analysis"
-        />
-
-        <MatrixSelect
-          label="LLM Model"
-          value={llmModel}
-          onChange={(e) => setLlmModel(e.target.value)}
-          options={[
-            { value: 'meta-llama/llama-3.1-70b-instruct', label: 'Llama 3.1 70B (Recommended — ~$0.0003/call)' },
-            { value: 'google/gemini-flash-1.5', label: 'Gemini 1.5 Flash (~$0.0002/call)' },
-            { value: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet (~$0.006/call)' },
-            { value: 'openai/gpt-4o-mini', label: 'GPT-4o Mini (~$0.0004/call)' },
-          ]}
-          hint="Cheaper models reduce 402 errors. Llama 3.1 70B is 10× cheaper than Claude."
-        />
-
-        <MatrixInput
           label="Tavily API Key (Optional)"
           type="password"
           value={tavilyKey}
@@ -1812,7 +1840,16 @@ const APISettings: React.FC = () => {
           value={polyBacktestKey}
           onChange={(e) => setPolyBacktestKey(e.target.value)}
           placeholder="pb-..."
-          hint="For BTC Up/Down backtesting and historical enrichment"
+          hint="For Crypto Up/Down backtesting and historical enrichment"
+        />
+
+        <MatrixInput
+          label="Polymarket Relayer API Key (Optional)"
+          type="password"
+          value={relayerKey}
+          onChange={(e) => setRelayerKey(e.target.value)}
+          placeholder="Enter relayer API key..."
+          hint="Enables gasless merges for Gabagool — no MATIC needed. Not persisted across reloads."
         />
 
         <div className="flex items-center gap-4">
@@ -2022,7 +2059,7 @@ const RiskManagementSettings: React.FC = () => {
             <MatrixNumberInput
               label="Daily Loss Limit"
               value={dailyLossLimit}
-              onChange={(v) => v !== undefined && setDailyLossLimit(v)}
+              onChange={setDailyLossLimit}
               prefix="$"
               min={1}
               max={1000}
@@ -2033,7 +2070,7 @@ const RiskManagementSettings: React.FC = () => {
             <MatrixNumberInput
               label="Weekly Loss Limit"
               value={weeklyLossLimit}
-              onChange={(v) => v !== undefined && setWeeklyLossLimit(v)}
+              onChange={setWeeklyLossLimit}
               prefix="$"
               min={5}
               max={5000}
@@ -2044,7 +2081,7 @@ const RiskManagementSettings: React.FC = () => {
             <MatrixNumberInput
               label="Max Trades / Hour"
               value={maxTradesPerHour}
-              onChange={(v) => v !== undefined && setMaxTradesPerHour(v)}
+              onChange={setMaxTradesPerHour}
               min={1}
               max={100}
               step={1}
@@ -2054,7 +2091,7 @@ const RiskManagementSettings: React.FC = () => {
             <MatrixNumberInput
               label="Consecutive Failure Limit"
               value={consecutiveFailureLimit}
-              onChange={(v) => v !== undefined && setConsecutiveFailureLimit(v)}
+              onChange={setConsecutiveFailureLimit}
               min={1}
               max={20}
               step={1}
@@ -2064,7 +2101,7 @@ const RiskManagementSettings: React.FC = () => {
             <MatrixNumberInput
               label="Min Balance to Trade"
               value={minBalanceForTrade}
-              onChange={(v) => v !== undefined && setMinBalanceForTrade(v)}
+              onChange={setMinBalanceForTrade}
               prefix="$"
               min={1}
               max={500}
@@ -2129,7 +2166,7 @@ const RiskManagementSettings: React.FC = () => {
 }
 
 /**
- * BTC Up/Down Settings Panel
+ * Crypto Up/Down Settings Panel
  */
 const BtcUpDownSettings: React.FC = () => {
   const {
@@ -2137,7 +2174,7 @@ const BtcUpDownSettings: React.FC = () => {
     btcEnableBtc, setBtcEnableBtc,
     btcEnableEth, setBtcEnableEth,
     btcEnableSol, setBtcEnableSol,
-    btcEnableXrp, setBtcEnableXrp,
+    btcEnableXrp,
     btcEnable5m, setBtcEnable5m,
     btcEnable15m, setBtcEnable15m,
     btcEnableHourly, setBtcEnableHourly,
@@ -2165,11 +2202,7 @@ const BtcUpDownSettings: React.FC = () => {
     btcFourHourMakerMode, setBtcFourHourMakerMode,
     btcEarlyExitEnabled, setBtcEarlyExitEnabled,
     btcEarlyExitTPPercent, setBtcEarlyExitTPPercent,
-    openRouterApiKey,
   } = useSettingsStore()
-
-  // OpenRouter key may live in store, localStorage, or env var
-  const hasOpenRouterKey = !!(openRouterApiKey || localStorage.getItem('OPENROUTER_API_KEY') || import.meta.env.VITE_OPENROUTER_API_KEY)
 
   const [saved, setSaved] = useState(false)
   const [diagnosing, setDiagnosing] = useState(false)
@@ -2182,7 +2215,7 @@ const BtcUpDownSettings: React.FC = () => {
   }
 
   return (
-    <MatrixCard title="BTC UP/DOWN STRATEGY" subtitle="Binary markets on crypto price direction (1hr/4hr focus)" variant="glass">
+    <MatrixCard title="CRYPTO UP/DOWN STRATEGY" subtitle="Resolution-hold on cheap outcomes using multi-factor signals" variant="glass">
       <div className="space-y-6">
         {/* Asset Toggles */}
         <div>
@@ -2202,7 +2235,10 @@ const BtcUpDownSettings: React.FC = () => {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-agent-text font-sans text-sm">XRP</span>
-              <MatrixToggle enabled={btcEnableXrp} onChange={setBtcEnableXrp} />
+              <MatrixToggle
+                enabled={btcEnableXrp}
+                onChange={(value) => useSettingsStore.setState({ btcEnableXrp: value })}
+              />
             </div>
           </div>
         </div>
@@ -2357,15 +2393,12 @@ const BtcUpDownSettings: React.FC = () => {
               <div>
                 <span className="text-agent-text font-sans text-sm">LLM Signal Fusion</span>
                 <p className="text-agent-text-muted text-xs font-sans">
-                  {hasOpenRouterKey
-                    ? 'Independent LLM prediction fused with mechanical signal'
-                    : 'Requires OpenRouter API key (set in API Keys tab)'}
+                  Independent LLM prediction fused with mechanical signal (via Ollama)
                 </p>
               </div>
               <MatrixToggle
                 enabled={btcUseLLMFusion}
                 onChange={setBtcUseLLMFusion}
-                disabled={!hasOpenRouterKey}
               />
             </div>
             {btcUseLLMFusion && (
@@ -2395,15 +2428,12 @@ const BtcUpDownSettings: React.FC = () => {
                 <div>
                   <span className="text-agent-text font-sans text-sm">LLM Confirmation (legacy)</span>
                   <p className="text-agent-text-muted text-xs font-sans">
-                    {hasOpenRouterKey
-                      ? 'AI verifies every signal before trading (~$0.002/call)'
-                      : 'Requires OpenRouter API key (set in API Keys tab)'}
+                    AI verifies every signal before trading (via Ollama)
                   </p>
                 </div>
                 <MatrixToggle
                   enabled={btcUseLLMConfirmation}
                   onChange={setBtcUseLLMConfirmation}
-                  disabled={!hasOpenRouterKey}
                 />
               </div>
             )}
@@ -2413,13 +2443,11 @@ const BtcUpDownSettings: React.FC = () => {
                 value={btcLLMModel}
                 onChange={(e) => setBtcLLMModel(e.target.value)}
                 options={[
-                  { value: 'deepseek/deepseek-r1', label: 'DeepSeek R1 (Recommended — reasoning, ~$0.003/call)' },
-                  { value: 'google/gemini-flash-1.5', label: 'Gemini 1.5 Flash (~$0.0002/call)' },
-                  { value: 'meta-llama/llama-3.1-70b-instruct', label: 'Llama 3.1 70B (~$0.0003/call)' },
-                  { value: 'openai/gpt-4o-mini', label: 'GPT-4o Mini (~$0.0004/call)' },
-                  { value: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet (~$0.006/call)' },
+                  { value: 'plutus', label: 'Plutus (Recommended — crypto-focused 8B)' },
+                  { value: 'qwen3', label: 'Qwen3 8B (reasoning, general purpose)' },
+                  { value: 'deepseek-r1', label: 'DeepSeek R1 8B (chain-of-thought reasoning)' },
                 ]}
-                hint="Reasoning models (DeepSeek R1) work best for signal analysis"
+                hint="Local Ollama models — plutus is optimized for crypto trading analysis"
               />
             )}
           </div>
@@ -2512,7 +2540,7 @@ const BtcUpDownSettings: React.FC = () => {
                     const event = await polymarketClient.getEventBySlug(slug)
                     const activeMarkets = event?.markets?.filter((m: { active: boolean; closed: boolean }) => m.active && !m.closed) || []
                     if (activeMarkets.length > 0) {
-                      const prices = activeMarkets.map((m: any) => m.lastTradePrice || m.outcomePrices?.[0] || 0)
+                      const prices = activeMarkets.map((m: { lastTradePrice?: number; outcomePrices?: number[] }) => m.lastTradePrice || m.outcomePrices?.[0] || 0)
                       results.push(`${asset} ${dur}: ${activeMarkets.length} mkt (${prices.map((p: number) => `${(Number(p) * 100).toFixed(0)}c`).join('/')})`)
                     }
                   } catch { /* skip failed lookups */ }
@@ -2669,16 +2697,31 @@ const GabagoolSettings: React.FC = () => {
     gabagoolMaxImbalance, setGabagoolMaxImbalance,
     gabagoolMinProfitMargin, setGabagoolMinProfitMargin,
     gabagoolCooldownMs, setGabagoolCooldownMs,
+    gabagoolDurations, setGabagoolDurations,
+    gabagoolDepthAwareSizing, setGabagoolDepthAwareSizing,
+    gabagoolAdaptiveCheapness, setGabagoolAdaptiveCheapness,
+    gabagoolFillRateFeedback, setGabagoolFillRateFeedback,
+    gabagoolSpreadMinWidth, setGabagoolSpreadMinWidth,
   } = useSettingsStore()
 
+  const toggleDuration = useCallback((d: '15m' | '1h' | '4h') => {
+    const current = gabagoolDurations || ['1h']
+    if (current.includes(d)) {
+      if (current.length > 1) setGabagoolDurations(current.filter(x => x !== d))
+    } else {
+      setGabagoolDurations([...current, d])
+    }
+  }, [gabagoolDurations, setGabagoolDurations])
+
   return (
-    <MatrixCard title="GABAGOOL ACCUMULATOR" subtitle="Direction-agnostic accumulation merge arb on BTC 15m markets" variant="glass">
+    <MatrixCard title="GABAGOOL ACCUMULATOR" subtitle="Direction-agnostic accumulation merge arb on BTC markets" variant="glass">
       <div className="space-y-6">
         <div className="bg-agent-cyan/10 border border-agent-cyan/30 rounded-lg p-4">
           <h4 className="text-agent-cyan text-sm font-bold mb-2 font-mono">How It Works</h4>
           <p className="text-agent-text-muted text-xs font-sans">
-            Buys whichever side (YES or NO) is temporarily cheap across the 15-min window.
+            Buys whichever side (YES or NO) is temporarily cheap across the window.
             Locks profit when avg_YES + avg_NO &lt; $1.00. Maker-only orders (0% fees).
+            Supports 15m, 1h, and 4h windows simultaneously.
           </p>
         </div>
 
@@ -2691,6 +2734,30 @@ const GabagoolSettings: React.FC = () => {
           <MatrixToggle enabled={gabagoolEnabled} onChange={setGabagoolEnabled} />
         </div>
 
+        {/* Window Durations */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Window Durations</h4>
+          <div className="flex gap-3">
+            {(['15m', '1h', '4h'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => toggleDuration(d)}
+                className={cn(
+                  'px-4 py-2 rounded-lg font-mono text-sm border transition-all',
+                  (gabagoolDurations || ['1h']).includes(d)
+                    ? 'bg-agent-green/20 border-agent-green text-agent-green'
+                    : 'bg-agent-bg-secondary/50 border-agent-text-muted/20 text-agent-text-muted',
+                )}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+          <p className="text-agent-text-muted text-xs font-sans mt-1">
+            4h = most accumulation time, 1h = balanced, 15m = fast windows
+          </p>
+        </div>
+
         {/* Sizing */}
         <div>
           <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
@@ -2700,7 +2767,7 @@ const GabagoolSettings: React.FC = () => {
               value={gabagoolMaxExposure}
               onChange={setGabagoolMaxExposure}
               min={1} max={100} step={1}
-              hint="Total USDC per 15-min window"
+              hint="Total USDC per window"
             />
             <MatrixNumberInput
               label="Order Size ($)"
@@ -2753,6 +2820,41 @@ const GabagoolSettings: React.FC = () => {
             />
           </div>
         </div>
+
+        {/* Advanced Features */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Advanced Features</h4>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between p-3 bg-agent-bg-secondary/30 rounded-lg">
+              <div>
+                <span className="text-agent-text text-sm font-mono">Adaptive Cheapness</span>
+                <p className="text-agent-text-muted text-xs font-sans">Widen threshold when ask sum &lt; 95¢</p>
+              </div>
+              <MatrixToggle enabled={gabagoolAdaptiveCheapness} onChange={setGabagoolAdaptiveCheapness} />
+            </div>
+            <div className="flex items-center justify-between p-3 bg-agent-bg-secondary/30 rounded-lg">
+              <div>
+                <span className="text-agent-text text-sm font-mono">Depth-Aware Sizing</span>
+                <p className="text-agent-text-muted text-xs font-sans">Scale order size to book liquidity</p>
+              </div>
+              <MatrixToggle enabled={gabagoolDepthAwareSizing} onChange={setGabagoolDepthAwareSizing} />
+            </div>
+            <div className="flex items-center justify-between p-3 bg-agent-bg-secondary/30 rounded-lg">
+              <div>
+                <span className="text-agent-text text-sm font-mono">Fill-Rate Feedback</span>
+                <p className="text-agent-text-muted text-xs font-sans">Auto-adjust limit offset from fill speed</p>
+              </div>
+              <MatrixToggle enabled={gabagoolFillRateFeedback} onChange={setGabagoolFillRateFeedback} />
+            </div>
+            <MatrixNumberInput
+              label="Min Spread Width"
+              value={gabagoolSpreadMinWidth}
+              onChange={setGabagoolSpreadMinWidth}
+              min={0} max={0.10} step={0.005}
+              hint="Skip if bid-ask spread tighter than this (0 = disabled)"
+            />
+          </div>
+        </div>
       </div>
     </MatrixCard>
   )
@@ -2764,7 +2866,7 @@ const GabagoolSettings: React.FC = () => {
 const ImpulseSniperSettings: React.FC = () => {
   const {
     impulseEnabled, setImpulseEnabled,
-    impulseThreshold, setImpulseThreshold,
+    impulseThreshold,
     impulseConfirmationMs, setImpulseConfirmationMs,
     impulseSnapbackPct, setImpulseSnapbackPct,
     impulseTradeSize, setImpulseTradeSize,
@@ -2779,8 +2881,8 @@ const ImpulseSniperSettings: React.FC = () => {
     impulseThresholdSOL, setImpulseThresholdSOL,
     impulseThresholdXRP, setImpulseThresholdXRP,
     impulseStopLossPct, setImpulseStopLossPct,
-    impulseTakeProfitPct, setImpulseTakeProfitPct,
-    impulseVpinFilter, setImpulseVpinFilter,
+    impulseTakeProfitPct,
+    impulseVpinFilter,
   } = useSettingsStore()
 
   return (
@@ -2888,7 +2990,10 @@ const ImpulseSniperSettings: React.FC = () => {
             <h4 className="text-agent-green text-sm font-mono">VPIN Toxicity Filter</h4>
             <p className="text-agent-text-muted text-xs font-sans">Skip trades when informed flow detected (VPIN &gt; threshold)</p>
           </div>
-          <MatrixToggle enabled={impulseVpinFilter} onChange={setImpulseVpinFilter} />
+          <MatrixToggle
+            enabled={impulseVpinFilter}
+            onChange={(value) => useSettingsStore.setState({ impulseVpinFilter: value })}
+          />
         </div>
 
         {/* Stop Loss / Take Profit */}
@@ -2905,7 +3010,7 @@ const ImpulseSniperSettings: React.FC = () => {
             <MatrixNumberInput
               label="Take Profit (%)"
               value={impulseTakeProfitPct * 100}
-              onChange={(v) => setImpulseTakeProfitPct(v / 100)}
+              onChange={(v) => useSettingsStore.setState({ impulseTakeProfitPct: v / 100 })}
               min={10} max={100} step={10}
               hint="Auto-sell if gain exceeds this %"
             />
@@ -2919,7 +3024,7 @@ const ImpulseSniperSettings: React.FC = () => {
             <MatrixNumberInput
               label="Threshold ($)"
               value={impulseThreshold}
-              onChange={setImpulseThreshold}
+              onChange={(v) => useSettingsStore.setState({ impulseThreshold: v })}
               min={50} max={500} step={25}
               hint="Min BTC USD move to trigger"
             />
@@ -2982,8 +3087,11 @@ const ImpulseSniperSettings: React.FC = () => {
               hint="Min time between trades"
             />
             <div>
-              <label className="block text-agent-text-muted text-xs font-mono mb-1">Preferred Duration</label>
+              <label htmlFor="impulse-preferred-duration" className="block text-agent-text-muted text-xs font-mono mb-1">Preferred Duration</label>
               <select
+                id="impulse-preferred-duration"
+                aria-label="Preferred Duration"
+                title="Preferred Duration"
                 value={impulsePreferredDuration}
                 onChange={(e) => setImpulsePreferredDuration(e.target.value as '15m' | '1h' | '4h')}
                 className="w-full bg-agent-bg-secondary border border-agent-green/30 rounded px-3 py-2 text-agent-green text-sm font-mono focus:border-agent-green focus:outline-none"
@@ -2997,8 +3105,11 @@ const ImpulseSniperSettings: React.FC = () => {
           </div>
           <div className="mt-4">
             <div>
-              <label className="block text-agent-text-muted text-xs font-mono mb-1">Order Mode</label>
+              <label htmlFor="impulse-order-mode" className="block text-agent-text-muted text-xs font-mono mb-1">Order Mode</label>
               <select
+                id="impulse-order-mode"
+                aria-label="Order Mode"
+                title="Order Mode"
                 value={impulseOrderMode}
                 onChange={(e) => setImpulseOrderMode(e.target.value as 'fok' | 'gtd')}
                 className="w-full bg-agent-bg-secondary border border-agent-green/30 rounded px-3 py-2 text-agent-green text-sm font-mono focus:border-agent-green focus:outline-none"
@@ -3008,6 +3119,157 @@ const ImpulseSniperSettings: React.FC = () => {
               </select>
               <p className="text-agent-text-muted text-xs mt-1 font-sans">FOK = fastest execution for latency arb</p>
             </div>
+          </div>
+        </div>
+      </div>
+    </MatrixCard>
+  )
+}
+
+const LiquidationMomentumSettings: React.FC = () => {
+  const {
+    liqEnabled, setLiqEnabled,
+    liqMinThresholdUSD, setLiqMinThresholdUSD,
+    liqMaxThresholdUSD, setLiqMaxThresholdUSD,
+    liqWindowMs, setLiqWindowMs,
+    liqCooldownMs, setLiqCooldownMs,
+    liqTradeSize, setLiqTradeSize,
+    liqMaxAskPrice, setLiqMaxAskPrice,
+    liqOrderExpiryMs, setLiqOrderExpiryMs,
+    liqStopLossPct, setLiqStopLossPct,
+    liqTakeProfitPct, setLiqTakeProfitPct,
+    liqPreferredDuration, setLiqPreferredDuration,
+  } = useSettingsStore()
+
+  return (
+    <MatrixCard title="LIQUIDATION MOMENTUM" subtitle="Hyperliquid liquidation cascades → Polymarket 5m binary trades" variant="glass">
+      <div className="space-y-6">
+        <div className="bg-agent-cyan/10 border border-agent-cyan/30 rounded-lg p-4">
+          <h4 className="text-agent-cyan text-sm font-bold mb-2 font-mono">How It Works</h4>
+          <p className="text-agent-text-muted text-xs font-sans">
+            Monitors BTC liquidation events on Hyperliquid via WebSocket. When long liquidations cascade
+            ($25K–$100K), buys DOWN on the 5-minute Polymarket binary. When short liquidations cascade,
+            buys UP. GTD maker-only orders (0% fees).
+          </p>
+        </div>
+
+        {/* Enable Toggle */}
+        <div className="flex items-center justify-between p-4 bg-agent-bg-secondary/50 rounded-lg">
+          <div>
+            <h4 className="text-agent-green text-sm font-mono">Enable Strategy</h4>
+            <p className="text-agent-text-muted text-xs font-sans">Activate liquidation momentum trading</p>
+          </div>
+          <MatrixToggle enabled={liqEnabled} onChange={setLiqEnabled} />
+        </div>
+
+        {/* Liquidation Thresholds */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Liquidation Thresholds</h4>
+          <div className="grid grid-cols-2 gap-4">
+            <MatrixNumberInput
+              label="Min Threshold ($)"
+              value={liqMinThresholdUSD}
+              onChange={setLiqMinThresholdUSD}
+              min={1000} max={500_000} step={5000}
+              hint="Min liq volume to trigger signal"
+            />
+            <MatrixNumberInput
+              label="Max Threshold ($)"
+              value={liqMaxThresholdUSD}
+              onChange={setLiqMaxThresholdUSD}
+              min={10_000} max={1_000_000} step={10_000}
+              hint="Above this = too chaotic, skip"
+            />
+          </div>
+        </div>
+
+        {/* Window & Cooldown */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Timing</h4>
+          <div className="grid grid-cols-2 gap-4">
+            <MatrixNumberInput
+              label="Accumulation Window (s)"
+              value={liqWindowMs / 1000}
+              onChange={(v) => setLiqWindowMs(v * 1000)}
+              min={10} max={300} step={10}
+              hint="Rolling window to sum liquidation volume"
+            />
+            <MatrixNumberInput
+              label="Cooldown (s)"
+              value={liqCooldownMs / 1000}
+              onChange={(v) => setLiqCooldownMs(v * 1000)}
+              min={10} max={600} step={10}
+              hint="Min time between trades"
+            />
+          </div>
+        </div>
+
+        {/* Order Parameters */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Order Parameters</h4>
+          <div className="grid grid-cols-2 gap-4">
+            <MatrixNumberInput
+              label="Trade Size ($)"
+              value={liqTradeSize}
+              onChange={setLiqTradeSize}
+              min={1} max={50} step={0.5}
+              hint="USDC per trade"
+            />
+            <MatrixNumberInput
+              label="Max Ask Price"
+              value={liqMaxAskPrice}
+              onChange={setLiqMaxAskPrice}
+              min={0.30} max={0.70} step={0.01}
+              hint="Skip if outcome already above this"
+            />
+            <MatrixNumberInput
+              label="Order Expiry (s)"
+              value={liqOrderExpiryMs / 1000}
+              onChange={(v) => setLiqOrderExpiryMs(v * 1000)}
+              min={10} max={120} step={5}
+              hint="GTD order time-to-live"
+            />
+          </div>
+        </div>
+
+        {/* SL/TP */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Stop Loss / Take Profit</h4>
+          <div className="grid grid-cols-2 gap-4">
+            <MatrixNumberInput
+              label="Stop Loss (%)"
+              value={liqStopLossPct * 100}
+              onChange={(v) => setLiqStopLossPct(v / 100)}
+              min={5} max={95} step={5}
+              hint="SL percentage for positions"
+            />
+            <MatrixNumberInput
+              label="Take Profit (%)"
+              value={liqTakeProfitPct * 100}
+              onChange={(v) => setLiqTakeProfitPct(v / 100)}
+              min={10} max={95} step={5}
+              hint="TP percentage for positions"
+            />
+          </div>
+        </div>
+
+        {/* Preferred Duration */}
+        <div>
+          <h4 className="text-agent-green text-sm font-mono mb-3">Market Window</h4>
+          <div>
+            <label htmlFor="liq-duration" className="block text-agent-text-muted text-xs font-mono mb-1">Preferred Duration</label>
+            <select
+              id="liq-duration"
+              aria-label="Preferred Duration"
+              title="Preferred Duration"
+              value={liqPreferredDuration}
+              onChange={(e) => setLiqPreferredDuration(e.target.value as '5m' | '15m')}
+              className="w-full bg-agent-bg-secondary border border-agent-green/30 rounded px-3 py-2 text-agent-green text-sm font-mono focus:border-agent-green focus:outline-none"
+            >
+              <option value="5m">5 Min (recommended — tightest window)</option>
+              <option value="15m">15 Min (fallback)</option>
+            </select>
+            <p className="text-agent-text-muted text-xs mt-1 font-sans">5m = tightest alignment with liquidation momentum decay</p>
           </div>
         </div>
       </div>

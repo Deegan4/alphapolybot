@@ -228,7 +228,7 @@ export class MarketScanner {
         market,
         eligible: false,
         score: 0,
-        reason: 'Crypto Up/Down market (handled by BTC Up/Down strategy)',
+        reason: 'Crypto Up/Down market (handled by Crypto Up/Down strategy)',
       }
     }
 

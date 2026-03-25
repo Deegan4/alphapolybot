@@ -92,7 +92,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
       <div className="flex items-center justify-between px-3 pt-2.5 pb-1">
         <div className="flex items-center gap-2">
           <span
-            className="w-2.5 h-2.5 rounded-full"
+            className={`w-2.5 h-2.5 rounded-full ${direction ? 'dot-ping' : ''}`}
             style={{ backgroundColor: dotColor }}
           />
           <span className="text-base font-sans font-bold text-agent-text">{symbol}</span>
@@ -159,7 +159,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
                 <>
                   <span className="text-agent-text-label text-[10px]">·</span>
                   <span className={`text-[10px] font-mono tabular-nums ${
-                    remaining < 60_000 ? 'text-agent-orange' : 'text-agent-text-muted'
+                    remaining < 60_000 ? 'text-agent-orange animate-pulse' : 'text-agent-text-muted'
                   }`}>
                     {formatCountdown(remaining)}
                   </span>
@@ -228,7 +228,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
           <div className="text-[9px] font-sans text-agent-text-muted uppercase">Edge</div>
           <div className={`text-[11px] font-mono font-bold tabular-nums ${
             edgeStrength > 0 ? 'text-agent-green' : edgeStrength < 0 ? 'text-agent-red' : 'text-agent-text-muted'
-          }`}>
+          } ${Math.abs(edgeStrength) > 0.3 ? 'animate-edge-glow' : ''}`}>
             {edgeStrength !== 0 ? `${edgeStrength >= 0 ? '+' : ''}${(edgeStrength * 100).toFixed(1)}%` : '--'}
           </div>
         </div>

@@ -1,0 +1,7 @@
+# MLX LoRA fine-tuning dependencies for AlphaPolyBot
+# Install: pip3 install -r scripts/requirements-finetune.txt
+mlx>=0.21.0
+mlx-lm>=0.21.0
+numpy>=1.26.0
+huggingface-hub>=0.20.0
+transformers>=4.40.0

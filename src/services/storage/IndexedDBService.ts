@@ -2,13 +2,14 @@ import { openDB, type IDBPDatabase } from 'idb'
 import type { ActivityItem, ArbRound, PendingGtcOrder } from '@/types'
 import type { TrackedPosition } from '@/services/trading/PositionLifecycleManager'
 import type { TradeRecord } from '@/services/trading/TradeLogger'
+// LLMInteraction type used by llmInteractions store — schema defined inline below
 
 // ==========================================
 // DATABASE SCHEMA
 // ==========================================
 
 const DB_NAME = 'alphapolybot'
-const DB_VERSION = 5
+const DB_VERSION = 6
 
 interface AlphaPolyBotDB {
   activities: {
@@ -140,6 +141,14 @@ export class IndexedDBService {
           if (!db.objectStoreNames.contains('calibrationData')) {
             const calStore = db.createObjectStore('calibrationData', { keyPath: 'marketId' })
             calStore.createIndex('by-timestamp', 'timestamp')
+          }
+
+          // LLM interactions store (v6 — training data pipeline)
+          if (!db.objectStoreNames.contains('llmInteractions')) {
+            const llmStore = db.createObjectStore('llmInteractions', { keyPath: 'id' })
+            llmStore.createIndex('by-timestamp', 'timestamp')
+            llmStore.createIndex('by-promptType', 'promptType')
+            llmStore.createIndex('by-exported', 'exported')
           }
         },
       })

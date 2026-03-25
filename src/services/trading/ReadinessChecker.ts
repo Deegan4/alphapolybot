@@ -10,6 +10,7 @@
 
 import { useWalletStore } from '@/stores/walletStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useBalanceHistoryStore } from '@/stores/balanceHistoryStore'
 import { polymarketClient } from '@/services/api'
 import { strategyManager } from '@/services/strategies'
 import { realtimeService } from '@/services/realtime'
@@ -49,41 +50,63 @@ class ReadinessCheckerService {
   getReport(): ReadinessReport {
     const checks: ReadinessCheck[] = []
 
-    // 1. Wallet connected
+    // 1. Wallet / Paper balance
+    const isDryRun = useSettingsStore.getState().dryRun
     try {
-      const walletState = useWalletStore.getState()
-      checks.push({
-        id: 'credentials',
-        label: 'Wallet connected',
-        severity: 'critical',
-        status: walletState.isConnected ? 'pass' : 'fail',
-        detail: walletState.isConnected
-          ? `Address: ${walletState.address?.slice(0, 10)}...`
-          : 'No wallet connected',
-        action: walletState.isConnected ? undefined : { label: 'Connect', route: '/settings' },
-      })
-
-      // 2. USD balance
-      const balance = walletState.balance ?? 0
-      checks.push({
-        id: 'usd_balance',
-        label: 'USDC.e balance',
-        severity: 'critical',
-        status: balance > 0 ? 'pass' : 'fail',
-        detail: balance > 0 ? `$${balance.toFixed(2)}` : 'No USDC.e balance — deposit on Polygon',
-        action: balance > 0 ? undefined : { label: 'Check balance', route: '/settings' },
-      })
-
-      // 3. Buying power
-      const buyingPower = walletState.buyingPower ?? 0
-      if (walletState.isConnected) {
+      if (isDryRun) {
+        // Dry run: show paper balance instead of wallet
+        const paperBalance = useBalanceHistoryStore.getState().simulatedBalance
         checks.push({
-          id: 'buying_power',
-          label: 'Buying power',
-          severity: 'warn',
-          status: buyingPower > 1 ? 'pass' : 'warn',
-          detail: buyingPower > 1 ? `$${buyingPower.toFixed(2)} available` : 'Low buying power — close positions or deposit',
+          id: 'credentials',
+          label: 'Trading mode',
+          severity: 'info',
+          status: 'pass',
+          detail: 'Paper trading — no wallet needed',
         })
+        checks.push({
+          id: 'usd_balance',
+          label: 'Paper balance',
+          severity: 'critical',
+          status: paperBalance > 0 ? 'pass' : 'fail',
+          detail: paperBalance > 0 ? `$${paperBalance.toFixed(2)} (simulated)` : 'Paper balance depleted — reset in Settings',
+          action: paperBalance > 0 ? undefined : { label: 'Reset', route: '/settings' },
+        })
+      } else {
+        // Live mode: check real wallet
+        const walletState = useWalletStore.getState()
+        checks.push({
+          id: 'credentials',
+          label: 'Wallet connected',
+          severity: 'critical',
+          status: walletState.isConnected ? 'pass' : 'fail',
+          detail: walletState.isConnected
+            ? `Address: ${walletState.address?.slice(0, 10)}...`
+            : 'No wallet connected',
+          action: walletState.isConnected ? undefined : { label: 'Connect', route: '/settings' },
+        })
+
+        // 2. USD balance
+        const balance = walletState.balance ?? 0
+        checks.push({
+          id: 'usd_balance',
+          label: 'USDC.e balance',
+          severity: 'critical',
+          status: balance > 0 ? 'pass' : 'fail',
+          detail: balance > 0 ? `$${balance.toFixed(2)}` : 'No USDC.e balance — deposit on Polygon',
+          action: balance > 0 ? undefined : { label: 'Check balance', route: '/settings' },
+        })
+
+        // 3. Buying power
+        const buyingPower = walletState.buyingPower ?? 0
+        if (walletState.isConnected) {
+          checks.push({
+            id: 'buying_power',
+            label: 'Buying power',
+            severity: 'warn',
+            status: buyingPower > 1 ? 'pass' : 'warn',
+            detail: buyingPower > 1 ? `$${buyingPower.toFixed(2)} available` : 'Low buying power — close positions or deposit',
+          })
+        }
       }
     } catch {
       checks.push({
@@ -95,8 +118,8 @@ class ReadinessCheckerService {
       })
     }
 
-    // 4. CLOB API credentials derived
-    {
+    // 4. CLOB API credentials derived (skip in dry run — not needed)
+    if (!isDryRun) {
       const hasCreds = polymarketClient.hasCredentials()
       checks.push({
         id: 'api_creds',
@@ -110,17 +133,17 @@ class ReadinessCheckerService {
       })
     }
 
-    // 5. OpenRouter API key (warn only)
+    // 5. Ollama LLM server (warn only)
     try {
       const settings = useSettingsStore.getState()
-      const hasKey = !!settings.openRouterApiKey
+      const hasUrl = !!settings.ollamaBaseUrl
       checks.push({
-        id: 'openrouter_key',
-        label: 'OpenRouter API key',
+        id: 'ollama_status',
+        label: 'Ollama LLM server',
         severity: 'warn',
-        status: hasKey ? 'pass' : 'warn',
-        detail: hasKey ? 'API key set' : 'Needed for LLM Prediction strategy',
-        action: hasKey ? undefined : { label: 'Add key', route: '/settings' },
+        status: hasUrl ? 'pass' : 'warn',
+        detail: hasUrl ? `Model: ${settings.ollamaModel}` : 'Configure Ollama URL in settings',
+        action: hasUrl ? undefined : { label: 'Configure', route: '/settings' },
       })
     } catch {
       // Skip if store unavailable

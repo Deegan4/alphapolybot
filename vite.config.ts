@@ -116,6 +116,119 @@ function binanceWsProxy() {
   }
 }
 
+// Plugin to proxy Hyperliquid WebSocket (same pattern as binanceWsProxy).
+function hyperliquidWsProxy() {
+  return {
+    name: 'hyperliquid-ws-proxy',
+    configureServer(server: { httpServer: import('http').Server | null }) {
+      const wss = new WebSocketServer({ noServer: true })
+
+      server.httpServer?.on('upgrade', (req, socket, head) => {
+        if (req.url?.startsWith('/ws/hyperliquid')) {
+          wss.handleUpgrade(req, socket, head, (clientWs) => {
+            const targetUrl = 'wss://api.hyperliquid.xyz/ws'
+
+            let upstream: WS | null = null
+            let pingInterval: ReturnType<typeof setInterval> | null = null
+            let reconnectTimeout: ReturnType<typeof setTimeout> | null = null
+            let reconnectAttempts = 0
+            const MAX_RECONNECT_ATTEMPTS = 8
+            let clientClosed = false
+            const pendingMessages: { data: unknown; isBinary: boolean }[] = []
+
+            function cleanupUpstream() {
+              if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
+              if (upstream) {
+                upstream.removeAllListeners()
+                upstream.on('error', () => {})
+                try { upstream.terminate() } catch { /* already closing */ }
+                upstream = null
+              }
+            }
+
+            function connectUpstream() {
+              if (clientClosed) return
+              cleanupUpstream()
+
+              upstream = new WS(targetUrl)
+
+              upstream.on('open', () => {
+                console.log('[Hyperliquid WS Proxy] Connected to upstream')
+                reconnectAttempts = 0
+                // Flush any messages that arrived before upstream was ready
+                for (const msg of pendingMessages) {
+                  upstream!.send(msg.data as Parameters<WS['send']>[0], { binary: msg.isBinary })
+                }
+                pendingMessages.length = 0
+                pingInterval = setInterval(() => {
+                  if (upstream?.readyState === WS.OPEN) upstream.ping()
+                }, 15_000)
+              })
+
+              upstream.on('message', (data, isBinary) => {
+                if (clientWs.readyState === WS.OPEN) {
+                  clientWs.send(data, { binary: isBinary })
+                }
+              })
+
+              upstream.on('close', (code, reason) => {
+                if (clientClosed) return
+                console.log(`[Hyperliquid WS Proxy] Upstream closed: code=${code} reason=${reason || ''}. Auto-reconnecting...`)
+                if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
+                scheduleReconnect()
+              })
+
+              upstream.on('error', (err) => {
+                if (clientClosed) return
+                console.error('[Hyperliquid WS Proxy] Upstream error:', err.message)
+              })
+            }
+
+            function scheduleReconnect() {
+              if (clientClosed || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                  console.error('[Hyperliquid WS Proxy] Max reconnect attempts reached, closing client')
+                  if (clientWs.readyState === WS.OPEN) clientWs.close()
+                }
+                return
+              }
+              const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30_000)
+              reconnectAttempts++
+              console.log(`[Hyperliquid WS Proxy] Reconnecting upstream in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
+              reconnectTimeout = setTimeout(connectUpstream, delay)
+            }
+
+            clientWs.on('message', (data, isBinary) => {
+              if (upstream?.readyState === WS.OPEN) {
+                upstream.send(data, { binary: isBinary })
+              } else {
+                // Buffer messages until upstream is ready (subscription race fix)
+                pendingMessages.push({ data, isBinary })
+              }
+            })
+
+            clientWs.on('close', () => {
+              clientClosed = true
+              pendingMessages.length = 0
+              if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null }
+              cleanupUpstream()
+            })
+
+            clientWs.on('error', () => {
+              clientClosed = true
+              pendingMessages.length = 0
+              if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null }
+              cleanupUpstream()
+            })
+
+            connectUpstream()
+          })
+        }
+      })
+    },
+  }
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
@@ -124,7 +237,7 @@ export default defineConfig(({ mode }) => {
   return {
     // Strict CSP dev mode disables the React plugin to avoid react-refresh
     // preamble injection in index.html.
-    plugins: strictCspDev ? [] : [react(), binanceWsProxy()],
+    plugins: strictCspDev ? [] : [react(), binanceWsProxy(), hyperliquidWsProxy()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
@@ -132,7 +245,7 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 4000,
-      host: '0.0.0.0',
+      host: 'localhost',
       open: true,
       proxy: {
         '/api/clob': {
@@ -172,21 +285,37 @@ export default defineConfig(({ mode }) => {
           secure: true,
         },
         '/api/ollama': {
-          target: 'http://localhost:5272',
+          target: 'http://localhost:11434',
           changeOrigin: true,
           rewrite: path => path.replace(/^\/api\/ollama/, ''),
           secure: false,
+        },
+        '/api/moondev': {
+          target: 'https://api.moondev.com',
+          changeOrigin: true,
+          rewrite: path => path.replace(/^\/api\/moondev/, ''),
+          secure: true,
+        },
+        '/api/cryptocom': {
+          target: 'https://api.crypto.com/exchange/v1/public',
+          changeOrigin: true,
+          rewrite: path => path.replace(/^\/api\/cryptocom/, ''),
+          secure: true,
         },
       },
     },
     build: {
       outDir: 'dist',
-      sourcemap: true,
+      sourcemap: false,
+      // Disable Vite's JS-based modulepreload polyfill — it blocks script execution
+      // while fetching all transitive deps upfront. Modern browsers handle native
+      // modulepreload natively, and for older ones the waterfall is actually faster
+      // than blocking the main thread with the polyfill.
+      modulePreload: { polyfill: false },
       rollupOptions: {
         output: {
           manualChunks(id) {
             // Ethers.js (~450 kB) with its own crypto, ABI coder, ENS resolver.
-            // Consolidate into one chunk (was split across two by Rollup).
             if (id.includes('node_modules/ethers') || id.includes('node_modules/@adraffy/ens-normalize') || id.includes('node_modules/aes-js')) {
               return 'vendor-ethers'
             }
@@ -194,17 +323,21 @@ export default defineConfig(({ mode }) => {
             if (id.includes('node_modules/d3-')) {
               return 'vendor-d3'
             }
-            // Recharts core + supporting libs (es-toolkit, @reduxjs/toolkit)
+            // Recharts core + supporting libs
             if (id.includes('node_modules/recharts') || id.includes('node_modules/es-toolkit') || id.includes('node_modules/@reduxjs/toolkit')) {
               return 'vendor-charts'
             }
-            // Framer Motion — animation library, only needed for page transitions
+            // Framer Motion — only needed for Settings page transitions
             if (id.includes('node_modules/framer-motion') || id.includes('node_modules/motion-dom') || id.includes('node_modules/motion-utils')) {
               return 'vendor-motion'
             }
             // React DOM + scheduler — stable, rarely changes, great cache hit rate
             if (id.includes('node_modules/react-dom') || id.includes('node_modules/scheduler')) {
               return 'vendor-react'
+            }
+            // Supabase — only needed for cloud storage features
+            if (id.includes('node_modules/@supabase')) {
+              return 'vendor-supabase'
             }
           },
         },

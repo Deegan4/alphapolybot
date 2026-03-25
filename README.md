@@ -154,7 +154,7 @@ npm install
 
 # Configure
 cp .env.example .env
-# Edit .env: add VITE_WALLET_SEED_PHRASE and VITE_OPENROUTER_API_KEY
+# Edit .env: add VITE_OPENROUTER_API_KEY only. Wallet seed phrase/private key must be entered securely in the Settings UI or via hardware wallet/KMS. Never store secrets in env files or source control.
 
 # Run
 npm run dev        # Dev server on :4000

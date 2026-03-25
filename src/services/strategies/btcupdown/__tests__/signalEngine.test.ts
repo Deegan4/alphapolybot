@@ -9,8 +9,10 @@ import {
   computeRSI,
   linearRegressionSlope,
   computeOrderbookImbalance,
+  computeMRO,
+  mroLogisticProbability,
 } from '../signalEngine'
-import type { SignalInput, SignalEngineConfig } from '../signalEngine'
+import type { SignalInput, SignalEngineConfig, VolumeSnapshot } from '../signalEngine'
 import type { Market } from '@/types'
 
 // ==========================================
@@ -655,5 +657,248 @@ describe('RSI two-tier filter', () => {
     // Should be faded (< noRSI) but NOT zero
     expect(withRSI.confidence).toBeLessThan(noRSI.confidence)
     expect(withRSI.confidence).toBeGreaterThan(0)
+  })
+})
+
+// ==========================================
+// computeMRO
+// ==========================================
+
+describe('computeMRO', () => {
+  function makeVolumes(count: number, baseVolume: number, trend: 'up' | 'flat' = 'flat'): VolumeSnapshot[] {
+    return Array.from({ length: count }, (_, i) => ({
+      volume: trend === 'up' ? baseVolume + i * 50_000_000 : baseVolume,
+      timestamp: i * 1000,
+    }))
+  }
+
+  it('returns zero when insufficient price data', () => {
+    const prices = makePriceHistory(65000, 3) // need 6+ for lookback=5
+    const volumes = makeVolumes(3, 1e9)
+    const result = computeMRO(prices, volumes, 5)
+    expect(result.raw).toBe(0)
+    expect(result.normalized).toBe(0)
+  })
+
+  it('returns zero when no volume data', () => {
+    const prices = makePriceHistory(65000, 10, 'up')
+    const result = computeMRO(prices, undefined, 5)
+    expect(result.raw).toBe(0)
+    expect(result.normalized).toBe(0)
+  })
+
+  it('returns zero when insufficient volume data', () => {
+    const prices = makePriceHistory(65000, 10, 'up')
+    const volumes = makeVolumes(3, 1e9) // need 6+ for lookback=5
+    const result = computeMRO(prices, volumes, 5)
+    expect(result.raw).toBe(0)
+    expect(result.normalized).toBe(0)
+  })
+
+  it('computes positive MRO for price up + volume spike (overbought)', () => {
+    // Price rises 0.5% over 5 candles, volume doubles
+    const prices = [
+      { price: 68000, timestamp: 0 },
+      { price: 68050, timestamp: 1000 },
+      { price: 68100, timestamp: 2000 },
+      { price: 68200, timestamp: 3000 },
+      { price: 68250, timestamp: 4000 },
+      { price: 68340, timestamp: 5000 }, // +0.5% from 68000
+    ]
+    const volumes: VolumeSnapshot[] = [
+      { volume: 1_000_000, timestamp: 0 },
+      { volume: 1_100_000, timestamp: 1000 },
+      { volume: 1_200_000, timestamp: 2000 },
+      { volume: 1_500_000, timestamp: 3000 },
+      { volume: 1_800_000, timestamp: 4000 },
+      { volume: 2_000_000, timestamp: 5000 }, // +100% from 1M
+    ]
+    const result = computeMRO(prices, volumes, 5)
+    // priceChange% = 0.5, raw = 0.5*100 + 100/2 = 50 + 50 = 100
+    expect(result.raw).toBeGreaterThan(50)
+    expect(result.normalized).toBeGreaterThan(0) // positive = overbought
+    expect(result.normalized).toBeLessThanOrEqual(1)
+  })
+
+  it('computes negative MRO for price drop with moderate volume (oversold)', () => {
+    // Price drops 2%, volume rises modestly (+20%) — price dominates
+    const prices = [
+      { price: 69000, timestamp: 0 },
+      { price: 68700, timestamp: 1000 },
+      { price: 68400, timestamp: 2000 },
+      { price: 68100, timestamp: 3000 },
+      { price: 67800, timestamp: 4000 },
+      { price: 67620, timestamp: 5000 }, // -2% from 69000
+    ]
+    const volumes: VolumeSnapshot[] = [
+      { volume: 1_000_000, timestamp: 0 },
+      { volume: 1_020_000, timestamp: 1000 },
+      { volume: 1_050_000, timestamp: 2000 },
+      { volume: 1_080_000, timestamp: 3000 },
+      { volume: 1_100_000, timestamp: 4000 },
+      { volume: 1_200_000, timestamp: 5000 }, // +20% volume
+    ]
+    const result = computeMRO(prices, volumes, 5)
+    // raw = (-2 * 100) + (20/2) = -200 + 10 = -190
+    expect(result.raw).toBeLessThan(0)
+    expect(result.normalized).toBeLessThan(0)
+    expect(result.normalized).toBeGreaterThanOrEqual(-1)
+  })
+
+  it('normalized value is bounded in [-1, 1] via tanh', () => {
+    // Extreme values: price drops 5%, volume spikes 500%
+    const prices = [
+      { price: 70000, timestamp: 0 },
+      { price: 69000, timestamp: 1000 },
+      { price: 68000, timestamp: 2000 },
+      { price: 67500, timestamp: 3000 },
+      { price: 67000, timestamp: 4000 },
+      { price: 66500, timestamp: 5000 },
+    ]
+    const volumes: VolumeSnapshot[] = [
+      { volume: 500_000, timestamp: 0 },
+      { volume: 800_000, timestamp: 1000 },
+      { volume: 1_200_000, timestamp: 2000 },
+      { volume: 1_800_000, timestamp: 3000 },
+      { volume: 2_500_000, timestamp: 4000 },
+      { volume: 3_000_000, timestamp: 5000 },
+    ]
+    const result = computeMRO(prices, volumes, 5)
+    expect(result.normalized).toBeGreaterThanOrEqual(-1)
+    expect(result.normalized).toBeLessThanOrEqual(1)
+  })
+
+  it('flat price + flat volume gives near-zero MRO', () => {
+    const prices = makePriceHistory(65000, 8, 'flat')
+    const volumes = makeVolumes(8, 1_000_000, 'flat')
+    const result = computeMRO(prices, volumes, 5)
+    expect(Math.abs(result.raw)).toBeLessThan(1)
+    expect(Math.abs(result.normalized)).toBeLessThan(0.01)
+  })
+})
+
+// ==========================================
+// mroLogisticProbability
+// ==========================================
+
+describe('mroLogisticProbability', () => {
+  it('returns null when edge below minimum threshold', () => {
+    // Very weak MRO with high market odds — edge too small
+    const result = mroLogisticProbability(-5, 0.52, 0.10)
+    expect(result).toBeNull()
+  })
+
+  it('returns probability and edge for strong oversold signal', () => {
+    // MRO -85, market odds 51% Up — strong opportunity
+    const result = mroLogisticProbability(-85, 0.51, 0.06)
+    expect(result).not.toBeNull()
+    expect(result!.probability).toBeGreaterThan(0.55)
+    expect(result!.probability).toBeLessThanOrEqual(1)
+    expect(result!.edge).toBeGreaterThan(0.06)
+  })
+
+  it('returns probability and edge for strong overbought signal', () => {
+    // MRO +80, market odds 48% Down
+    const result = mroLogisticProbability(80, 0.48, 0.06)
+    expect(result).not.toBeNull()
+    expect(result!.probability).toBeGreaterThan(0.54)
+    expect(result!.edge).toBeGreaterThan(0.06)
+  })
+
+  it('probability is always between 0 and 1', () => {
+    // Extreme MRO
+    const extreme = mroLogisticProbability(-200, 0.30, 0.0)
+    expect(extreme).not.toBeNull()
+    expect(extreme!.probability).toBeGreaterThan(0)
+    expect(extreme!.probability).toBeLessThanOrEqual(1)
+  })
+
+  it('respects custom minEdge threshold', () => {
+    // With default 6% threshold this would pass, with 15% it should fail
+    const result6 = mroLogisticProbability(-85, 0.51, 0.06)
+    const result15 = mroLogisticProbability(-85, 0.51, 0.15)
+    expect(result6).not.toBeNull()
+    // result15 may or may not be null depending on exact probability
+    if (result15 !== null) {
+      expect(result15.edge).toBeGreaterThanOrEqual(0.15)
+    }
+  })
+})
+
+// ==========================================
+// MRO integration in computeSignal
+// ==========================================
+
+describe('computeSignal with MRO', () => {
+  const mroConfig: SignalEngineConfig = {
+    ...defaultConfig,
+    mroEnabled: true,
+  }
+
+  it('includes mro factor in signal output when enabled', () => {
+    const prices = makePriceHistory(65000, 10, 'up')
+    const volumes: VolumeSnapshot[] = Array.from({ length: 10 }, (_, i) => ({
+      volume: 1_000_000 + i * 200_000,
+      timestamp: i * 1000,
+    }))
+    const input = makeInput({ recentPriceHistory: prices, volumeHistory: volumes })
+    const signal = computeSignal(input, mroConfig)
+    expect(signal.factors).toHaveProperty('mro')
+    expect(typeof signal.factors!.mro).toBe('number')
+  })
+
+  it('mro is zero when disabled', () => {
+    const prices = makePriceHistory(65000, 10, 'up')
+    const volumes: VolumeSnapshot[] = Array.from({ length: 10 }, (_, i) => ({
+      volume: 1_000_000 + i * 200_000,
+      timestamp: i * 1000,
+    }))
+    const input = makeInput({ recentPriceHistory: prices, volumeHistory: volumes })
+    const signal = computeSignal(input, defaultConfig)
+    expect(signal.factors!.mro).toBeCloseTo(0)
+  })
+
+  it('mro is zero when no volume data provided', () => {
+    const input = makeInput()
+    const signal = computeSignal(input, mroConfig)
+    expect(signal.factors!.mro).toBeCloseTo(0)
+  })
+
+  it('MRO affects confidence when enabled with volume data', () => {
+    // Strong oversold: price dropping + volume spike
+    const prices = [
+      { price: 66000, timestamp: 0 },
+      { price: 65800, timestamp: 1000 },
+      { price: 65600, timestamp: 2000 },
+      { price: 65400, timestamp: 3000 },
+      { price: 65300, timestamp: 4000 },
+      { price: 65250, timestamp: 5000 },
+      { price: 65200, timestamp: 6000 },
+      { price: 65150, timestamp: 7000 },
+      { price: 65100, timestamp: 8000 },
+      { price: 65050, timestamp: 9000 },
+    ]
+    const volumes: VolumeSnapshot[] = [
+      { volume: 500_000, timestamp: 0 },
+      { volume: 600_000, timestamp: 1000 },
+      { volume: 700_000, timestamp: 2000 },
+      { volume: 900_000, timestamp: 3000 },
+      { volume: 1_100_000, timestamp: 4000 },
+      { volume: 1_400_000, timestamp: 5000 },
+      { volume: 1_700_000, timestamp: 6000 },
+      { volume: 2_000_000, timestamp: 7000 },
+      { volume: 2_400_000, timestamp: 8000 },
+      { volume: 2_800_000, timestamp: 9000 },
+    ]
+    const input = makeInput({
+      currentPrice: 65050,
+      windowOpenPrice: 66000,
+      recentPriceHistory: prices,
+      volumeHistory: volumes,
+    })
+    const withMro = computeSignal(input, mroConfig)
+    const withoutMro = computeSignal(input, defaultConfig)
+    // Both should produce signals — but confidence differs when MRO has weight
+    expect(withMro.confidence).not.toBe(withoutMro.confidence)
   })
 })

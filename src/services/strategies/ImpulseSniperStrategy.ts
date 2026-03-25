@@ -99,7 +99,10 @@ export class ImpulseSniperStrategy extends BaseStrategy {
   // ==========================================
 
   async initialize(): Promise<void> {
-    this.log('ImpulseSniper initialized')
+    const settings = useSettingsStore.getState()
+    if (settings.impulseEnabled) {
+      this.log('ImpulseSniper initialized')
+    }
   }
 
   async start(): Promise<void> {
@@ -271,38 +274,37 @@ export class ImpulseSniperStrategy extends BaseStrategy {
     }
   }
 
-  /** Apply volatility-adjusted threshold using AvellanedaStoikov vol estimator */
+  /** Apply volatility-adjusted threshold using recent price buffer statistics */
   private applyVolAdjustedThreshold(baseThreshold: number, buffer: PriceEntry[]): number {
     if (buffer.length < 20) return baseThreshold // not enough data
 
     try {
-      // Import is synchronous-safe because we only use the static method
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { AvellanedaStoikovPricer } = require('@/services/trading/AvellanedaStoikovPricer')
       const prices = buffer.map(e => e.price)
-      const volEstimate = AvellanedaStoikovPricer.estimateVolatility(prices, 1000, 60_000)
-      if (!volEstimate || volEstimate.annualized <= 0) return baseThreshold
-
-      // Normalize: compute ratio of current vol to a "normal" baseline
-      // Normal BTC vol ~65% annualized. For simplicity, use self-relative:
-      // Compare to median vol (first call = baseline, subsequent = ratio)
-      const volRatio = volEstimate.annualized / (volEstimate.annualized || 1)
-      // Since we can't store historical vol in this tick, use a simpler heuristic:
-      // High sample variance (> 2x mean abs change) → raise threshold 50%
-      // Low sample variance (< 0.5x mean abs change) → lower threshold 25%
       const changes = prices.slice(1).map((p, i) => Math.abs(p - prices[i]))
+      if (changes.length < 10) return baseThreshold
+
       const meanChange = changes.reduce((a, b) => a + b, 0) / changes.length
-      const lastChange = changes.length > 0 ? changes[changes.length - 1] : 0
-      if (lastChange > meanChange * 3) {
-        // Very noisy — raise threshold to filter false positives
-        return baseThreshold * 1.5
-      } else if (meanChange > 0 && lastChange < meanChange * 0.3) {
-        // Very quiet — lower threshold to catch real moves
-        return baseThreshold * 0.75
+      if (meanChange <= 0) return baseThreshold
+
+      // Use standard deviation of tick-to-tick changes as vol proxy
+      const variance = changes.reduce((sum, c) => sum + (c - meanChange) ** 2, 0) / changes.length
+      const stdChange = Math.sqrt(variance)
+
+      // Coefficient of variation: high = choppy/noisy, low = trending/quiet
+      const cv = stdChange / meanChange
+
+      // Scale threshold: noisy markets need higher threshold (fewer false positives),
+      // quiet markets with a sudden move = real signal (lower threshold)
+      if (cv > 1.5) {
+        // High dispersion — choppy, raise threshold up to 60%
+        return baseThreshold * Math.min(1.6, 1 + cv * 0.2)
+      } else if (cv < 0.5 && meanChange < baseThreshold * 0.01) {
+        // Very quiet market — lower threshold to catch real moves
+        return baseThreshold * 0.7
       }
-      return baseThreshold * (volRatio > 0 ? 1 : 1)
+      return baseThreshold
     } catch {
-      return baseThreshold // AS pricer unavailable, use base
+      return baseThreshold
     }
   }
 
@@ -407,7 +409,7 @@ export class ImpulseSniperStrategy extends BaseStrategy {
     }
   }
 
-  /** Check if CLOB ask has already moved 3+ cents in the impulse direction */
+  /** Check if CLOB ask has already moved toward the impulse, indicating repricing */
   private hasClobAlreadyMoved(tokenId: string, _direction: 'up' | 'down'): boolean {
     const history = this.clobAskHistory.get(tokenId)
     if (!history || history.length < 3) return false // not enough data, proceed
@@ -417,8 +419,19 @@ export class ImpulseSniperStrategy extends BaseStrategy {
     const oldEntry = history[Math.max(0, history.length - 4)]
     const askDelta = currentAsk - oldEntry.ask
 
-    // If ask moved 3+ cents toward the impulse direction, market is repricing
-    return askDelta >= 0.03
+    // For UP impulse → buying YES → YES ask rising means market repriced
+    // For DOWN impulse → buying NO → NO ask rising means market repriced
+    // In both cases, the ask on our target token going UP means repricing.
+    // But also check if ask dropped (someone pulled liquidity = stale book gone).
+    // Threshold: 1.5¢ is ~3% on a 50¢ outcome — tighter than old 3¢ to catch repricing earlier
+    const REPRICE_THRESHOLD = 0.015
+    if (askDelta >= REPRICE_THRESHOLD) return true
+
+    // Also detect if the opposite side's ask dropped significantly (cross-check)
+    // A large negative delta means ask dropped = sellers pulled, book is moving
+    if (askDelta <= -REPRICE_THRESHOLD) return true
+
+    return false
   }
 
   // ==========================================
@@ -427,6 +440,16 @@ export class ImpulseSniperStrategy extends BaseStrategy {
 
   private async executeTrade(impulse: ImpulseEvent): Promise<void> {
     const settings = useSettingsStore.getState()
+
+    // 0. Staleness guard — if too much time elapsed since detection, the edge is gone
+    const MAX_STALE_MS = settings.impulseConfirmationMs + 1500 // confirmation + 1.5s max execution budget
+    const elapsed = Date.now() - impulse.detectedAt
+    if (elapsed > MAX_STALE_MS) {
+      this.log(`[${impulse.asset}] Impulse stale: ${elapsed}ms since detection (max ${MAX_STALE_MS}ms) — skipping`)
+      this.recordSkip('stale_impulse')
+      this.emit('impulseSkipped', { reason: 'stale_impulse', elapsedMs: elapsed, impulse })
+      return
+    }
 
     // 1. RiskManager check
     try {
@@ -548,12 +571,14 @@ export class ImpulseSniperStrategy extends BaseStrategy {
         limitPrice?: number
         stopLossPercent?: number
         takeProfitPercent?: number
+        asset?: string
       } = {
         orderType: settings.impulseOrderMode === 'gtd' ? 'GTD' : 'FOK',
         strategy: 'impulse',
         skipGtcFallback: true,
         stopLossPercent: settings.impulseStopLossPct,
         takeProfitPercent: settings.impulseTakeProfitPct,
+        asset: impulse.asset,
       }
       if (settings.impulseOrderMode === 'gtd') {
         orderOptions.gtdExpiryMs = 30_000 // 30s expiry

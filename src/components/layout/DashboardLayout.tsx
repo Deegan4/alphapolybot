@@ -8,7 +8,9 @@ import { Outlet } from 'react-router-dom'
 export const DashboardLayout: React.FC = () => {
   return (
     <div className="bg-agent-bg min-h-screen text-agent-text font-mono">
-      <Outlet />
+      <main>
+        <Outlet />
+      </main>
     </div>
   )
 }

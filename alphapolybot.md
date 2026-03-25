@@ -4581,8 +4581,8 @@ This comprehensive security framework ensures user funds and data remain protect
 #### Environment Variables
 
 ```bash
-# Wallet Configuration
-VITE_WALLET_ENCRYPTION_KEY=your_encryption_key
+## Wallet Configuration
+# Wallet seed phrase/private key must be entered securely in the Settings UI or via hardware wallet/KMS. Never store secrets in env files or source control.
 
 # API Keys
 VITE_OPENROUTER_API_KEY=your_openrouter_key

@@ -35,11 +35,15 @@ export interface Config {
   usdcAddress: string;
   negRiskCtfExchange: string;
   negRiskExchange: string;
+
+  // Polymarket US SDK
+  pmusKeyId: string | null;
+  pmusSecretKey: string | null;
 }
 
 function getEnv(key: string, fallback?: string): string {
-  // Support both VITE_ prefixed (from .env) and unprefixed
-  return process.env[key] || process.env[`VITE_${key}`] || fallback || '';
+  // Support only unprefixed (server-only) env vars for sensitive keys
+  return process.env[key] || fallback || '';
 }
 
 export function loadConfig(): Config {
@@ -63,7 +67,7 @@ export function loadConfig(): Config {
     polygonRpcFallback: getEnv('POLYGON_RPC_FALLBACK', 'https://polygon.llamarpc.com'),
     chainId: parseInt(getEnv('POLYMARKET_CHAIN_ID', '137'), 10),
 
-    walletSeedPhrase: getEnv('WALLET_SEED_PHRASE') || null,
+    walletSeedPhrase: getEnv('WALLET_SEED_PHRASE') || getEnv('VITE_WALLET_SEED_PHRASE') || null,
     signatureTypeOverride,
 
     exchangeAddress: getEnv('POLYMARKET_EXCHANGE_ADDRESS', '0x4bFB41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'),
@@ -71,6 +75,9 @@ export function loadConfig(): Config {
     usdcAddress: getEnv('USDC_ADDRESS', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'),
     negRiskCtfExchange: getEnv('NEG_RISK_CTF_EXCHANGE', '0xC5d563A36AE78145C45a50134d48A1215220f80a'),
     negRiskExchange: getEnv('NEG_RISK_EXCHANGE', '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296'),
+
+    pmusKeyId: getEnv('PM_US_KEY_ID') || null,
+    pmusSecretKey: getEnv('PM_US_SECRET_KEY') || null,
   };
 }
 

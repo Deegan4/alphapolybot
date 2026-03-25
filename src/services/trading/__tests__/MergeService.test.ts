@@ -9,6 +9,13 @@ vi.mock('../ActivityLogger', () => ({
   },
 }))
 
+// Mock settingsStore (relayerApiKey defaults to empty → no relayer)
+vi.mock('@/stores/settingsStore', () => ({
+  useSettingsStore: {
+    getState: () => ({ relayerApiKey: '' }),
+  },
+}))
+
 // ==========================================
 // UNIT TESTS (no on-chain calls)
 // ==========================================
@@ -54,7 +61,7 @@ describe('MergeService — merge validation', () => {
   })
 
   it('returns error when not initialized', async () => {
-    const result = await svc.merge('0xabc123', 1000000n)
+    const result = await svc.merge('0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890', 1000000n)
     expect(result.success).toBe(false)
     expect(result.error).toContain('not initialized')
   })

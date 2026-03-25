@@ -31,6 +31,13 @@ vi.mock('@/stores/settingsStore', () => ({
   },
 }))
 
+// Mock balanceHistoryStore (used by checkAssetConcentration for dry-run balance)
+vi.mock('@/stores/balanceHistoryStore', () => ({
+  useBalanceHistoryStore: {
+    getState: () => ({ simulatedBalance: 0 }),
+  },
+}))
+
 // Mock ActivityLogger
 vi.mock('../ActivityLogger', () => ({
   activityLogger: {
@@ -381,5 +388,96 @@ describe('RiskManager', () => {
     const status = rm.getStatus()
     expect(status.config.dailyLossLimit).toBe(4)
     expect(status.config.weeklyLossLimit).toBe(20)
+  })
+
+  // ==================================================
+  // PORTFOLIO CORRELATION GATE
+  // ==================================================
+
+  describe('correlation-aware asset exposure', () => {
+    it('allows trade when single strategy has low exposure', () => {
+      rm.recordAssetExposure('BTC', 'btc', 10)
+      const check = rm.checkAssetConcentration('BTC', 5)
+      // 1 strategy on BTC → 60% cap → $15/$100 = 15% → allowed
+      expect(check.allowed).toBe(true)
+    })
+
+    it('tightens cap to 45% when two strategies are on the same asset', () => {
+      rm.recordAssetExposure('BTC', 'btc', 20)
+      rm.recordAssetExposure('BTC', 'impulse', 20)
+      // 2 strategies → 45% cap → ($40 + $6)/$100 = 46% → blocked
+      const check = rm.checkAssetConcentration('BTC', 6)
+      expect(check.allowed).toBe(false)
+      expect(check.riskCode).toBe('CORRELATED_EXPOSURE')
+      expect(check.reason).toContain('2 strategies')
+    })
+
+    it('tightens cap to 35% when three+ strategies pile on', () => {
+      rm.recordAssetExposure('BTC', 'btc', 10)
+      rm.recordAssetExposure('BTC', 'impulse', 10)
+      rm.recordAssetExposure('BTC', 'liquidation', 10)
+      // 3 strategies → 35% cap → ($30 + $6)/$100 = 36% → blocked
+      const check = rm.checkAssetConcentration('BTC', 6)
+      expect(check.allowed).toBe(false)
+      expect(check.reason).toContain('3 strategies')
+    })
+
+    it('allows trade just under the dynamic cap', () => {
+      rm.recordAssetExposure('BTC', 'btc', 10)
+      rm.recordAssetExposure('BTC', 'impulse', 10)
+      rm.recordAssetExposure('BTC', 'liquidation', 10)
+      // 3 strategies → 35% cap → ($30 + $4)/$100 = 34% → allowed
+      const check = rm.checkAssetConcentration('BTC', 4)
+      expect(check.allowed).toBe(true)
+    })
+
+    it('reduces exposure when positions close', () => {
+      rm.recordAssetExposure('BTC', 'btc', 20)
+      rm.recordAssetExposure('BTC', 'impulse', 20)
+      // 2 strategies → 45% cap → $40 + $6 = 46% → blocked
+      expect(rm.checkAssetConcentration('BTC', 6).allowed).toBe(false)
+
+      // Close impulse position → back to 1 strategy
+      rm.reduceAssetExposure('BTC', 'impulse', 20)
+      // 1 strategy → 60% cap → $20 + $6 = 26% → allowed
+      expect(rm.checkAssetConcentration('BTC', 6).allowed).toBe(true)
+    })
+
+    it('tracks different assets independently', () => {
+      rm.recordAssetExposure('BTC', 'btc', 30)
+      rm.recordAssetExposure('BTC', 'impulse', 10)
+      // BTC: 2 strategies → 45% cap → $40 + $5 = 45% → allowed (exactly at cap)
+      expect(rm.checkAssetConcentration('BTC', 5).allowed).toBe(true)
+
+      // ETH: 0 existing → 1 strategy → 60% cap → $10/$100 = 10% → allowed
+      expect(rm.checkAssetConcentration('ETH', 10).allowed).toBe(true)
+    })
+
+    it('integrates into validateTrade when asset is provided', () => {
+      rm.recordAssetExposure('BTC', 'btc', 20)
+      rm.recordAssetExposure('BTC', 'impulse', 15)
+      rm.recordAssetExposure('BTC', 'liquidation', 5)
+
+      // 3 strategies → 35% cap → ($40 + $5)/$100 = 45% → blocked
+      const result = rm.validateTrade(5, 'some-market', undefined, 'BTC', 'gabagool')
+      expect(result.allowed).toBe(false)
+      expect(result.riskCode).toBe('CORRELATED_EXPOSURE')
+    })
+
+    it('validateTrade passes when asset is not provided (backward compatible)', () => {
+      // No asset → correlation check is skipped entirely
+      const result = rm.validateTrade(5, 'some-market')
+      expect(result.allowed).toBe(true)
+    })
+
+    it('blocks per-strategy concentration at 40%', () => {
+      rm.recordAssetExposure('BTC', 'btc', 35)
+      // Single strategy already at $35 → $35 + $6 = $41 = 41% > 40% per-strategy cap
+      const result = rm.validateTrade(6, 'some-market', undefined, 'BTC', 'btc')
+      expect(result.allowed).toBe(false)
+      expect(result.riskCode).toBe('CORRELATED_EXPOSURE')
+      expect(result.reason).toContain('btc')
+      expect(result.reason).toContain('concentration')
+    })
   })
 })

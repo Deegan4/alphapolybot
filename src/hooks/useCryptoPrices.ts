@@ -98,31 +98,31 @@ export function useCryptoPrices(): Record<AssetKey, CryptoAssetState> {
 
   // ── Source 3: HTTP polling fallback (only when both WS are stale) ───
   useEffect(() => {
-    // Fetch prices via HTTP, but delay 3s to let RTDS/BinanceWS connect first.
-    // If WS has already delivered for an asset (within 2s), skip the HTTP call.
-    // Sequential with 500ms stagger to avoid CoinGecko 429 if Binance is down.
+    // Check if WS already has fresh data for an asset (works across Strict Mode re-mounts)
+    const hasRecentWsData = (asset: AssetKey): boolean => {
+      const wsPrice = binanceWSService.getCachedPrice(asset)
+      if (wsPrice && Date.now() - wsPrice.timestamp < 5000) return true
+      const lastRef = lastUpdateTimes.current.get(asset) ?? 0
+      if (Date.now() - lastRef < 2000) return true
+      return false
+    }
+
     const fetchAll = async () => {
       for (const asset of ASSETS) {
-        const lastWs = lastUpdateTimes.current.get(asset) ?? 0
-        if (Date.now() - lastWs < 2000) continue  // WS already delivered — skip
+        if (hasRecentWsData(asset)) continue
         try {
           const p = await priceOracleService.getPrice(asset)
-          // Re-check after await — WS may have delivered while we waited
-          const lastWs2 = lastUpdateTimes.current.get(asset) ?? 0
-          if (Date.now() - lastWs2 > 2000) {
-            ingestPrice(asset, p.priceUSD)
-          }
+          if (!hasRecentWsData(asset)) ingestPrice(asset, p.priceUSD)
         } catch { /* retry next interval */ }
         await new Promise(r => setTimeout(r, 500))
       }
     }
-    const initTimeout = setTimeout(fetchAll, 3000)  // Give WS 3s head start
+    const initTimeout = setTimeout(fetchAll, 8000)
 
     const id = setInterval(async () => {
-      const now = Date.now()
       for (const asset of ASSETS) {
         const lastUpdate = lastUpdateTimes.current.get(asset) ?? 0
-        if (now - lastUpdate < STALE_THRESHOLD_MS) continue // WS is delivering — skip
+        if (Date.now() - lastUpdate < STALE_THRESHOLD_MS) continue
         try {
           const p = await priceOracleService.getPrice(asset)
           ingestPrice(asset, p.priceUSD)

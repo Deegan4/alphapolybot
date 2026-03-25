@@ -37,6 +37,7 @@ vi.mock('../RiskManager', () => ({
   riskManager: {
     recordTradeResult: (...args: unknown[]) => mockRecordTradeResult(...args),
     reduceMarketExposure: (...args: unknown[]) => mockReduceMarketExposure(...args),
+    addCapitalReservationFn: vi.fn(),
   },
 }))
 

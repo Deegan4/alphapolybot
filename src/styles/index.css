@@ -1,8 +1,24 @@
-@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Size-adjusted fallback fonts — eliminates CLS when Geist loads */
+@font-face {
+  font-family: 'Geist Mono Fallback';
+  src: local('Menlo'), local('Monaco'), local('Courier New');
+  size-adjust: 100.4%;
+  ascent-override: 99%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'Geist Fallback';
+  src: local('-apple-system'), local('BlinkMacSystemFont'), local('Segoe UI');
+  size-adjust: 104%;
+  ascent-override: 96%;
+  descent-override: 23%;
+  line-gap-override: 0%;
+}
 
 /* Hide scrollbar but keep scrolling */
 @layer utilities {
@@ -63,7 +79,7 @@ html {
 
 body {
   @apply bg-agent-bg text-agent-text;
-  font-family: 'Geist Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+  font-family: 'Geist Mono', 'Geist Mono Fallback', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -134,7 +150,7 @@ body {
 
 /* Utility Classes */
 .font-mono {
-  font-family: 'Geist Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+  font-family: 'Geist Mono', 'Geist Mono Fallback', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
 }
 
 /* Card hover effects */
@@ -284,6 +300,151 @@ body {
 }
 .animate-fade-in {
   animation: fade-in 0.25s ease-out;
+}
+
+@keyframes bar-bounce {
+  0%, 100% { height: 20%; }
+  50% { height: 100%; }
+}
+.bar-bounce-0 { animation: bar-bounce 1.2s 0ms ease-in-out infinite; }
+.bar-bounce-1 { animation: bar-bounce 1.2s 150ms ease-in-out infinite; }
+.bar-bounce-2 { animation: bar-bounce 1.2s 300ms ease-in-out infinite; }
+.bar-bounce-3 { animation: bar-bounce 1.2s 450ms ease-in-out infinite; }
+.bar-bounce-4 { animation: bar-bounce 1.2s 200ms ease-in-out infinite; }
+
+/* ── Live Dashboard Animations ────────────────────────────── */
+
+/* Sliding gradient shimmer on progress bars */
+@keyframes progress-glow {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.progress-glow {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: progress-glow 2s linear infinite;
+}
+
+/* Pulsing dot for running status */
+@keyframes dot-ping {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.8); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+.dot-ping {
+  position: relative;
+}
+.dot-ping::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: inherit;
+  animation: dot-ping 2s ease-out infinite;
+}
+
+/* Glowing border for urgent countdown */
+@keyframes urgent-glow {
+  0%, 100% { box-shadow: 0 0 4px rgba(239, 68, 68, 0.3); }
+  50% { box-shadow: 0 0 12px rgba(239, 68, 68, 0.6), 0 0 24px rgba(239, 68, 68, 0.2); }
+}
+.urgent-glow {
+  animation: urgent-glow 1.5s ease-in-out infinite;
+}
+
+/* Slide-in from bottom for new cards */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out;
+}
+
+/* Slide-in from right for trade cards */
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.animate-slide-in-right {
+  animation: slide-in-right 0.35s ease-out;
+}
+
+/* Brief value flash highlight */
+@keyframes value-flash {
+  0% { background-color: rgba(34, 197, 94, 0.2); }
+  100% { background-color: transparent; }
+}
+.value-flash-green {
+  animation: value-flash 0.8s ease-out;
+}
+@keyframes value-flash-red {
+  0% { background-color: rgba(239, 68, 68, 0.15); }
+  100% { background-color: transparent; }
+}
+.value-flash-red {
+  animation: value-flash-red 0.8s ease-out;
+}
+
+/* Scanning line overlay for diagnostic banners */
+@keyframes banner-scan {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.banner-scan {
+  position: relative;
+  overflow: hidden;
+}
+.banner-scan::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 25%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.04), transparent);
+  animation: banner-scan 4s linear infinite;
+  pointer-events: none;
+}
+
+/* Staggered fade-in for list items */
+.stagger-fade > :nth-child(1) { animation: fade-in 0.25s 0ms ease-out both; }
+.stagger-fade > :nth-child(2) { animation: fade-in 0.25s 50ms ease-out both; }
+.stagger-fade > :nth-child(3) { animation: fade-in 0.25s 100ms ease-out both; }
+.stagger-fade > :nth-child(4) { animation: fade-in 0.25s 150ms ease-out both; }
+.stagger-fade > :nth-child(5) { animation: fade-in 0.25s 200ms ease-out both; }
+.stagger-fade > :nth-child(6) { animation: fade-in 0.25s 250ms ease-out both; }
+
+/* Rotating settings gear */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.hover-spin:hover svg {
+  animation: spin-slow 3s linear infinite;
+}
+
+/* Edge strength glow */
+@keyframes edge-glow {
+  0%, 100% { text-shadow: 0 0 4px currentColor; }
+  50% { text-shadow: 0 0 10px currentColor, 0 0 20px currentColor; }
+}
+.animate-edge-glow {
+  animation: edge-glow 2s ease-in-out infinite;
+}
+
+/* Clock colon blink */
+@keyframes colon-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.colon-blink {
+  animation: colon-blink 1s steps(1) infinite;
 }
 
 /* Dashboard frosted background — gives glass cards something to blur */

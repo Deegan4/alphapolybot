@@ -4,8 +4,11 @@ import { WindowTimer } from './WindowTimer'
 import { StrategyDropdown } from './StrategyDropdown'
 import { useWalletStore, useSettingsStore } from '@/stores'
 import { walletService } from '@/services/wallet/WalletService'
-import { strategyManager, type StrategyState } from '@/services/strategies'
-import { tradeLogger, rejectionTracker, positionLifecycleManager, tradingService } from '@/services/trading'
+import { strategyManager, type StrategyState } from '@/services/strategies/StrategyManager'
+import { tradeLogger } from '@/services/trading/TradeLogger'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
+import { positionLifecycleManager } from '@/services/trading/PositionLifecycleManager'
+import { tradingService } from '@/services/trading/TradingService'
 import { btcUpDownStrategy } from '@/services/strategies/BtcUpDownStrategy'
 import type { BacktestSummary } from '@/services/trading/TradeLogger'
 
@@ -25,7 +28,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
   const [showWalletPicker, setShowWalletPicker] = useState(false)
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [summary, setSummary] = useState<BacktestSummary>(tradeLogger.getSummary())
-  const [activeWindow, setActiveWindow] = useState(btcUpDownStrategy.getActiveWindow())
+  const [activeWindows, setActiveWindows] = useState(btcUpDownStrategy.getActiveWindows())
 
   useEffect(() => {
     return strategyManager.subscribe(setStrategies)
@@ -40,7 +43,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
   useEffect(() => {
     const tick = () => {
       setSummary(tradeLogger.getSummary())
-      setActiveWindow(btcUpDownStrategy.getActiveWindow())
+      setActiveWindows(btcUpDownStrategy.getActiveWindows())
       const rSummary = rejectionTracker.getSummary()
       setRejectionTotal(rSummary.total)
       setRejectionTooltip(
@@ -177,11 +180,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
 
       {/* Center: Window timer (hidden on small screens) */}
       <div className="hidden md:block">
-        <WindowTimer
-          windowStartMs={activeWindow?.windowStartMs ?? null}
-          windowEndMs={activeWindow?.windowEndMs ?? null}
-          windowDurationMs={activeWindow?.windowDurationMs ?? null}
-        />
+        <WindowTimer windows={activeWindows} />
       </div>
 
       {/* Right: Stats + status */}
@@ -273,7 +272,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
             }`}
             title="Click to manage strategies"
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${anyRunning ? 'bg-agent-green animate-pulse' : 'bg-agent-red'}`} />
+            <span className={`w-1.5 h-1.5 rounded-full ${anyRunning ? 'bg-agent-green dot-ping' : 'bg-agent-red'}`} />
             {anyRunning ? 'Active' : 'Stopped'}
             <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="ml-0.5 opacity-60">
               <polyline points="6 9 12 15 18 9" />
@@ -288,7 +287,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
         {/* Settings */}
         <Link
           to="/settings"
-          className="text-agent-text-muted hover:text-agent-text transition-colors"
+          className="text-agent-text-muted hover:text-agent-text transition-colors hover-spin"
           title="Settings"
         >
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

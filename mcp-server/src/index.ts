@@ -114,7 +114,7 @@ server.tool(
   'Score and rank markets by composite metric: spread tightness, volume, liquidity, and incoherence opportunity. Returns top 20 ranked markets with reasons.',
   scoreOpportunitiesSchema,
   async (args) => {
-    const result = handleScoreOpportunities(args);
+    const result = handleScoreOpportunities(args as any);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
     };
@@ -126,7 +126,7 @@ server.tool(
 // 6) get_balance — wallet balance and auth status
 server.tool(
   'get_balance',
-  'Get USDC.e balance, signer/proxy addresses, and auth status. Requires VITE_WALLET_SEED_PHRASE in .env.',
+  'Get USDC.e balance, signer/proxy addresses, and auth status. Requires WALLET_SEED_PHRASE in .env or secure runtime entry.',
   getBalanceSchema,
   async (args) => {
     const result = await handleGetBalance(args);

@@ -1,10 +1,15 @@
 import React, { useEffect, useState } from 'react'
-import { useSettingsStore } from '@/stores/settingsStore'
+
+export interface ActiveWindow {
+  asset: string
+  windowStartMs: number
+  windowEndMs: number
+  windowDurationMs: number
+  durationKey: string
+}
 
 interface WindowTimerProps {
-  windowStartMs: number | null
-  windowEndMs: number | null
-  windowDurationMs?: number | null
+  windows: ActiveWindow[]
 }
 
 const formatClock = (d: Date) => {
@@ -24,52 +29,77 @@ const formatTimeLabel = (ms: number) => {
   return `${h12}:${m} ${ampm}`
 }
 
-type Timeframe = '5m' | '15m'
+const formatRemaining = (ms: number) => {
+  if (ms <= 0) return '0:00'
+  const totalSec = Math.ceil(ms / 1000)
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${min}:${sec.toString().padStart(2, '0')}`
+}
 
-/** Segmented toggle for switching between 5m and 15m market windows */
-const TimeframeSelector: React.FC = () => {
-  const enable5m = useSettingsStore((s) => s.btcEnable5m)
-  const _enable15m = useSettingsStore((s) => s.btcEnable15m)
-  const setBtcEnable5m = useSettingsStore((s) => s.setBtcEnable5m)
-  const setBtcEnable15m = useSettingsStore((s) => s.setBtcEnable15m)
+const LABEL_MAP: Record<string, string> = {
+  '5m': '5 MIN',
+  '15m': '15 MIN',
+  'hourly': '1 HR',
+  '4h': '4 HR',
+  'daily': 'DAILY',
+}
 
-  // Determine which is the "active display" timeframe
-  const active: Timeframe = enable5m ? '5m' : '15m'
+/** Single progress bar for one window timeframe */
+const WindowBar: React.FC<{ window: ActiveWindow; now: number }> = ({ window: w, now }) => {
+  const total = w.windowEndMs - w.windowStartMs
+  const elapsed = Math.max(0, Math.min(total, now - w.windowStartMs))
+  const remaining = Math.max(0, w.windowEndMs - now)
+  const progress = total > 0 ? (elapsed / total) * 100 : 0
 
-  const select = (tf: Timeframe) => {
-    if (tf === '5m') {
-      setBtcEnable5m(true)
-      setBtcEnable15m(false)
-    } else {
-      setBtcEnable5m(false)
-      setBtcEnable15m(true)
-    }
-  }
+  // Color shifts from green → yellow → red as time runs out
+  const isUrgent = remaining < 30_000
+  const isWarning = remaining < 60_000 && !isUrgent
+  const barColor = isUrgent
+    ? 'bg-red-400'
+    : isWarning
+      ? 'bg-yellow-400'
+      : 'bg-agent-green'
+  const glowClass = isUrgent ? '' : 'progress-glow'
+  const labelColor = isUrgent
+    ? 'text-red-400'
+    : isWarning
+      ? 'text-yellow-400'
+      : 'text-agent-green'
 
   return (
-    <div className="flex items-center rounded-md border border-agent-border/60 overflow-hidden">
-      {(['5m', '15m'] as Timeframe[]).map((tf) => (
-        <button
-          key={tf}
-          onClick={() => select(tf)}
-          className={`px-2.5 py-1 text-[11px] font-mono font-bold transition-all ${
-            active === tf
-              ? 'bg-agent-cyan/15 text-agent-cyan border-agent-cyan/30'
-              : 'text-agent-text-label hover:text-agent-text hover:bg-agent-card/50'
-          }`}
-        >
-          {tf}
-        </button>
-      ))}
+    <div className="flex items-center gap-2">
+      {/* Duration badge */}
+      <span className={`text-[10px] font-mono font-bold w-10 text-right ${labelColor}`}>
+        {LABEL_MAP[w.durationKey] ?? w.durationKey}
+      </span>
+
+      {/* Progress track */}
+      <div className="w-28 h-2 bg-agent-border/60 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-1000 ${barColor} ${glowClass}`}
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+
+      {/* Countdown */}
+      <span className={`text-[11px] font-mono font-semibold w-10 tabular-nums ${labelColor}`}>
+        {formatRemaining(remaining)}
+      </span>
+
+      {/* Window range */}
+      <span className="text-[10px] font-mono text-agent-text-label hidden xl:inline">
+        {formatTimeLabel(w.windowStartMs)}–{formatTimeLabel(w.windowEndMs)}
+      </span>
     </div>
   )
 }
 
 /**
- * BTC window timer with progress bar and timeframe selector.
- * Shows current time, timeframe toggle (5m/15m), progress bar, and window range.
+ * Dual BTC window timer — shows progress bars for all active crypto window timeframes.
+ * Green → yellow (< 60s) → red (< 30s) with countdown.
  */
-export const WindowTimer: React.FC<WindowTimerProps> = ({ windowStartMs, windowEndMs, windowDurationMs }) => {
+export const WindowTimer: React.FC<WindowTimerProps> = ({ windows }) => {
   const [now, setNow] = useState(Date.now())
 
   useEffect(() => {
@@ -79,41 +109,28 @@ export const WindowTimer: React.FC<WindowTimerProps> = ({ windowStartMs, windowE
 
   const currentTime = formatClock(new Date(now))
 
-  if (!windowStartMs || !windowEndMs) {
+  // Sort: 5m first, then 15m, then hourly, etc.
+  const SORT_ORDER: Record<string, number> = { '5m': 0, '15m': 1, 'hourly': 2, '4h': 3, 'daily': 4 }
+  const sorted = [...windows].sort(
+    (a, b) => (SORT_ORDER[a.durationKey] ?? 9) - (SORT_ORDER[b.durationKey] ?? 9)
+  )
+
+  if (sorted.length === 0) {
     return (
       <div className="flex items-center gap-3">
-        <span className="text-3xl font-mono font-bold text-agent-green">{currentTime}</span>
-        <TimeframeSelector />
+        <span className="text-3xl font-mono font-bold text-agent-green animate-text-glow">{currentTime}</span>
         <span className="text-sm font-sans text-agent-text-muted">No active window</span>
       </div>
     )
   }
 
-  const total = windowEndMs - windowStartMs
-  const elapsed = Math.max(0, Math.min(total, now - windowStartMs))
-  const progress = total > 0 ? (elapsed / total) * 100 : 0
-
   return (
-    <div className="flex items-center gap-3">
-      <span className="text-3xl font-mono font-bold text-agent-green">{currentTime}</span>
-      <TimeframeSelector />
-      <div className="flex flex-col gap-0.5">
-        {/* Progress bar */}
-        <div className="w-44 h-2.5 bg-agent-border rounded-full overflow-hidden">
-          <div
-            className="h-full bg-agent-green rounded-full transition-all duration-1000"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-        {/* Window range label */}
-        <span className="text-xs font-sans text-agent-text-muted">
-          {windowDurationMs && (
-            <span className="text-agent-cyan font-semibold mr-1.5">
-              {windowDurationMs <= 300_000 ? '5m' : windowDurationMs <= 900_000 ? '15m' : 'hourly'}
-            </span>
-          )}
-          {formatTimeLabel(windowStartMs)} — {formatTimeLabel(windowEndMs)}
-        </span>
+    <div className="flex items-center gap-4">
+      <span className="text-3xl font-mono font-bold text-agent-green animate-text-glow">{currentTime}</span>
+      <div className="flex flex-col gap-1">
+        {sorted.map((w) => (
+          <WindowBar key={w.durationKey} window={w} now={now} />
+        ))}
       </div>
     </div>
   )

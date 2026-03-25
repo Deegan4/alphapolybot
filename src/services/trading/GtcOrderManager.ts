@@ -227,7 +227,7 @@ export class GtcOrderManager {
    * Cancel all pending orders for a specific strategy
    * Called when a strategy is stopped
    */
-  async cancelAllForStrategy(strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool' | 'impulse'): Promise<number> {
+  async cancelAllForStrategy(strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool' | 'impulse' | 'liquidation'): Promise<number> {
     let cancelled = 0
 
     for (const [orderId, order] of this.orders) {

@@ -4,9 +4,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // MOCKS  (vi.hoisted runs BEFORE module evaluation)
 // ==========================================
 
-// Provide a minimal localStorage before OpenRouterService's module-level
-// singleton fires its constructor (which calls localStorage.getItem).
-// vi.hoisted() is guaranteed to run before any import.
 vi.hoisted(() => {
   const store = new Map<string, string>()
   const localStorageMock = {
@@ -17,13 +14,22 @@ vi.hoisted(() => {
     get length() { return store.size },
     key: (_index: number) => null as string | null,
   }
-  // @ts-expect-error — globalThis.localStorage is read-only in types
-  globalThis.localStorage = localStorageMock
+  Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, writable: true })
 })
 
-// OpenRouterService class (not the singleton) — we construct our own instances.
-// The module-level singleton will call localStorage during import; the mock above covers it.
-import { OpenRouterService } from '../OpenRouterService'
+// Mock LLMInteractionStore to avoid IndexedDB in tests
+vi.mock('../LLMInteractionStore', () => ({
+  llmInteractionStore: {
+    record: vi.fn().mockReturnValue('mock-id'),
+    flush: vi.fn().mockResolvedValue(undefined),
+    loadAll: vi.fn().mockResolvedValue([]),
+    count: vi.fn().mockResolvedValue(0),
+  },
+}))
+
+import { OllamaService } from '../OllamaService'
+import { llmInteractionStore } from '../LLMInteractionStore'
+import type { Market } from '@/types'
 
 // Mock fetch globally
 const mockFetch = vi.fn()
@@ -33,11 +39,11 @@ vi.stubGlobal('fetch', mockFetch)
 // HELPERS
 // ==========================================
 
-function makeService(apiKey = 'test-api-key'): OpenRouterService {
-  return new OpenRouterService(apiKey)
+function makeService(): OllamaService {
+  return new OllamaService()
 }
 
-function makeMarket(overrides = {}) {
+function makeMarket(overrides: Partial<Market> = {}): Market {
   return {
     id: 'market-1',
     question: 'Will BTC exceed $100k?',
@@ -48,6 +54,7 @@ function makeMarket(overrides = {}) {
     slug: 'btc-100k',
     volume: 50000,
     liquidity: 10000,
+    endDate: '2025-12-31',
     createdAt: '2024-01-01',
     active: true,
     closed: false,
@@ -55,12 +62,11 @@ function makeMarket(overrides = {}) {
   }
 }
 
-function makeSuccessResponse(content: string, cost?: number) {
+function makeSuccessResponse(content: string) {
   return {
     ok: true,
     json: async () => ({
       choices: [{ message: { content } }],
-      usage: cost != null ? { total_cost: cost } : undefined,
     }),
   }
 }
@@ -79,25 +85,12 @@ function validJson(overrides = {}) {
 // TESTS
 // ==========================================
 
-describe('OpenRouterService', () => {
-  let service: OpenRouterService
+describe('OllamaService', () => {
+  let service: OllamaService
 
   beforeEach(() => {
     vi.clearAllMocks()
     service = makeService()
-  })
-
-  describe('API key management', () => {
-    it('uses explicit API key from constructor', () => {
-      const svc = new OpenRouterService('explicit-key')
-      expect(() => svc.setApiKey('new-key')).not.toThrow()
-    })
-
-    it('returns low-confidence fallback when API key is empty', async () => {
-      const svc = new OpenRouterService('')
-      const result = await svc.analyzeMarket(makeMarket())
-      expect(result.confidence).toBeLessThanOrEqual(0.1)
-    })
   })
 
   describe('response parsing', () => {
@@ -126,7 +119,6 @@ describe('OpenRouterService', () => {
     })
 
     it('falls back to low confidence on non-JSON response', async () => {
-      // The fallback parser checks for 'prediction: yes', '"yes"', or 'likely to be yes'
       const content = 'My prediction: yes, this market will resolve positively.'
       mockFetch.mockResolvedValue(makeSuccessResponse(content))
 
@@ -162,57 +154,6 @@ describe('OpenRouterService', () => {
     })
   })
 
-  describe('cost tracking', () => {
-    it('tracks cost from API response', async () => {
-      mockFetch.mockResolvedValue(makeSuccessResponse(validJson(), 0.0045))
-
-      await service.analyzeMarket(makeMarket())
-      const stats = service.getCostStats()
-
-      expect(stats.dailySpendUSD).toBeCloseTo(0.0045)
-      expect(stats.callCountToday).toBe(1)
-      expect(stats.totalSpendUSD).toBeCloseTo(0.0045)
-    })
-
-    it('accumulates cost across multiple calls', async () => {
-      mockFetch
-        .mockResolvedValueOnce(makeSuccessResponse(validJson(), 0.003))
-        .mockResolvedValueOnce(makeSuccessResponse(validJson(), 0.005))
-        .mockResolvedValueOnce(makeSuccessResponse(validJson(), 0.002))
-
-      await service.analyzeMarket(makeMarket())
-      await service.analyzeMarket(makeMarket())
-      await service.analyzeMarket(makeMarket())
-
-      const stats = service.getCostStats()
-      expect(stats.dailySpendUSD).toBeCloseTo(0.01)
-      expect(stats.callCountToday).toBe(3)
-    })
-
-    it('enforces daily budget limit', async () => {
-      service.setDailyBudget(0.005)
-      mockFetch.mockResolvedValue(makeSuccessResponse(validJson(), 0.005))
-
-      await service.analyzeMarket(makeMarket())
-      await expect(service.analyzeMarket(makeMarket())).rejects.toThrow('budget exhausted')
-    })
-
-    it('reports budget exhausted in stats', async () => {
-      service.setDailyBudget(0.001)
-      mockFetch.mockResolvedValue(makeSuccessResponse(validJson(), 0.002))
-      await service.analyzeMarket(makeMarket())
-
-      const stats = service.getCostStats()
-      expect(stats.budgetExhausted).toBe(true)
-      expect(stats.dailyRemaining).toBe(0)
-    })
-
-    it('setDailyBudget clamps to zero minimum', () => {
-      service.setDailyBudget(-5)
-      expect(service.getDailyBudget()).toBe(0)
-    })
-  })
-
   describe('prompt building', () => {
     it('includes market question in API call', async () => {
       mockFetch.mockResolvedValue(makeSuccessResponse(validJson()))
@@ -232,13 +173,13 @@ describe('OpenRouterService', () => {
       expect(body.messages[1].content).toContain('72.0%')
     })
 
-    it('sends correct Authorization header', async () => {
+    it('does not send Authorization header (Ollama is local)', async () => {
       mockFetch.mockResolvedValue(makeSuccessResponse(validJson()))
 
       await service.analyzeMarket(makeMarket())
 
       const headers = mockFetch.mock.calls[0][1].headers
-      expect(headers['Authorization']).toBe('Bearer test-api-key')
+      expect(headers['Authorization']).toBeUndefined()
     })
   })
 
@@ -270,26 +211,89 @@ describe('OpenRouterService', () => {
     })
   })
 
-  describe('error handling', () => {
-    it('returns zero-confidence fallback on network error', async () => {
-      mockFetch.mockRejectedValue(new Error('Network error'))
+  describe('interaction recording', () => {
+    it('records every inference in LLMInteractionStore', async () => {
+      mockFetch.mockResolvedValue(makeSuccessResponse(validJson()))
 
-      const result = await service.analyzeMarket(makeMarket())
-      expect(result.confidence).toBe(0.0)
-      expect(result.reasoning).toContain('Network error')
+      await service.analyzeMarket(makeMarket())
+
+      expect(llmInteractionStore.record).toHaveBeenCalledTimes(1)
+      const call = vi.mocked(llmInteractionStore.record).mock.calls[0][0]
+      expect(call.provider).toBe('ollama')
+      expect(call.promptType).toBe('prediction')
+      expect(call.costUSD).toBe(0)
+      expect(call.marketId).toBe('market-1')
+    })
+  })
+
+  describe('circuit breaker', () => {
+    it('trips after consecutive failures', async () => {
+      const errorResponse = {
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: async () => ({ error: { message: 'Model not loaded' } }),
+      }
+
+      mockFetch.mockResolvedValue(errorResponse)
+
+      // Trip the circuit breaker (3 consecutive failures)
+      for (let i = 0; i < 3; i++) {
+        await service.analyzeMarket(makeMarket()).catch(() => {})
+      }
+
+      expect(service.isCircuitBreakerActive()).toBe(true)
     })
 
-    it('returns zero-confidence fallback on HTTP 429', async () => {
+    it('is inactive by default', () => {
+      expect(service.isCircuitBreakerActive()).toBe(false)
+    })
+  })
+
+  describe('error handling', () => {
+    it('throws on network error', async () => {
+      mockFetch.mockRejectedValue(new Error('Network error'))
+
+      await expect(service.analyzeMarket(makeMarket())).rejects.toThrow('Network error')
+    })
+
+    it('throws on HTTP 500', async () => {
       mockFetch.mockResolvedValue({
         ok: false,
-        status: 429,
-        statusText: 'Too Many Requests',
-        json: async () => ({ error: { message: 'Rate limited' } }),
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: async () => ({ error: { message: 'Model crashed' } }),
       })
 
-      const result = await service.analyzeMarket(makeMarket())
-      expect(result.confidence).toBe(0.0)
-      expect(result.reasoning).toContain('Rate limited')
+      await expect(service.analyzeMarket(makeMarket())).rejects.toThrow('Model crashed')
+    })
+  })
+
+  describe('signal fusion', () => {
+    it('boosts confidence when models agree', () => {
+      const primary = { predictedOutcome: 'yes' as const, confidence: 0.7, reasoning: '', sources: [], analysisTime: 0 }
+      const secondary = { predictedOutcome: 'yes' as const, confidence: 0.8, reasoning: '', sources: [], analysisTime: 0 }
+
+      const result = OllamaService.fuseSignals(primary, secondary)
+      expect(result.fusionApplied).toBe(true)
+      expect(result.confidence).toBeGreaterThan(0.7)
+    })
+
+    it('penalizes confidence when models disagree', () => {
+      const primary = { predictedOutcome: 'yes' as const, confidence: 0.7, reasoning: '', sources: [], analysisTime: 0 }
+      const secondary = { predictedOutcome: 'no' as const, confidence: 0.8, reasoning: '', sources: [], analysisTime: 0 }
+
+      const result = OllamaService.fuseSignals(primary, secondary)
+      expect(result.fusionApplied).toBe(true)
+      expect(result.confidence).toBeLessThan(0.7)
+    })
+
+    it('returns primary confidence when no secondary', () => {
+      const primary = { predictedOutcome: 'yes' as const, confidence: 0.7, reasoning: '', sources: [], analysisTime: 0 }
+
+      const result = OllamaService.fuseSignals(primary, null)
+      expect(result.fusionApplied).toBe(false)
+      expect(result.confidence).toBe(0.7)
     })
   })
 })

@@ -90,6 +90,18 @@ vi.mock('@/services/trading/ActivityLogger', () => ({
   },
 }))
 
+// Mock settingsStore (imported by DipArbStrategy for Kelly fraction + penny mode)
+vi.mock('@/stores/settingsStore', () => ({
+  useSettingsStore: {
+    getState: vi.fn(() => ({
+      pennyTraderMode: false,
+      kellyFraction: 0.20,
+    })),
+    setState: vi.fn(),
+    subscribe: vi.fn(),
+  },
+}))
+
 // Mock walletStore (imported by DipArbStrategy for Kelly sizing)
 vi.mock('@/stores/walletStore', () => ({
   useWalletStore: {

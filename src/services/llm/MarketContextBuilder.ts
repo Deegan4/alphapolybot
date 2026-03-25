@@ -4,7 +4,7 @@
  * Gathers enrichment data from existing singletons to build rich context
  * for LLM prompts. Zero new API calls — reads from in-memory state only.
  *
- * Used by OpenRouterService to enrich analysis prompts with:
+ * Used by OllamaService to enrich analysis prompts with:
  * - Market quality scores
  * - Historical calibration accuracy per category
  * - Strategy win rate from EdgeTracker

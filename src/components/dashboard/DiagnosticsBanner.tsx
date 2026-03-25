@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import { useSettingsStore, useWalletStore } from '@/stores'
-import { riskManager, rejectionTracker, readinessChecker, positionLifecycleManager } from '@/services/trading'
-import { polymarketClient } from '@/services/api'
+import { riskManager } from '@/services/trading/RiskManager'
+import { rejectionTracker } from '@/services/trading/RejectionTracker'
+import { readinessChecker } from '@/services/trading/ReadinessChecker'
+import { positionLifecycleManager } from '@/services/trading/PositionLifecycleManager'
+import { polymarketClient } from '@/services/api/PolymarketClient'
 import { realtimeService } from '@/services/realtime/RealtimeService'
-import { strategyManager, type StrategyState } from '@/services/strategies'
+import { strategyManager, type StrategyState } from '@/services/strategies/StrategyManager'
 import type { RejectionSummary } from '@/services/trading/RejectionTracker'
 
 type Severity = 'red' | 'yellow' | 'cyan'
@@ -75,7 +78,7 @@ export const DiagnosticsBanner: React.FC = () => {
   }[banner.severity]
 
   return (
-    <div className={`mx-4 mt-3 px-4 py-2 rounded border-l-4 ${borderColor} flex items-center justify-between`}>
+    <div className={`mx-4 mt-3 px-4 py-2 rounded border-l-4 ${borderColor} flex items-center justify-between banner-scan animate-slide-up`}>
       <div className="flex items-center gap-3 min-w-0">
         <span className={`text-xs font-mono font-bold ${textColor} shrink-0`}>
           {banner.message}

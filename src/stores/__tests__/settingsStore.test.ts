@@ -83,8 +83,8 @@ describe('settingsStore', () => {
   })
 
   describe('default values', () => {
-    it('starts in dry run mode', () => {
-      expect(useSettingsStore.getState().dryRun).toBe(true)
+    it('starts in live trading mode ($33 aggressive config)', () => {
+      expect(useSettingsStore.getState().dryRun).toBe(false)
     })
 
     it('has empty API keys by default', () => {
@@ -98,13 +98,13 @@ describe('settingsStore', () => {
       expect(state.enableSoundAlerts).toBe(false)
     })
 
-    it('has risk management defaults', () => {
+    it('has risk management defaults ($20 bankroll)', () => {
       const state = useSettingsStore.getState()
-      expect(state.dailyLossLimit).toBe(2)
-      expect(state.weeklyLossLimit).toBe(7)
-      expect(state.maxTradesPerHour).toBe(12)
+      expect(state.dailyLossLimit).toBe(3)
+      expect(state.weeklyLossLimit).toBe(6)
+      expect(state.maxTradesPerHour).toBe(15)
       expect(state.consecutiveFailureLimit).toBe(3)
-      expect(state.minBalanceForTrade).toBe(1)
+      expect(state.minBalanceForTrade).toBe(3)
       expect(state.riskManagementEnabled).toBe(true)
     })
 
@@ -169,9 +169,9 @@ describe('settingsStore', () => {
       // Reset
       useSettingsStore.getState().resetSettings()
 
-      // Verify defaults restored
+      // Verify defaults restored ($33 aggressive = dryRun false)
       const reset = useSettingsStore.getState()
-      expect(reset.dryRun).toBe(true)
+      expect(reset.dryRun).toBe(false)
       expect(reset.openRouterApiKey).toBe('')
       expect(reset.enableNotifications).toBe(true)
       expect(reset.enableSoundAlerts).toBe(false)
@@ -188,41 +188,62 @@ describe('settingsStore', () => {
   })
 
   describe('aggressiveMode', () => {
-    it('defaults to false', () => {
-      expect(useSettingsStore.getState().aggressiveMode).toBe(false)
+    it('defaults to true ($39 aggressive config)', () => {
+      expect(useSettingsStore.getState().aggressiveMode).toBe(true)
     })
 
-    it('setAggressiveMode(true) sets aggressive parameters', () => {
+    it('setAggressiveMode(true) sets aggressive parameters for $20', () => {
       useSettingsStore.getState().setAggressiveMode(true)
       const s = useSettingsStore.getState()
       expect(s.aggressiveMode).toBe(true)
       expect(s.pennyTraderMode).toBe(false)
-      expect(s.kellyFraction).toBe(0.40)
-      expect(s.dailyLossLimit).toBe(5)
-      expect(s.weeklyLossLimit).toBe(10)
-      expect(s.maxTradesPerHour).toBe(40)
-      expect(s.consecutiveFailureLimit).toBe(8)
-      expect(s.microMinCompositeSignal).toBe(0.30)
+      expect(s.kellyFraction).toBe(0.15)
+      expect(s.dailyLossLimit).toBe(3)
+      expect(s.weeklyLossLimit).toBe(6)
+      expect(s.maxTradesPerHour).toBe(15)
+      expect(s.consecutiveFailureLimit).toBe(3)
       expect(s.fwMinProfitBps).toBe(30)
+      // Maker strategies — only proven ones on $20
+      expect(s.gabagoolEnabled).toBe(true)
+      expect(s.gabagoolOrderSize).toBe(1.50)
+      expect(s.gabagoolMaxExposure).toBe(5)
+      expect(s.gabagoolCheapnessThreshold).toBe(0.46)
+      expect(s.gabagoolMinProfitMargin).toBe(0.96)
+      expect(s.dualSideEnabled).toBe(true)
+      expect(s.dualSideTradeSize).toBe(1.50)
+      expect(s.dualSideMaxCombinedAsk).toBe(0.990)
+      expect(s.impulseEnabled).toBe(false)   // OFF — taker fees on small bankroll
+      expect(s.liqEnabled).toBe(false)        // OFF — preserve capital
+      expect(s.btcEnableEth).toBe(false)
+      expect(s.btcEnableSol).toBe(false)
+      expect(s.btcEnable5m).toBe(false)       // OFF — positions pile up
+      expect(s.btcEnable15m).toBe(false)      // OFF — 10% taker fee
+      expect(s.btcEnableHourly).toBe(true)
+      expect(s.btcEnable4h).toBe(true)
+      expect(s.btcTradeSize).toBe(1.50)
+      expect(s.btcMinConfidence).toBe(0.50)
+      expect(s.btcMaxEntryPrice).toBe(0.48)
+      expect(s.btcMinEdgeOverMarket).toBe(0.07)
+      expect(s.btcCrossExchangeEnabled).toBe(true)
+      expect(s.btcUseLLMConfirmation).toBe(false)
+      expect(s.btcMroEnabled).toBe(true)
+      expect(s.btcCvdEnabled).toBe(true)
+      expect(s.fwEnableCrossMarket).toBe(true)
     })
 
-    it('setAggressiveMode(false) restores conservative defaults', () => {
+    it('setAggressiveMode(false) restores defaults', () => {
       // First enable aggressive
       useSettingsStore.getState().setAggressiveMode(true)
       expect(useSettingsStore.getState().aggressiveMode).toBe(true)
 
-      // Then disable
+      // Then disable — restores DEFAULT_SETTINGS
       useSettingsStore.getState().setAggressiveMode(false)
       const s = useSettingsStore.getState()
       expect(s.aggressiveMode).toBe(false)
       expect(s.pennyTraderMode).toBe(false)
-      expect(s.kellyFraction).toBe(0.20)
-      expect(s.dailyLossLimit).toBe(2)
-      expect(s.weeklyLossLimit).toBe(7)
-      expect(s.maxTradesPerHour).toBe(12)
-      expect(s.consecutiveFailureLimit).toBe(3)
-      expect(s.microMinCompositeSignal).toBe(0.40)
-      expect(s.fwMinProfitBps).toBe(30)
+      // Defaults match base settings (non-aggressive)
+      expect(s.gabagoolEnabled).toBe(true)
+      expect(s.dualSideEnabled).toBe(true)
     })
 
     it('toggling aggressive mode twice returns to original state', () => {
@@ -235,14 +256,14 @@ describe('settingsStore', () => {
       expect(after.dailyLossLimit).toBe(before.dailyLossLimit)
     })
 
-    it('resetSettings clears aggressiveMode', () => {
-      useSettingsStore.getState().setAggressiveMode(true)
-      expect(useSettingsStore.getState().aggressiveMode).toBe(true)
-      useSettingsStore.getState().resetSettings()
+    it('resetSettings keeps aggressiveMode at default (true)', () => {
+      useSettingsStore.getState().setAggressiveMode(false)
       expect(useSettingsStore.getState().aggressiveMode).toBe(false)
+      useSettingsStore.getState().resetSettings()
+      expect(useSettingsStore.getState().aggressiveMode).toBe(true)
     })
 
-    it('btcEnableBtc defaults to true (primary $10 strategy)', () => {
+    it('btcEnableBtc defaults to true (primary strategy)', () => {
       expect(useSettingsStore.getState().btcEnableBtc).toBe(true)
     })
   })

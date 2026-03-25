@@ -36,14 +36,18 @@
   - SDK/Client: Custom HTTP requests via `PriceOracleService`
   - Files: `src/services/api/PriceOracleService.ts`
   - Auth: None (public endpoints)
-  - Endpoint: https://api.binance.us (via `/api/binance` proxy in dev)
-  - Usage: BTC, ETH, SOL, XRP pair queries
 
-- **Binance WebSocket** - Real-time mini ticker streams (BTC, ETH, SOL, XRP)
+  - Endpoint: Supports both US and global Binance endpoints. Default is https://api.binance.us (via `/api/binance` proxy in dev). Region selection is automatic based on configuration; can target https://api.binance.com for global access.
+  - Usage: BTC, ETH, SOL, XRP pair queries
+  - Proxy: In development, requests are routed via `/api/binance` (REST) and `/ws/binance` (WebSocket) for CORS and region flexibility.
+  - Region differences: US endpoints (api.binance.us, stream.binance.us) have restricted trading pairs and geographic limitations; global endpoints (api.binance.com, stream.binance.com) offer broader access but may be unavailable to US users.
+  - Choose endpoint based on user region and required pairs; fallback to US endpoints if global is blocked.
+
+**Binance WebSocket** - Real-time mini ticker streams (BTC, ETH, SOL, XRP)
   - SDK/Client: Native WebSocket with custom `BinanceWSService`
   - Files: `src/services/realtime/BinanceWSService.ts`
   - Auth: None (public streams)
-  - Endpoint: wss://stream.binance.us:9443 (via `/ws/binance` proxy in dev)
+  - Endpoint: Supports both wss://stream.binance.us:9443 and wss://stream.binance.com:9443 (via `/ws/binance` proxy in dev)
   - Streams: `btcusdt@miniTicker`, `ethusdt@miniTicker`, `solusdt@miniTicker`, `xrpusdt@miniTicker`
   - Cache TTL: 5 seconds
   - Note: Custom Vite plugin (`binanceWsProxy()`) bridges WebSocket with auto-reconnect
@@ -110,9 +114,13 @@
   - Persistence: Survives page reload, cleared on browser cache wipe
   - No backend database required (fully client-side)
 
+
 **File Storage:**
 - Local filesystem only (Netlify deployment handles static assets)
-- Wallet seed phrase and API keys stored in-memory or localStorage (user responsibility)
+- **Security Warning:** localStorage is vulnerable to XSS and should not be used for seed phrases.
+- Store seed phrases only in-memory for session use or in encrypted form protected by a user-entered password.
+- Prefer platform secure storage options (hardware secure element / OS keystore) or prompt users to manage their own offline/backed-up seed instead of persisting to localStorage.
+- API keys may be stored in localStorage (user responsibility).
 
 **Caching:**
 - **In-memory (session):**
@@ -138,8 +146,12 @@
 - **No backend:** All auth is client-side; user manages wallet seed phrase
 - Files: `src/services/wallet/WalletService.ts`, `src/stores/walletStore.ts`, `src/services/api/CLOBClient.ts`
 
+
 **Secrets Management:**
-- Environment variables: `VITE_OPENROUTER_API_KEY`, `VITE_WALLET_SEED_PHRASE` (optional in .env)
+- Environment variables: `VITE_OPENROUTER_API_KEY` (optional in .env)
+- **Wallet seed phrases must be provided only at runtime via the Settings UI and never as build-time env vars.**
+- Keep seed phrases in-memory or protected with client-side encryption (or secure credential storage).
+- Any `VITE_`-prefixed variables are bundled into the client and must not contain secrets.
 - Secure storage: Seeds/keys NOT persisted to git; recommend in-app settings entry or environment
 - Secure storage utility: `src/utils/secureStorage.ts` (available for localStorage encryption if needed)
 

@@ -50,9 +50,9 @@
 - TypeScript 5.2.0 - Type checking
 
 **Code Quality:**
-- ESLint 8.50.0 - Linting
-- @typescript-eslint/eslint-plugin 6.7.0 - TypeScript linting rules
-- @typescript-eslint/parser 6.7.0 - TypeScript parser for ESLint
+- ESLint 9.x - Linting
+- @typescript-eslint/eslint-plugin 7.x - TypeScript linting rules
+- @typescript-eslint/parser 7.x - TypeScript parser for ESLint
 - eslint-plugin-react-hooks 4.6.0 - React hooks best practices
 - eslint-plugin-react-refresh 0.4.0 - Fast refresh validation
 
@@ -74,7 +74,7 @@
 
 **Environment Variables:**
 - `VITE_OPENROUTER_API_KEY` - OpenRouter LLM API key (sk-or-v1-*)
-- `VITE_WALLET_SEED_PHRASE` - Optional: wallet seed phrase or private key (not required if entered in UI)
+- Wallet seed phrase/private key: Must never be stored in env files or source control. Use browser secure storage, hardware wallets, or KMS. Never expose secrets via VITE_ env vars.
 - `VITE_BINANCE_API_URL` - Binance REST API endpoint (default: https://api.binance.com/api/v3)
 - `VITE_BINANCE_WS_URL` - Binance WebSocket endpoint (default: wss://stream.binance.com:9443)
 - `VITE_COINGECKO_API_URL` - CoinGecko API endpoint (default: https://api.coingecko.com/api/v3)
@@ -124,7 +124,7 @@
 npm run dev              # Start Vite dev server with HMR on port 4000
 npm run dev:strict-csp  # Dev mode with strict CSP (no React HMR injection)
 npm run build           # Production build with sourcemaps to dist/
-npm run lint            # ESLint check (max 65 warnings allowed)
+npm run lint            # ESLint check (zero warnings tolerated; see package.json TODO for remediation plan)
 npm run preview         # Preview production build locally
 npm run test            # Run Vitest once
 npm run test:watch      # Watch mode for tests

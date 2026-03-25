@@ -683,8 +683,9 @@ export class CLOBClient extends BaseApiClient {
       const makerAmount = ethers.parseUnits(rawMakerAmt.toFixed(6), 6)
       const takerAmount = ethers.parseUnits(rawTakerAmt.toFixed(6), 6)
 
-      // Random salt for order uniqueness
-      const salt = Date.now()
+      // Cryptographically random salt to prevent collisions on concurrent orders
+      const saltBytes = crypto.getRandomValues(new Uint8Array(8))
+      const salt = Number(new DataView(saltBytes.buffer).getBigUint64(0) % BigInt(Number.MAX_SAFE_INTEGER))
 
       // Build the order data that gets EIP-712 signed AND sent to the API
       // maker = proxy/funder (holds funds), signer = EOA (signs the order)
@@ -760,9 +761,46 @@ export class CLOBClient extends BaseApiClient {
         orderID?: string
         transactionsHashes?: string[]
         errorMsg?: string
+        status?: string
       }>('/order', requestBody)
 
       if (response.success || response.orderID) {
+        const hasTxHash = response.transactionsHashes && response.transactionsHashes.length > 0
+
+        // FOK orders that the CLOB accepted but couldn't match still return
+        // an orderID.  Detect this: no transactionsHashes means zero fills.
+        // For GTC/GTD orders, no immediate txHash is expected (they sit on the book).
+        if (isFok && !hasTxHash) {
+          // Query the order to confirm — the CLOB may have matched it after
+          // the initial response (rare but possible under load)
+          let confirmed = false
+          if (response.orderID) {
+            try {
+              const check = await this.authGet<Order>(`/data/order/${response.orderID}`)
+              if (check && (check.status === 'filled' || (check.filledSize && check.filledSize > 0))) {
+                confirmed = true
+                return {
+                  success: true,
+                  orderId: response.orderID,
+                  txHash: response.transactionsHashes?.[0],
+                  filledSize: check.filledSize,
+                  avgPrice: check.price,
+                }
+              }
+            } catch {
+              // Query failed — treat as unconfirmed
+            }
+          }
+          if (!confirmed) {
+            console.warn(`[CLOBClient] FOK order ${response.orderID} accepted but no fills (killed by matching engine)`)
+            return {
+              success: false,
+              error: "FOK order couldn't be fully filled — no matching liquidity",
+              orderId: response.orderID,
+            }
+          }
+        }
+
         return {
           success: true,
           orderId: response.orderID,
@@ -986,13 +1024,26 @@ export class CLOBClient extends BaseApiClient {
       const result = { balance, allowance }
       this._balanceCache = { result, ts: Date.now() }
 
-      console.log(`[CLOBClient] CLOB balance/allowance (sigType=${sigType}): ` +
+      console.debug(`[CLOBClient] CLOB balance/allowance (sigType=${sigType}): ` +
         `balance=$${balance.toFixed(4)}, allowance=${allowance != null ? `$${allowance.toFixed(4)}` : 'N/A'} ` +
         `(raw: ${response.balance} / ${response.allowance})`)
 
       return result
     } catch (error) {
-      // Non-critical — log but don't block trading
+      // Auto-rederive on 401 and retry once — API keys can expire
+      const status = (error as { status?: number }).status
+      const msg = error instanceof Error ? error.message : String(error)
+      const is401 = status === 401 || msg.includes('401')
+
+      if (is401 && signatureType === undefined) {
+        // Only retry once (signatureType acts as retry guard — undefined on first call)
+        console.warn('[CLOBClient] 401 on balance — rederiving API key and retrying...')
+        const newCreds = await this.deriveApiKey()
+        if (newCreds) {
+          return this.getBalanceAllowance(sigType) // pass explicit sigType = won't retry again
+        }
+      }
+
       console.warn('[CLOBClient] Failed to check CLOB balance:', error instanceof Error ? error.message : error)
       return null
     }
@@ -1239,14 +1290,8 @@ export class CLOBClient extends BaseApiClient {
       normalizedOrder,
     )
 
-    // ─── Signature Diagnostics ──────────────────────────────
-    // Compute the EIP-712 hash and recover signer to verify correctness
+    // Signature verification: recover signer and check match (no verbose logging)
     try {
-      const hash = ethers.TypedDataEncoder.hash(
-        domain,
-        CLOBClient.ORDER_TYPES,
-        normalizedOrder,
-      )
       const recoveredAddress = ethers.verifyTypedData(
         domain,
         CLOBClient.ORDER_TYPES,
@@ -1254,22 +1299,11 @@ export class CLOBClient extends BaseApiClient {
         signature,
       )
       const expectedSigner = await this.wallet.getAddress()
-      console.log('[CLOBClient] ─── Signature Diagnostic ───')
-      console.log(`  EIP-712 hash:      ${hash}`)
-      console.log(`  Recovered signer:  ${recoveredAddress}`)
-      console.log(`  Expected signer:   ${expectedSigner}`)
-      console.log(`  Match:             ${recoveredAddress.toLowerCase() === expectedSigner.toLowerCase()}`)
-      console.log(`  Domain:            ${negRisk ? 'NegRisk' : 'Standard'} (${domain.verifyingContract})`)
-      console.log(`  Signature:         ${signature}`)
-      console.log(`  Order fields:      salt=${normalizedOrder.salt} maker=${normalizedOrder.maker} signer=${normalizedOrder.signer}`)
-      console.log(`                     tokenId=${normalizedOrder.tokenId.slice(0, 20)}...`)
-      console.log(`                     makerAmt=${normalizedOrder.makerAmount} takerAmt=${normalizedOrder.takerAmount}`)
-      console.log(`                     side=${normalizedOrder.side} sigType=${normalizedOrder.signatureType}`)
       if (recoveredAddress.toLowerCase() !== expectedSigner.toLowerCase()) {
-        console.error('[CLOBClient] ⚠️ SIGNATURE RECOVERY MISMATCH — this will cause "invalid signature"!')
+        console.error('[CLOBClient] SIGNATURE RECOVERY MISMATCH — recovered:', recoveredAddress.slice(0, 10), 'expected:', expectedSigner.slice(0, 10))
       }
     } catch (diagErr) {
-      console.warn('[CLOBClient] Signature diagnostic failed:', diagErr)
+      console.warn('[CLOBClient] Signature verification failed:', diagErr)
     }
 
     return signature

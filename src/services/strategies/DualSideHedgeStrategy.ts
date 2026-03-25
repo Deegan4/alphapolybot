@@ -58,8 +58,10 @@ export class DualSideHedgeStrategy extends BaseStrategy {
   strategyType = 'mechanical' as const
 
   private pendingHedges = new Map<string, PendingHedge>()
+  private _confidenceLogThrottle = new Map<string, number>()
   private unsubscribe: (() => void) | null = null
   private fillCheckInterval: ReturnType<typeof setInterval> | null = null
+  private weatherScanInterval: ReturnType<typeof setInterval> | null = null
   private cleanupFns: Array<() => void> = []
 
   // ==========================================
@@ -105,6 +107,52 @@ export class DualSideHedgeStrategy extends BaseStrategy {
 
     // Safety-net timeout check (30s interval — handles BinanceWS disconnects)
     this.fillCheckInterval = setInterval(() => this.checkPendingFills(), 30_000)
+
+    // Weather market scan (60s interval — weather markets move slowly)
+    this.startWeatherScan()
+  }
+
+  /** Periodically scan weather markets for dual-side arb opportunities */
+  private startWeatherScan(): void {
+    const settings = useSettingsStore.getState()
+    if (!settings.weatherScanEnabled) return
+
+    this.weatherScanInterval = setInterval(async () => {
+      try {
+        const { weatherMarketAdapter } = await import('./WeatherMarketAdapter')
+        const markets = weatherMarketAdapter.getActiveMarkets()
+        const config = this.dualConfig
+
+        for (const m of markets) {
+          if (!m.clobTokenIds || m.clobTokenIds.length < 2) continue
+          if (!m.outcomePrices || m.outcomePrices.length < 2) continue
+
+          const yesPrice = m.outcomePrices[0]
+          const noPrice = m.outcomePrices[1]
+          const combined = yesPrice + noPrice
+
+          // Only proceed if combined ask < threshold (arb opportunity)
+          if (combined >= config.maxCombinedAsk) continue
+
+          // Use forecast probability as confidence, or 0.50 if no forecast
+          const confidence = (m as { forecastProb?: number }).forecastProb ?? 0.50
+          const direction = confidence > 0.50 ? 'up' : 'down'
+
+          // Synthesize a signal-like object and call the same onSignal handler
+          await this.onSignal(
+            'WEATHER',
+            {
+              direction: direction as 'up' | 'down',
+              confidence: Math.max(confidence, 1 - confidence),
+              timestamp: Date.now(),
+              factors: {},
+            } as Signal,
+            0, 0,
+            m,
+          )
+        }
+      } catch { /* weather adapter not available */ }
+    }, 60_000)
   }
 
   async stop(): Promise<void> {
@@ -116,6 +164,10 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     if (this.fillCheckInterval) {
       clearInterval(this.fillCheckInterval)
       this.fillCheckInterval = null
+    }
+    if (this.weatherScanInterval) {
+      clearInterval(this.weatherScanInterval)
+      this.weatherScanInterval = null
     }
     for (const fn of this.cleanupFns) fn()
     this.cleanupFns = []
@@ -376,7 +428,6 @@ export class DualSideHedgeStrategy extends BaseStrategy {
     market?: Market,
   ): Promise<void> {
     if (!this._enabled || !this.dualConfig.enabled) {
-      this.log(`Skipping signal: enabled=${this._enabled} dualConfig.enabled=${this.dualConfig.enabled}`)
       return
     }
 
@@ -399,9 +450,14 @@ export class DualSideHedgeStrategy extends BaseStrategy {
       }
     } catch { /* VPIN unavailable — proceed without */ }
 
-    // Gate: minimum signal confidence
+    // Gate: minimum signal confidence (throttled log — once per asset per 60s)
     if (signal.confidence < config.minSignalConfidence) {
-      this.log(`${asset}: confidence ${(signal.confidence * 100).toFixed(0)}% < min ${(config.minSignalConfidence * 100).toFixed(0)}%`)
+      const now = Date.now()
+      const lastLog = this._confidenceLogThrottle.get(asset) || 0
+      if (now - lastLog > 60_000) {
+        this.log(`${asset}: confidence ${(signal.confidence * 100).toFixed(0)}% < min ${(config.minSignalConfidence * 100).toFixed(0)}%`)
+        this._confidenceLogThrottle.set(asset, now)
+      }
       return
     }
 

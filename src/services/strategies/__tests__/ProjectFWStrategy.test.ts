@@ -45,11 +45,9 @@ vi.mock('@/services/wallet', () => ({
   },
 }))
 
-vi.mock('@/services/llm/OpenRouterService', () => ({
-  openRouterService: {
+vi.mock('@/services/llm/OllamaService', () => ({
+  ollamaService: {
     classifyDependencies: vi.fn().mockResolvedValue([]),
-    getCostStats: vi.fn().mockReturnValue({ spent: 0, limit: 0.5, calls: 0, remaining: 0.5 }),
-    setDailyBudget: vi.fn(),
   },
 }))
 

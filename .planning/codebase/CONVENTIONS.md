@@ -26,7 +26,7 @@
 - Zustand store state: camelCase interface properties matching store structure
 
 **Types:**
-- Interfaces: PascalCase with `I` prefix or descriptive name (e.g., `RiskManagerConfig`, `StorageOptions`, `RiskCheckResult`)
+- Interfaces: PascalCase descriptive names (no `I` prefix) (e.g., `RiskManagerConfig`, `StorageOptions`, `RiskCheckResult`)
 - Type aliases: PascalCase (e.g., `RiskCode`)
 - Unions: descriptive literal strings in single quotes (e.g., `'DAILY_LOSS_EXCEEDED' | 'WEEKLY_LOSS_EXCEEDED'`)
 - Generic types: single uppercase letter or descriptive `T` prefix (e.g., `T`, `TData`)
@@ -51,7 +51,7 @@
 **Key ESLint Rules:**
 - `react-refresh/only-export-components`: warn on non-component module exports (Vite HMR requirement)
 - `@typescript-eslint/no-unused-vars`: warn, ignore `_` prefix (used for intentionally unused parameters)
-- `@typescript-eslint/no-var-requires`: off (dynamic imports via import() permitted for circular dependency avoidance)
+- `@typescript-eslint/no-var-requires`: off (this rule governs usage of CommonJS `require()`, not ES dynamic `import()`. Disabled to allow legacy/CommonJS `require()` in scripts, config files, or circular import workarounds. Use dynamic `import()` for ES modules.)
 - `no-empty`: error but allow empty catch blocks (fire-and-forget pattern)
 - `@typescript-eslint/no-explicit-any`: warn (permitted for API response parsing where types unknown)
 

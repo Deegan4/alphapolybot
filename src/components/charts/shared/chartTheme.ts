@@ -14,7 +14,7 @@ export const matrixChartTheme = {
     textMuted: '#00cc00',
   },
   fonts: {
-    family: 'JetBrains Mono, monospace',
+    family: 'Geist Mono, monospace',
     size: {
       xs: 10,
       sm: 11,

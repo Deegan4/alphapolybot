@@ -13,7 +13,7 @@ export interface MatrixNumberInputProps
   precision?: number
   prefix?: string
   suffix?: string
-  onChange?: (value: number | undefined) => void
+  onChange?: (value: number) => void
 }
 
 export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputProps>(
@@ -62,7 +62,6 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
       (newValue: number | undefined) => {
         if (newValue === undefined) {
           setInternalValue('')
-          onChange?.(undefined)
         } else {
           const clamped = clampValue(newValue)
           setInternalValue(clamped.toString())
@@ -77,7 +76,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
       setInternalValue(val)
 
       if (val === '' || val === '-') {
-        onChange?.(undefined)
+        // Don't fire onChange for empty/incomplete input — wait for valid number
       } else {
         const num = parseFloat(val)
         if (!isNaN(num)) {
@@ -122,6 +121,8 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
             <button
               type="button"
               onClick={handleDecrement}
+              aria-label="Decrease value"
+              title="Decrease value"
               disabled={disabled || (min !== undefined && parseFloat(currentValue) <= min)}
               className={cn(
                 'flex h-10 w-10 items-center justify-center',
@@ -181,6 +182,8 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
             <button
               type="button"
               onClick={handleIncrement}
+              aria-label="Increase value"
+              title="Increase value"
               disabled={disabled || (max !== undefined && parseFloat(currentValue) >= max)}
               className={cn(
                 'flex h-10 w-10 items-center justify-center',

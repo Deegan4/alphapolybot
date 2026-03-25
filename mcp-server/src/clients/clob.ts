@@ -54,7 +54,7 @@ export class ClobClient {
 
     // Derive API key using L1 auth (EIP-712)
     try {
-      const l1Headers = await buildL1Headers(this.walletInfo.wallet);
+      const l1Headers = await buildL1Headers(this.walletInfo.wallet as any);
 
       const response = await this.http.get<{
         apiKey: string;
@@ -190,7 +190,7 @@ export class ClobClient {
     if (!await this.init()) throw new Error('CLOB auth not initialized');
 
     const { payload, preview } = await buildSignedOrder(
-      this.walletInfo!.wallet,
+      this.walletInfo!.wallet as any,
       this.walletInfo!.signerAddress,
       this.walletInfo!.proxyAddress,
       this.walletInfo!.signatureType,

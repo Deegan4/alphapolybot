@@ -4,11 +4,9 @@ import type { MarketGroup, MarketDependency, DependencyGraph } from '../projectf
 
 // Mock modules that depend on browser APIs (localStorage, fetch)
 // before importing modules that reference them.
-vi.mock('@/services/llm/OpenRouterService', () => ({
-  openRouterService: {
+vi.mock('@/services/llm/OllamaService', () => ({
+  ollamaService: {
     classifyDependencies: vi.fn().mockResolvedValue([]),
-    getCostStats: vi.fn().mockReturnValue({ dailySpendUSD: 0, dailyBudgetUSD: 0.5, dailyRemaining: 0.5, callCountToday: 0, totalSpendUSD: 0, budgetExhausted: false }),
-    setDailyBudget: vi.fn(),
   },
 }))
 

@@ -239,8 +239,9 @@ export class RealtimeService {
         this.handlePriceChange(evt)
       } else if (evt.event_type === 'last_trade_price') {
         this.handleLastTradePrice(evt)
+      } else if (evt.event_type === 'book') {
+        this.handleBookUpdate(evt)
       }
-      // Ignore other event types (book, tick_size, etc.)
     }
   }
 
@@ -277,6 +278,41 @@ export class RealtimeService {
       this.prices.set(assetId, priceData)
       this.notifyPriceCallbacks(assetId, priceData)
     }
+  }
+
+  private handleBookUpdate(evt: Record<string, unknown>): void {
+    const assetId = evt.asset_id as string
+    if (!assetId) return
+
+    // CLOB book events can carry full snapshots or deltas via 'changes' array
+    // Format: { event_type: 'book', asset_id, bids: [...], asks: [...] }
+    //    or:  { event_type: 'book', asset_id, changes: [{ price, side, size }] }
+    import('@/services/trading/L2OrderBookTracker').then(({ l2OrderBookTracker }) => {
+      if (!l2OrderBookTracker.isTracking(assetId)) return
+
+      const bids = evt.bids as Array<{ price: string; size: string }> | undefined
+      const asks = evt.asks as Array<{ price: string; size: string }> | undefined
+      const changes = evt.changes as Array<{ price: string; side: string; size: string }> | undefined
+
+      if (bids && asks) {
+        // Full snapshot
+        l2OrderBookTracker.applySnapshot(
+          assetId,
+          bids.map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) })),
+          asks.map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })),
+        )
+      } else if (changes && Array.isArray(changes)) {
+        // Incremental delta
+        l2OrderBookTracker.applyDelta(
+          assetId,
+          changes.map(c => ({
+            price: parseFloat(c.price),
+            side: (c.side === 'buy' || c.side === 'bid') ? 'bid' as const : 'ask' as const,
+            size: parseFloat(c.size),
+          })),
+        )
+      }
+    }).catch(() => {})
   }
 
   private handleLastTradePrice(evt: Record<string, unknown>): void {

@@ -2,7 +2,7 @@ import { BaseStrategy } from './BaseStrategy'
 import type { LLMPredictionConfig, Market } from '@/types'
 import { marketScanner } from '@/services/trading/MarketScanner'
 import { tradingService } from '@/services/trading/TradingService'
-import { openRouterService, OpenRouterService } from '@/services/llm'
+import { ollamaService, OllamaService } from '@/services/llm'
 import { gatherMarketContext, enrichWithPriceTrend, gatherCryptoContext } from '@/services/llm/MarketContextBuilder'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import { useWalletStore, useSettingsStore } from '@/stores'
@@ -257,7 +257,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
       let trendBudget = 5
       for (const market of eligible.slice(0, 15)) {
         if (!this._enabled) break
-        if (openRouterService.isCircuitBreakerActive()) {
+        if (ollamaService.isCircuitBreakerActive()) {
           this.log('OpenRouter circuit breaker active — skipping remaining markets')
           break
         }
@@ -289,7 +289,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
       }
 
       // Get LLM prediction with enriched context
-      const prediction = await openRouterService.analyzeMarket(market, context)
+      const prediction = await ollamaService.analyzeMarket(market, context)
 
       this.log(`Prediction: ${prediction.predictedOutcome} (${(prediction.confidence * 100).toFixed(1)}% confidence)`)
       activityLogger.logAnalysis(`Prediction: ${prediction.predictedOutcome}`, {
@@ -343,8 +343,8 @@ export class LLMPredictionStrategy extends BaseStrategy {
                            calibratedConfidence < effectiveMinConfidence + 0.15
       if (isBorderline) {
         try {
-          const secondOpinion = await openRouterService.getSecondOpinion(market, context)
-          const fusion = OpenRouterService.fuseSignals(prediction, secondOpinion)
+          const secondOpinion = await ollamaService.getSecondOpinion(market, context)
+          const fusion = OllamaService.fuseSignals(prediction, secondOpinion)
           if (fusion.fusionApplied) {
             this.log(`Signal fusion: ${(calibratedConfidence * 100).toFixed(1)}% → ${(fusion.confidence * 100).toFixed(1)}% (${secondOpinion?.predictedOutcome === prediction.predictedOutcome ? 'agree' : 'disagree'})`)
             finalConfidence = fusion.confidence
@@ -592,7 +592,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
           context = gatherCryptoContext(context, market)
 
           // Use crypto-specific prompt via analyzeCryptoMarket
-          const prediction = await openRouterService.analyzeCryptoMarket(market, context, cryptoModel)
+          const prediction = await ollamaService.analyzeCryptoMarket(market, context, cryptoModel)
 
           this.log(`[Crypto] ${market.question.substring(0, 40)}: ${prediction.predictedOutcome} (${(prediction.confidence * 100).toFixed(1)}%)`)
 

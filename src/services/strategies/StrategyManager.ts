@@ -1,13 +1,22 @@
 import { BaseStrategy } from './BaseStrategy'
-import { LLMPredictionStrategy, llmPredictionStrategy } from './LLMPredictionStrategy'
-import { DipArbStrategy, dipArbStrategy } from './DipArbStrategy'
-import { ProjectFWStrategy, projectFWStrategy } from './ProjectFWStrategy'
-import { BtcUpDownStrategy, btcUpDownStrategy } from './BtcUpDownStrategy'
-import { GabagoolStrategy, gabagoolStrategy } from './GabagoolStrategy'
-import { DualSideHedgeStrategy, dualSideHedgeStrategy } from './DualSideHedgeStrategy'
-import { ImpulseSniperStrategy, impulseSniperStrategy } from './ImpulseSniperStrategy'
 import { activityLogger } from '@/services/trading/ActivityLogger'
+import { useSettingsStore } from '@/stores/settingsStore'
 import type { StrategyStats } from '@/types'
+
+// Lazy strategy loaders — each strategy module is only downloaded when first needed,
+// keeping the main bundle free of heavy strategy code + their transitive deps
+// (CLOBClient, GammaClient, signalEngine, OllamaService, etc.)
+const strategyLoaders: Record<string, () => Promise<BaseStrategy>> = {
+  'llm-prediction': () => import('./LLMPredictionStrategy').then(m => m.llmPredictionStrategy),
+  'dip-arb': () => import('./DipArbStrategy').then(m => m.dipArbStrategy),
+  'project-fw': () => import('./ProjectFWStrategy').then(m => m.projectFWStrategy),
+  'btc-updown': () => import('./BtcUpDownStrategy').then(m => m.btcUpDownStrategy),
+  'gabagool': () => import('./GabagoolStrategy').then(m => m.gabagoolStrategy),
+  'dual-side': () => import('./DualSideHedgeStrategy').then(m => m.dualSideHedgeStrategy),
+  'impulse-sniper': () => import('./ImpulseSniperStrategy').then(m => m.impulseSniperStrategy),
+  'liquidation-momentum': () => import('./LiquidationMomentumStrategy').then(m => m.liquidationMomentumStrategy),
+  'copy-trading': () => import('./CopyTradingStrategy').then(m => m.copyTradingStrategy),
+}
 
 export interface StrategyState {
   id: string
@@ -19,7 +28,8 @@ export interface StrategyState {
 
 /**
  * StrategyManager - Orchestrates multiple trading strategies
- * 
+ *
+ * Strategies are lazy-loaded on initialize() to keep the main bundle small.
  * Per spec: "Both strategies can run simultaneously with independent ON/OFF toggles"
  */
 export class StrategyManager {
@@ -28,14 +38,7 @@ export class StrategyManager {
   private listeners: Array<(states: StrategyState[]) => void> = []
 
   constructor() {
-    // Register built-in strategies
-    this.registerStrategy('llm-prediction', llmPredictionStrategy)
-    this.registerStrategy('dip-arb', dipArbStrategy)
-    this.registerStrategy('project-fw', projectFWStrategy)
-    this.registerStrategy('btc-updown', btcUpDownStrategy)
-    this.registerStrategy('gabagool', gabagoolStrategy)
-    this.registerStrategy('dual-side', dualSideHedgeStrategy)
-    this.registerStrategy('impulse-sniper', impulseSniperStrategy)
+    // Strategies are registered lazily in initialize() via dynamic imports
   }
 
   /**
@@ -51,22 +54,63 @@ export class StrategyManager {
   }
 
   /**
-   * Initialize all strategies
+   * Initialize all strategies — lazy-loads each module in parallel,
+   * registers them, then initializes sequentially.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return
 
-    console.log('[StrategyManager] Initializing strategies...')
+    console.log('[StrategyManager] Loading strategies...')
     activityLogger.logSystem('Initializing strategy manager')
 
+    // Load all strategy modules in parallel
+    const entries = Object.entries(strategyLoaders)
+    const loaded = await Promise.allSettled(
+      entries.map(async ([id, loader]) => ({ id, strategy: await loader() }))
+    )
+
+    for (const result of loaded) {
+      if (result.status === 'fulfilled') {
+        const { id, strategy } = result.value
+        this.registerStrategy(id, strategy)
+      } else {
+        console.error('[StrategyManager] Failed to load strategy:', result.reason)
+      }
+    }
+
+    // Map strategy IDs to their settings-store enabled toggle
+    const settings = useSettingsStore.getState()
+    const enabledMap: Record<string, boolean> = {
+      'llm-prediction': true, // always init (no dedicated toggle)
+      'dip-arb': true,        // always init (no dedicated toggle)
+      'project-fw': true,     // always init (no dedicated toggle)
+      'btc-updown': settings.btcEnableBtc,
+      'gabagool': settings.gabagoolEnabled,
+      'dual-side': settings.dualSideEnabled,
+      'impulse-sniper': settings.impulseEnabled,
+      'liquidation-momentum': settings.liqEnabled,
+      'copy-trading': !!settings.followedAddress,
+    }
+
+    // Initialize each registered strategy (skip verbose logging for disabled ones)
     for (const [id, strategy] of this.strategies) {
       try {
         await strategy.initialize()
-        console.log(`[StrategyManager] ${strategy.name} initialized`)
+        if (enabledMap[id] !== false) {
+          console.log(`[StrategyManager] ${strategy.name} initialized`)
+        }
       } catch (error) {
         console.error(`[StrategyManager] Failed to initialize ${id}:`, error)
         activityLogger.logError(`Failed to initialize ${strategy.name}`, error)
       }
+    }
+
+    // Start WeatherMarketAdapter if enabled (not a strategy, but a market scanner)
+    if (settings.weatherScanEnabled) {
+      import('./WeatherMarketAdapter').then(m => {
+        m.weatherMarketAdapter.start()
+        console.log('[StrategyManager] Weather market scanner started')
+      }).catch(() => {})
     }
 
     this.initialized = true
@@ -80,54 +124,36 @@ export class StrategyManager {
     return this.strategies.get(id)
   }
 
-  /**
-   * Get LLM Prediction strategy (typed)
-   */
-  getLLMStrategy(): LLMPredictionStrategy {
-    return llmPredictionStrategy
+  getLLMStrategy(): BaseStrategy | undefined {
+    return this.strategies.get('llm-prediction')
   }
 
-  /**
-   * Get Dip Arbitrage strategy (typed)
-   */
-  getDipStrategy(): DipArbStrategy {
-    return dipArbStrategy
+  getDipStrategy(): BaseStrategy | undefined {
+    return this.strategies.get('dip-arb')
   }
 
-  /**
-   * Get ProjectFW Arbitrage strategy (typed)
-   */
-  getProjectFWStrategy(): ProjectFWStrategy {
-    return projectFWStrategy
+  getProjectFWStrategy(): BaseStrategy | undefined {
+    return this.strategies.get('project-fw')
   }
 
-  /**
-   * Get BTC Up/Down strategy (typed)
-   */
-  getBtcUpDownStrategy(): BtcUpDownStrategy {
-    return btcUpDownStrategy
+  getBtcUpDownStrategy(): BaseStrategy | undefined {
+    return this.strategies.get('btc-updown')
   }
 
-  /**
-   * Get Gabagool Accumulator strategy (typed)
-   */
-  getGabagoolStrategy(): GabagoolStrategy {
-    return gabagoolStrategy
+  getGabagoolStrategy(): BaseStrategy | undefined {
+    return this.strategies.get('gabagool')
   }
 
-  /**
-   * Get Dual-Side Hedge strategy (typed)
-   */
-  getDualSideStrategy(): DualSideHedgeStrategy {
-    return dualSideHedgeStrategy
+  getDualSideStrategy(): BaseStrategy | undefined {
+    return this.strategies.get('dual-side')
   }
 
-  /**
-   * Get Impulse Sniper strategy (typed)
-   */
-  getImpulseSniperStrategy(): ImpulseSniperStrategy {
-    return impulseSniperStrategy
+  getImpulseSniperStrategy(): BaseStrategy | undefined {
+    return this.strategies.get('impulse-sniper')
   }
+
+  // Strategies that depend on btc-updown for signals and market discovery
+  private static readonly BTC_DEPENDENTS = ['dual-side', 'gabagool']
 
   /**
    * Enable a strategy
@@ -136,6 +162,15 @@ export class StrategyManager {
     const strategy = this.strategies.get(id)
     if (!strategy) {
       throw new Error(`Strategy ${id} not found`)
+    }
+
+    // Auto-enable BTC Up/Down when a dependent strategy is turned on
+    if (StrategyManager.BTC_DEPENDENTS.includes(id)) {
+      const btc = this.strategies.get('btc-updown')
+      if (btc && !btc.enabled) {
+        await btc.enable()
+        activityLogger.logSystem(`Crypto Up/Down auto-enabled (required by ${strategy.name})`)
+      }
     }
 
     await strategy.enable() // enable() internally calls start()
@@ -153,13 +188,24 @@ export class StrategyManager {
       throw new Error(`Strategy ${id} not found`)
     }
 
+    // Auto-disable dependents when BTC Up/Down is turned off
+    if (id === 'btc-updown') {
+      for (const depId of StrategyManager.BTC_DEPENDENTS) {
+        const dep = this.strategies.get(depId)
+        if (dep?.enabled) {
+          await dep.disable()
+          activityLogger.logSystem(`${dep.name} auto-disabled (depends on Crypto Up/Down)`)
+        }
+      }
+    }
+
     await strategy.disable() // disable() internally calls stop()
 
     // Cancel pending GTD orders for this strategy (dynamic import avoids circular dep)
-    const strategyTag = id === 'llm-prediction' ? 'llm' : id === 'dip-arb' ? 'dip' : id === 'project-fw' ? 'fw' : id === 'btc-updown' ? 'btc' : id === 'gabagool' ? 'gabagool' : id === 'dual-side' ? 'dual-side' : id === 'impulse-sniper' ? 'impulse' : null
+    const strategyTag = id === 'llm-prediction' ? 'llm' : id === 'dip-arb' ? 'dip' : id === 'project-fw' ? 'fw' : id === 'btc-updown' ? 'btc' : id === 'gabagool' ? 'gabagool' : id === 'dual-side' ? 'dual-side' : id === 'impulse-sniper' ? 'impulse' : id === 'liquidation-momentum' ? 'liquidation' : null
     if (strategyTag) {
       import('@/services/trading/GtcOrderManager').then(({ gtcOrderManager }) => {
-        gtcOrderManager.cancelAllForStrategy(strategyTag as 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool' | 'impulse').then(n => {
+        gtcOrderManager.cancelAllForStrategy(strategyTag as 'llm' | 'dip' | 'fw' | 'btc' | 'dual-side' | 'gabagool' | 'impulse' | 'liquidation').then(n => {
           if (n > 0) activityLogger.logSystem(`Cancelled ${n} pending GTD order(s) for ${strategy.name}`)
         })
       }).catch(() => {})

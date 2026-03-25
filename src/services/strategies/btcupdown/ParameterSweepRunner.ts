@@ -1,5 +1,5 @@
 /**
- * ParameterSweepRunner — grid search over BTC Up/Down strategy parameters.
+ * ParameterSweepRunner — grid search over Crypto Up/Down strategy parameters.
  *
  * Takes a parameter grid (Record<string, number[]>), computes the cartesian product,
  * runs BacktestRunner.runBatch() for each combination against the same market type,

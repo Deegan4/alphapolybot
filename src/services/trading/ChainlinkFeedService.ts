@@ -2,7 +2,7 @@
  * ChainlinkFeedService — on-chain price oracle for Polygon mainnet.
  *
  * Reads Chainlink aggregator latestRoundData() for BTC/ETH/SOL/XRP on Polygon.
- * This is the SAME price feed Polymarket uses to resolve BTC Up/Down markets,
+ * This is the SAME price feed Polymarket uses to resolve Crypto Up/Down markets,
  * giving the bot resolution-source-level accuracy for last-window sniping.
  *
  * All reads are free eth_call (no gas, no signing).

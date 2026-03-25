@@ -199,7 +199,13 @@ export class WalletService {
 
   /** Sync balances from CLOB API */
   async syncBalances(): Promise<void> {
-    if (!this.state.isConnected || !polymarketClient.hasCredentials()) {
+    if (!this.state.isConnected) return
+
+    // Detect stale state: Zustand says connected but in-memory credentials are gone
+    // (happens after page refresh — Zustand hydrates isConnected=true but HMAC creds are lost)
+    if (!polymarketClient.hasCredentials()) {
+      console.warn('[WalletService] Stale connection state — credentials missing, disconnecting')
+      this.disconnect()
       return
     }
 

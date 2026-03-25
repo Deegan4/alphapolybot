@@ -5,16 +5,17 @@ import type { CrossMarketOpportunity } from './projectfw/crossmarket/types'
 import { EventAnalyzer } from './projectfw/crossmarket/EventAnalyzer'
 import { DependencyClassifier } from './projectfw/crossmarket/DependencyClassifier'
 import { MutexValidator } from './projectfw/crossmarket/MutexValidator'
-import type { ProjectFWConfig, FWArbRound, FWArbLeg, PriceData } from '@/types'
+import type { ProjectFWConfig, FWArbRound, FWArbLeg, PriceData, RecordedSnapshot } from '@/types'
 import { realtimeService } from '@/services/realtime'
 import { tradingService } from '@/services/trading/TradingService'
 import { activityLogger } from '@/services/trading/ActivityLogger'
-import { openRouterService } from '@/services/llm/OpenRouterService'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
 import { KellySizer } from '@/services/trading/KellySizer'
 import { tradeLogger } from '@/services/trading/TradeLogger'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
+import { gammaClient } from '@/services/api/GammaClient'
+import { clobClient } from '@/services/api/CLOBClient'
 
 const DEFAULT_CONFIG: ProjectFWConfig = {
   // Algorithm parameters
@@ -140,6 +141,9 @@ export class ProjectFWStrategy extends BaseStrategy {
       this.fwConfig.scanIntervalMs
     )
 
+    // Start snapshot recording for backtest data collection (non-blocking)
+    this.startSnapshotRecording()
+
     // Run first scan immediately
     await this.runFullScan()
 
@@ -159,6 +163,9 @@ export class ProjectFWStrategy extends BaseStrategy {
       this.unsubscribePrices()
       this.unsubscribePrices = null
     }
+
+    // Stop snapshot recording
+    this.stopSnapshotRecording()
 
     // Unsubscribe from all tracked markets
     const trackedTokens = this.scanner.getTrackedTokenIds()
@@ -557,6 +564,98 @@ export class ProjectFWStrategy extends BaseStrategy {
   }
 
   // ==========================================
+  // SNAPSHOT RECORDING (backtest data collection)
+  // ==========================================
+
+  /**
+   * Start recording market snapshots to IndexedDB for future backtesting.
+   * Piggybacks on the same Gamma + CLOB data the scanner uses.
+   * Runs every 60s (2x scan interval) — cheap since Gamma data is already cached.
+   * Non-blocking: failures never affect live trading.
+   */
+  private startSnapshotRecording(): void {
+    import('@/services/backtest/SnapshotRecorder').then(async ({ snapshotRecorder }) => {
+      try {
+        await snapshotRecorder.open()
+        snapshotRecorder.startRecording(
+          () => this.fetchSnapshotsForRecording(),
+          60_000, // 60s interval — 2x the scan interval to avoid API pressure
+        )
+        activityLogger.logSystem('Snapshot recording started (backtest data collection)')
+      } catch (err) {
+        console.warn('[ProjectFW] Snapshot recorder failed to start:', err)
+      }
+    }).catch(() => {
+      // Dynamic import failed — non-critical, don't block strategy
+    })
+  }
+
+  private stopSnapshotRecording(): void {
+    import('@/services/backtest/SnapshotRecorder').then(({ snapshotRecorder }) => {
+      snapshotRecorder.stopRecording()
+    }).catch(() => { /* non-critical */ })
+  }
+
+  /**
+   * Fetch a batch of market snapshots with ask/bid prices for recording.
+   * Samples up to 50 active markets per tick — enough for rich backtest data
+   * without hammering the CLOB API.
+   */
+  private async fetchSnapshotsForRecording(): Promise<RecordedSnapshot[]> {
+    const snapshots: RecordedSnapshot[] = []
+    try {
+      const markets = await gammaClient.getActiveMarkets()
+
+      // Sample: take markets with 2+ outcomes and CLOB token IDs
+      const eligible = markets.filter(m =>
+        m.active && !m.closed &&
+        m.outcomes?.length >= 2 &&
+        m.clobTokenIds?.length >= 2
+      ).slice(0, 50)
+
+      if (eligible.length === 0) return snapshots
+
+      // Batch-fetch spreads for all tokens
+      const allTokenIds = new Set<string>()
+      for (const m of eligible) {
+        m.clobTokenIds.forEach(tid => allTokenIds.add(tid))
+      }
+
+      const spreadsMap = await clobClient.getSpreads(Array.from(allTokenIds))
+
+      for (const market of eligible) {
+        const askPrices = market.clobTokenIds.map(tid => {
+          const spread = spreadsMap.get(tid)
+          return spread?.ask ?? Number(market.outcomePrices[market.clobTokenIds.indexOf(tid)] ?? 0.5)
+        })
+        const bidPrices = market.clobTokenIds.map(tid => {
+          const spread = spreadsMap.get(tid)
+          return spread?.bid ?? Number(market.outcomePrices[market.clobTokenIds.indexOf(tid)] ?? 0.5)
+        })
+
+        snapshots.push({
+          timestamp: new Date().toISOString(),
+          marketId: market.id,
+          slug: market.slug,
+          question: market.question,
+          outcomes: market.outcomes,
+          outcomePrices: market.outcomePrices.map(Number),
+          askPrices,
+          bidPrices,
+          volume24h: market.volume24hr,
+          liquidity: market.liquidity,
+          clobTokenIds: market.clobTokenIds,
+          conditionId: market.conditionId,
+          negRisk: market.negRisk,
+        })
+      }
+    } catch {
+      // Non-critical — recording failures never block the bot
+    }
+    return snapshots
+  }
+
+  // ==========================================
   // CROSS-MARKET ANALYSIS
   // ==========================================
 
@@ -574,9 +673,6 @@ export class ProjectFWStrategy extends BaseStrategy {
         confidenceThreshold: this.fwConfig.mutexConfidenceThreshold,
       })
       const mutexValidator = new MutexValidator()
-
-      // Set cross-market LLM budget
-      openRouterService.setDailyBudget(this.fwConfig.crossMarketBudgetUSD, 'crossMarket')
 
       this.scanner.enableCrossMarket(eventAnalyzer, dependencyClassifier, mutexValidator)
       activityLogger.logSystem('Cross-market analysis enabled (validation-only mode)')
@@ -628,11 +724,6 @@ export class ProjectFWStrategy extends BaseStrategy {
     // Handle cross-market toggle
     if (config.enableCrossMarket !== undefined) {
       this.setCrossMarket(config.enableCrossMarket)
-    }
-
-    // Update cross-market LLM budget if changed
-    if (config.crossMarketBudgetUSD !== undefined) {
-      openRouterService.setDailyBudget(config.crossMarketBudgetUSD, 'crossMarket')
     }
 
     this.emit('configUpdated', this.fwConfig)

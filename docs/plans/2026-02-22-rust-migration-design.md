@@ -11,7 +11,7 @@
 | Motivation | Latency / performance |
 | UI | Rust + ratatui TUI |
 | Migration strategy | One strategy end-to-end (BTC Up/Down) |
-| Repo | New repo at `/Volumes/SAMSUNG 1TB/alphapolybot-rs` |
+| Repo | New repo at `{REPO_PATH}/alphapolybot-rs` (set your own path; use relative or environment variable for portability) |
 | Architecture | Async Tokio monolith (Approach A) |
 
 ## 1. Crate Structure
@@ -41,7 +41,7 @@ alphapolybot-rs/
 - `ratatui` + `crossterm` — TUI
 - `serde` + `toml` — config
 - `tracing` — structured logging
-- `ring` or `hmac` — HMAC-SHA256 for CLOB L2 auth
+- `hmac` + `sha2` — HMAC-SHA256 for CLOB L2 auth (use Hmac<Sha256> for a simpler API)
 - `dashmap` — concurrent cache for token metadata
 - `thiserror` — error types
 - `criterion` — benchmarks
@@ -81,10 +81,17 @@ CLOB WS (BookUpdate) ───┘         │                   │             
 - `side`: uint8 0/1 in signed data, "BUY"/"SELL" strings in API body
 - Price rounded to token tick size
 
-### Per-token metadata (cached in DashMap, 5-min TTL)
-- `GET /tick-size?token_id=X`
-- `GET /fee-rate?token_id=X`
-- `GET /neg-risk?token_id=X`
+
+### Per-token metadata cache (DashMap + TTL)
+- Use `DashMap` (or `moka` for built-in TTL) to cache per-token metadata with a 5-minute expiration (TTL).
+- On every insert, set/update the expiration for each token entry.
+- On every read, check for expiration and refresh if needed (re-fetch from API if expired).
+- On every remove, delete the entry from the cache.
+- API endpoints:
+  - `GET /tick-size?token_id=X`
+  - `GET /fee-rate?token_id=X`
+  - `GET /neg-risk?token_id=X`
+  - All cache lookups should respect TTL and auto-refresh expired entries.
 
 ### Critical rules (carried from TS)
 - USDC.e only (`0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`)

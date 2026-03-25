@@ -9,8 +9,9 @@ import { DiagnosticsBanner } from '@/components/dashboard/DiagnosticsBanner'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/Resizable'
 import { useBalanceHistory } from '@/hooks/useBalanceHistory'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { strategyManager, type StrategyState } from '@/services/strategies'
-import { positionLifecycleManager, activityLogger } from '@/services/trading'
+import { strategyManager, type StrategyState } from '@/services/strategies/StrategyManager'
+import { positionLifecycleManager } from '@/services/trading/PositionLifecycleManager'
+import { activityLogger } from '@/services/trading/ActivityLogger'
 
 // Lazy-load tab-specific components — only downloaded when their tab is active.
 // Keeps initial bundle smaller by deferring chart-heavy and feature-specific panels.

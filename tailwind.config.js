@@ -58,8 +58,8 @@ export default {
         }
       },
       fontFamily: {
-        'mono': ['Geist Mono', 'JetBrains Mono', 'Fira Code', 'Courier New', 'monospace'],
-        'sans': ['Geist', 'Inter', 'system-ui', 'sans-serif'],
+        'mono': ['Geist Mono', 'Geist Mono Fallback', 'Fira Code', 'Courier New', 'monospace'],
+        'sans': ['Geist', 'Geist Fallback', 'system-ui', 'sans-serif'],
       },
       animation: {
         'matrix-rain': 'matrix-rain 8s linear infinite',

@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react'
-import { positionLifecycleManager } from '@/services/trading'
+import { positionLifecycleManager } from '@/services/trading/PositionLifecycleManager'
 import { usePolymarketPrices, type PolymarketAssetState } from '@/hooks/usePolymarketPrices'
 import { useCryptoPrices } from '@/hooks/useCryptoPrices'
 import { MatrixSparkline } from '@/components/charts/MatrixSparkline'
 import type { PositionStatus } from '@/services/trading/PositionLifecycleManager'
+import type { TradeRecord } from '@/services/trading/TradeLogger'
 
 type AssetKey = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
@@ -91,7 +92,7 @@ export const ActivePositionsCard: React.FC = () => {
       </div>
 
       {/* Position cards */}
-      <div className="flex-1 overflow-y-auto min-h-0 space-y-3">
+      <div className="flex-1 overflow-y-auto min-h-0 space-y-3 stagger-fade">
         {positions.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4 gap-2">
             <span className="text-2xl opacity-30">&#127919;</span>
@@ -226,7 +227,7 @@ function PositionMarketCard({
           {remaining > 0 && (
             <div className={`flex-shrink-0 rounded-md px-2.5 py-1 border ${
               remaining < 30_000
-                ? 'bg-agent-red/15 border-agent-red/40'
+                ? 'bg-agent-red/15 border-agent-red/40 urgent-glow'
                 : remaining < 120_000
                   ? 'bg-agent-orange/15 border-agent-orange/40'
                   : 'bg-agent-elevated/40 border-agent-border/40'
@@ -445,7 +446,7 @@ function PositionTimeBar({ entryTime, maxHoldMs, windowEnd, remaining }: {
     <div className="mt-1.5 mb-0.5">
       <div className="h-1 w-full rounded-full bg-agent-border/30 overflow-hidden">
         <div
-          className={`h-full rounded-full transition-all duration-1000 ease-linear ${barColor}`}
+          className={`h-full rounded-full transition-all duration-1000 ease-linear ${barColor} ${pct > 50 ? 'progress-glow' : ''}`}
           style={{ width: `${pct}%` }}
         />
       </div>

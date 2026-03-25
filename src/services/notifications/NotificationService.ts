@@ -88,9 +88,11 @@ export class NotificationService {
 
   private sendBrowserNotification(type: NotificationType, message: string): void {
     if (typeof Notification === 'undefined') return
-    if (Notification.permission !== 'granted') {
-      // Lazy permission request on first notification attempt
-      this.requestPermission()
+    if (Notification.permission === 'denied' || Notification.permission !== 'granted') {
+      // Only request if 'default' (not yet asked) — never re-request after 'denied'
+      if (Notification.permission === 'default') {
+        this.requestPermission()
+      }
       return
     }
 

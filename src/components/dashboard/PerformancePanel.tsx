@@ -8,7 +8,7 @@ import {
   Tooltip,
   ReferenceLine,
 } from 'recharts'
-import { tradeLogger } from '@/services/trading'
+import { tradeLogger } from '@/services/trading/TradeLogger'
 import { edgeTracker, type StrategyEdge } from '@/services/trading/EdgeTracker'
 import type { BacktestSummary } from '@/services/trading/TradeLogger'
 
@@ -16,7 +16,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   llm: 'LLM Predict',
   dip: 'Dip Arb',
   fw: 'ProjectFW',
-  btc: 'BTC Up/Down',
+  btc: 'Crypto Up/Down',
   micro: 'Micro Mom.',
   mr: 'Mean Rev.',
 }
@@ -27,7 +27,7 @@ function EdgeBadge({ edge }: { edge: StrategyEdge }) {
   if (!edge.isReliable) return <span className="text-yellow-400 text-[10px]">⏳ {edge.sampleSize}/20</span>
   // After fees (~2% round-trip for standard, 10% for crypto), is edge positive?
   const edgeAfterFees = (2 * edge.winRate - 1) - 0.02
-  if (edgeAfterFees > 0) return <span className="text-agent-green text-[10px]">✓ Edge</span>
+  if (edgeAfterFees > 0) return <span className="text-agent-green text-[10px] animate-edge-glow">✓ Edge</span>
   return <span className="text-agent-red text-[10px]">✗ No Edge</span>
 }
 
@@ -92,7 +92,7 @@ export const PerformancePanel: React.FC = () => {
       ) : (
         <>
           {/* Headline stats row */}
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-4 gap-2 stagger-fade">
             <StatCell
               label="Total P&L"
               value={`${(summary.totalPnlUSD ?? 0) >= 0 ? '+' : ''}$${(summary.totalPnlUSD ?? 0).toFixed(2)}`}
@@ -205,12 +205,12 @@ function PnlChartContainer({ children }: { children: React.ReactNode }) {
     return () => ro.disconnect()
   }, [])
   return (
-    <div ref={ref} className="h-[100px] w-full">
-      {hasSize && (
+    <div ref={ref} className="h-[100px] w-full min-w-px min-h-px">
+      {hasSize ? (
         <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
           {children as React.ReactElement}
         </ResponsiveContainer>
-      )}
+      ) : null}
     </div>
   )
 }

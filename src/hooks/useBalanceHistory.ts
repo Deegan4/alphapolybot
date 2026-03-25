@@ -38,15 +38,27 @@ export function useBalanceHistory() {
     }
   }, [startTime, setStartTime])
 
-  // Set initial balance when wallet first connects (or seed $5,000 in dry-run)
+  // Seed balance: paper balance in dry run, real wallet balance in live mode.
+  const paperBalance = useSettingsStore((s) => s.paperBalance)
+  const seededForDryRun = useRef(false)
   useEffect(() => {
-    if (initialBalance !== 0) return // already seeded
-    if (balance > 0) {
-      setInitialBalance(balance)
-    } else if (dryRun) {
-      setInitialBalance(5_000)
+    if (dryRun) {
+      // Seed paper balance on first mount. The ref prevents re-seeding on every render
+      // while still allowing re-seed if the user toggles live→dry run again.
+      if (!seededForDryRun.current) {
+        syncSimulatedBalance(paperBalance)
+        if (initialBalance === 0) {
+          setInitialBalance(paperBalance)
+        }
+        seededForDryRun.current = true
+      }
+    } else {
+      seededForDryRun.current = false
+      if (initialBalance === 0 && balance > 0) {
+        setInitialBalance(balance)
+      }
     }
-  }, [balance, dryRun, initialBalance, setInitialBalance])
+  }, [balance, dryRun, initialBalance, paperBalance, setInitialBalance, syncSimulatedBalance])
 
   // In live mode, sync simulated balance to real wallet balance
   useEffect(() => {

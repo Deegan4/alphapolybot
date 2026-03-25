@@ -221,17 +221,11 @@ export interface AnalysisRecord {
 }
 
 export interface LLMConfig {
-  provider: 'openrouter' | 'openai' | 'anthropic' | 'ollama'
+  provider: 'ollama'
   model: string
   temperature: number
   maxTokens: number
-  webSearchEnabled: boolean
-  // Ollama — local model base URL (default: http://localhost:11434/v1)
-  ollamaBaseUrl?: string
-  // Premium model tiering
-  premiumModel?: string            // e.g. 'openai/gpt-4o' — empty = disabled
-  premiumModelThreshold?: number   // min qualityScore to use premium (default: 25)
-  premiumBudgetUSD?: number        // daily budget for premium calls (default: $0.50)
+  secondaryModel?: string          // Different model for second opinion diversity
 }
 
 // ==========================================
@@ -366,10 +360,10 @@ export interface FWArbLeg {
   executed: boolean
 }
 
-// BTC Up/Down specific types
+// Crypto Up/Down specific types
 export interface BtcUpDownConfig {
   // Asset toggles
-  enableBtc: boolean           // Trade BTC Up/Down markets (default true)
+  enableBtc: boolean           // Trade Crypto Up/Down markets (default true)
   enableEth: boolean           // Trade ETH Up/Down markets (default false)
   enableSol: boolean           // Trade SOL Up/Down markets (default false)
   enableXrp: boolean           // Trade XRP Up/Down markets (default false)
@@ -567,6 +561,26 @@ export interface AdvancedSettings {
   experimentalFeatures: boolean
   customPrompts: boolean
   manualOrderPlacement: boolean
+}
+
+// ==========================================
+// PRICE HISTORY TYPES (CLOB /prices-history)
+// ==========================================
+
+export interface PriceHistoryOptions {
+  interval: '1m' | '1h' | '6h' | '1d' | '1w' | 'max'
+  startTs?: number    // Unix seconds
+  endTs?: number      // Unix seconds
+  fidelity?: number   // Seconds between data points
+}
+
+export interface PriceHistoryPoint {
+  t: number   // Unix timestamp (seconds)
+  p: number   // Price
+}
+
+export interface PriceHistoryResponse {
+  history: PriceHistoryPoint[]
 }
 
 // ==========================================
@@ -791,4 +805,68 @@ export interface BacktestEnrichment {
   sampleSize: number
   timeOfDayWinRate: number | null
   dayOfWeekWinRate: number | null
+}
+
+// ==========================================
+// MULTI-STRATEGY BACKTEST TYPES
+// ==========================================
+
+export type BacktestStrategyType =
+  | 'btc-updown'
+  | 'dip-arb'
+  | 'project-fw'
+  | 'dual-side'
+  | 'gabagool'
+  | 'impulse-sniper'
+  | 'llm-prediction'
+
+/** Strategy-agnostic trade record for unified backtest results */
+export interface UnifiedTradeRecord {
+  timestamp: string
+  strategy: BacktestStrategyType
+  direction: string              // 'up'|'down' for BTC, 'yes'|'no' for DipArb, 'buy-all' for FW
+  entryPrice: number             // total cost for multi-leg
+  exitPrice: number              // payout or sell price
+  pnl: number                    // net P&L after fees
+  feePaid: number
+  holdTimeMs: number
+  metadata?: Record<string, unknown> // strategy-specific details
+}
+
+/** Result from backtesting a single strategy */
+export interface StrategyBacktestResult {
+  strategy: BacktestStrategyType
+  strategyName: string
+  trades: UnifiedTradeRecord[]
+  summary: BacktestSummary
+  dataSource: 'polybacktest' | 'snapshot-recorder' | 'synthetic'
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  config: Record<string, any>
+}
+
+/** Aggregated results from multi-strategy backtest run */
+export interface MultiStrategyBacktestResult {
+  strategies: StrategyBacktestResult[]
+  combined: BacktestSummary
+  correlationMatrix: Record<string, Record<string, number>>
+  runTimestamp: string
+}
+
+/** Recorded market snapshot for offline backtesting (DipArb, ProjectFW) */
+export interface RecordedSnapshot {
+  timestamp: string
+  marketId: string
+  slug: string
+  question: string
+  outcomes: string[]
+  outcomePrices: number[]           // mid-prices
+  askPrices?: number[]              // best ask per outcome
+  bidPrices?: number[]              // best bid per outcome
+  volume24h?: number
+  liquidity?: number
+  clobTokenIds?: string[]
+  conditionId?: string
+  negRisk?: boolean
+  resolved?: boolean
+  winner?: string | null
 }

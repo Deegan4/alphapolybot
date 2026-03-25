@@ -1,5 +1,5 @@
 /**
- * BacktestRunner — replay BTC Up/Down strategy logic against PolyBacktest snapshots.
+ * BacktestRunner — replay Crypto Up/Down strategy logic against PolyBacktest snapshots.
  *
  * Standalone service, no dependency on BtcUpDownStrategy or any live-trading
  * infrastructure (BinanceWS, TradingService, PLM, etc.). Imports only:

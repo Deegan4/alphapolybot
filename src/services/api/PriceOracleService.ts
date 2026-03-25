@@ -9,7 +9,7 @@ export interface AssetPrice {
   symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'
   priceUSD: number
   timestamp: number
-  source: 'binance' | 'coingecko' | 'rtds' | 'chainlink'
+  source: 'binance' | 'coingecko' | 'rtds' | 'chainlink' | 'crypto.com'
 }
 
 const CACHE_TTL_MS = 5_000
@@ -65,22 +65,47 @@ export class PriceOracleService {
       // RTDS not available — fall through to HTTP sources
     }
 
-    // 2. Local cache (existing behavior)
+    // 2. Binance WebSocket cache (streaming ~1s, highest-throughput source)
+    try {
+      const { binanceWSService } = await import('@/services/realtime/BinanceWSService')
+      const wsPrice = binanceWSService.getCachedPrice(symbol)
+      if (wsPrice && Date.now() - wsPrice.timestamp < CACHE_TTL_MS) {
+        return {
+          symbol,
+          priceUSD: wsPrice.priceUSD,
+          timestamp: wsPrice.timestamp,
+          source: 'binance' as const,
+        }
+      }
+    } catch {
+      // BinanceWS not available — fall through
+    }
+
+    // 3. Local cache (existing behavior)
     const cached = this.cache.get(symbol)
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return cached
     }
 
-    // 3. Binance (HTTP fallback)
+    // 4. Binance REST (HTTP fallback)
     try {
       const price = await this.fetchBinance(symbol)
       this.cache.set(symbol, price)
       return price
     } catch (err) {
-      console.warn(`[PriceOracle] Binance failed for ${symbol}, trying CoinGecko`, err)
+      console.warn(`[PriceOracle] Binance failed for ${symbol}, trying Crypto.com`, err)
     }
 
-    // 4. CoinGecko (last resort)
+    // 5. Crypto.com Exchange (second HTTP fallback)
+    try {
+      const price = await this.fetchCryptoCom(symbol)
+      this.cache.set(symbol, price)
+      return price
+    } catch (err) {
+      console.warn(`[PriceOracle] Crypto.com failed for ${symbol}, trying CoinGecko`, err)
+    }
+
+    // 6. CoinGecko (last resort)
     try {
       const price = await this.fetchCoinGecko(symbol)
       this.cache.set(symbol, price)
@@ -102,6 +127,12 @@ export class PriceOracleService {
     if (!res.ok) throw new Error(`Binance ${res.status}`)
     const data: { price: string } = await res.json()
     return { symbol, priceUSD: parseFloat(data.price), timestamp: Date.now(), source: 'binance' }
+  }
+
+  private async fetchCryptoCom(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {
+    const { cryptoComClient } = await import('./CryptoComClient')
+    const priceUSD = await cryptoComClient.getPrice(symbol)
+    return { symbol, priceUSD, timestamp: Date.now(), source: 'crypto.com' }
   }
 
   private async fetchCoinGecko(symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<AssetPrice> {

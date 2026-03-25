@@ -109,7 +109,23 @@ export class PositionLifecycleManager {
     // Periodic resolution sweep — check for resolved positions every 60s
     this.startResolutionSweep()
 
+    // Register open position value as reserved capital so RiskManager deducts it
+    // from tradeable balance. Prevents rapid position pileup on small bankrolls.
+    riskManager.addCapitalReservationFn(() => this.getOpenPositionValue())
+
     console.log('[PositionLifecycleManager] Initialized — monitoring positions for stop-loss/take-profit')
+  }
+
+  /**
+   * Total cost basis of all open positions (capital already committed).
+   * Used by RiskManager to prevent over-committing on small bankrolls.
+   */
+  getOpenPositionValue(): number {
+    let total = 0
+    for (const pos of this.positions.values()) {
+      total += pos.costBasis
+    }
+    return total
   }
 
   /**
@@ -578,8 +594,32 @@ export class PositionLifecycleManager {
     // When a binary market resolves, the winning outcome jumps toward ~1.00 and
     // the loser drops toward ~0.00. These extreme prices are NOT real trading
     // signals — triggering TP/SL here would fire spurious sell attempts.
-    // Instead, skip TP/SL processing and let the resolution sweep handle it.
+    //
+    // EXCEPTION: If we're on the WINNING side (price ≥0.90 and we hold that outcome),
+    // sell immediately — this is a resolution-hold profit capture, not a spurious signal.
+    // Without this, the bot defers to the resolution sweep which only acts on closed
+    // markets, leaving profitable positions un-sold on still-active markets.
     if (currentPrice >= 0.90 || currentPrice <= 0.10) {
+      const pnlPercent = (currentPrice - position.entryPrice) / position.entryPrice
+      const isWinningSide = currentPrice >= 0.90
+
+      if (isWinningSide && pnlPercent > 0) {
+        // We're holding the winning outcome at ≥90¢ — sell for profit now
+        const takerFeePercent = position.takerFeeBps != null ? position.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+        const netPnl = pnlPercent - takerFeePercent
+        console.log(
+          `[PLM] RESOLUTION-HOLD PROFIT: ${position.outcome.toUpperCase()} ` +
+          `at ${(currentPrice * 100).toFixed(1)}¢ (entry ${(position.entryPrice * 100).toFixed(1)}¢, +${(pnlPercent * 100).toFixed(0)}% gross, ~${(netPnl * 100).toFixed(0)}% net)`
+        )
+        activityLogger.logInfo(
+          `RESOLUTION-HOLD PROFIT: ${position.question.substring(0, 40)}... (${(currentPrice * 100).toFixed(1)}¢, +${(pnlPercent * 100).toFixed(0)}%)`,
+          { marketSlug: slug, entryPrice: position.entryPrice, currentPrice, pnlPercent, netPnl }
+        )
+        this.executeSell(position, 'take-profit')
+        return
+      }
+
+      // Losing side or break-even — defer to resolution sweep as before
       if (!position._resolutionDetected) {
         console.log(
           `[PLM] Resolution-range price detected for ${position.outcome.toUpperCase()} ` +
@@ -806,7 +846,7 @@ export class PositionLifecycleManager {
       this.sellRetries.set(marketSlug, retryCount)
 
       if (retryCount < this.maxSellRetries) {
-        const delayMs = retryCount * 2000
+        const delayMs = retryCount * 1000
         console.warn(`[PLM] Sell failed (attempt ${retryCount}/${this.maxSellRetries}), retrying in ${delayMs / 1000}s...`)
         activityLogger.logWarning(`Sell retry ${retryCount}/${this.maxSellRetries}: ${result.error}`)
 
@@ -860,7 +900,11 @@ export class PositionLifecycleManager {
     const { marketSlug, outcome, size } = position
 
     try {
-      const result = await tradingService.placeSell(marketSlug, outcome, size, undefined, 'GTC')
+      // On final retry attempt, use FOK (fill-or-kill) for immediate execution
+      // instead of GTC which can sit unfilled on thin-liquidity books
+      const currentRetries = this.sellRetries.get(marketSlug) ?? 0
+      const orderType = currentRetries >= this.maxSellRetries - 1 ? 'FOK' : 'GTC'
+      const result = await tradingService.placeSell(marketSlug, outcome, size, undefined, orderType)
 
       if (result.success) {
         const priceData = realtimeService.getPrice(position.tokenId ?? marketSlug)
@@ -888,7 +932,7 @@ export class PositionLifecycleManager {
       this.sellRetries.set(marketSlug, retryCount)
 
       if (retryCount < this.maxSellRetries) {
-        const delayMs = retryCount * 2000
+        const delayMs = retryCount * 1000
         console.warn(`[PLM] Sell failed (attempt ${retryCount}/${this.maxSellRetries}), retrying in ${delayMs / 1000}s...`)
         activityLogger.logWarning(`Sell retry ${retryCount}/${this.maxSellRetries}: ${result.error}`)
         setTimeout(() => {

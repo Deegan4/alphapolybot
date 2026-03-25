@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react'
-import { tradeLogger } from '@/services/trading'
+import { tradeLogger } from '@/services/trading/TradeLogger'
 import type { TradeRecord } from '@/services/trading/TradeLogger'
 
 type SortKey = 'time' | 'pnl' | 'duration'

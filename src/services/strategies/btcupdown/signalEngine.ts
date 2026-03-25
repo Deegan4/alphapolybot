@@ -1,5 +1,5 @@
 /**
- * Pure, stateless signal computation functions for BTC Up/Down strategy.
+ * Pure, stateless signal computation functions for Crypto Up/Down strategy.
  *
  * Extracted from BtcUpDownStrategy so that both the live strategy and the
  * BacktestRunner can share the same math without pulling in BinanceWS,
@@ -18,6 +18,12 @@ export interface CrossAssetSnapshot {
   windowOpenPrice: number  // Price at start of the same window
 }
 
+/** Volume snapshot for MRO (Mean Reversion Oscillator) computation */
+export interface VolumeSnapshot {
+  volume: number
+  timestamp: number
+}
+
 export interface SignalInput {
   asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'
   currentPrice: number       // Live asset price from oracle
@@ -31,6 +37,8 @@ export interface SignalInput {
   recentPriceHistoryLongTerm?: Array<{ price: number; timestamp: number }>
   /** Optional cross-asset snapshots for correlation signal */
   crossAssets?: CrossAssetSnapshot[]
+  /** Optional volume history for MRO oscillator (5-candle lookback) */
+  volumeHistory?: VolumeSnapshot[]
   market: Market
 }
 
@@ -41,6 +49,8 @@ export interface SignalFactors {
   valueBet: number   // 0 to 1
   orderFlow: number  // -1 to 1
   crossAsset: number // -1 to 1: correlated assets moving same direction boosts signal
+  mro: number        // -1 to 1: MRO oscillator (volume-weighted reversal signal)
+  cvd: number        // -1 to 1: CVD divergence score (positive = bullish, negative = bearish)
   regime: 'choppy' | 'trending' | 'neutral'
   regimeEfficiency: number // 0-1 short-term efficiency ratio
   regimeEfficiencyLongTerm: number // 0-1 long-term efficiency (same as ST if no LT data)
@@ -60,6 +70,187 @@ export interface SignalEngineConfig {
   baselineWindowMs: number    // 900_000 for 15m
   /** Taker fee in basis points — used for fee-aware confidence floor. Default 0 (disabled). */
   feeRateBps?: number
+  /** Enable MRO oscillator as a signal factor. Default false. */
+  mroEnabled?: boolean
+  /** Enable CVD (Cumulative Volume Delta) divergence as a signal factor. Default false. */
+  cvdEnabled?: boolean
+}
+
+// ==========================================
+// MRO OSCILLATOR
+// ==========================================
+
+/**
+ * Compute MRO (Mean Reversion Oscillator) from price and volume history.
+ *
+ * MRO combines price change percentage with volume change to detect
+ * overbought/oversold conditions within short windows.
+ *
+ * Formula: MRO = (priceChange% × 100) + (volumeChange% / 2)
+ *   - Readings below -70 → strong oversold (Up signal)
+ *   - Readings above +70 → strong overbought (Down signal)
+ *
+ * The raw MRO is compressed to [-1, 1] via tanh(mro/100) for factor integration.
+ *
+ * @param lookbackCandles  Number of candles to look back for comparison (default 5)
+ * @returns MRO score in [-1, 1], or 0 if insufficient data
+ */
+export function computeMRO(
+  priceHistory: Array<{ price: number; timestamp: number }>,
+  volumeHistory: VolumeSnapshot[] | undefined,
+  lookbackCandles = 5,
+): { raw: number; normalized: number } {
+  if (!volumeHistory || volumeHistory.length < lookbackCandles + 1 || priceHistory.length < lookbackCandles + 1) {
+    return { raw: 0, normalized: 0 }
+  }
+
+  const currentPrice = priceHistory[priceHistory.length - 1].price
+  const pastPrice = priceHistory[priceHistory.length - 1 - lookbackCandles].price
+  if (pastPrice === 0) return { raw: 0, normalized: 0 }
+
+  const priceChangePct = ((currentPrice - pastPrice) / pastPrice) * 100
+
+  const currentVolume = volumeHistory[volumeHistory.length - 1].volume
+  const pastVolume = volumeHistory[volumeHistory.length - 1 - lookbackCandles].volume
+  const volumeChangePct = pastVolume > 0
+    ? ((currentVolume - pastVolume) / pastVolume) * 100
+    : 0
+
+  const raw = priceChangePct * 100 + volumeChangePct / 2
+  const normalized = Math.tanh(raw / 100)
+
+  return { raw, normalized }
+}
+
+/**
+ * Logistic probability adjustment using MRO signal strength.
+ *
+ * Converts raw MRO + market odds delta into a directional probability via
+ * logistic function: P = 1 / (1 + e^(-(MRO/100 + 0.5 × Δodds)))
+ *
+ * @param rawMRO       Raw MRO value (unbounded)
+ * @param marketOdds   Current market implied probability for the target side (0-1)
+ * @param minEdge      Minimum edge (P - marketOdds) to consider actionable (default 0.06 = 6%)
+ * @returns Adjusted probability and edge, or null if edge below threshold
+ */
+export function mroLogisticProbability(
+  rawMRO: number,
+  marketOdds: number,
+  minEdge = 0.06,
+): { probability: number; edge: number } | null {
+  // Δodds: how far market odds deviate from 50% in our direction
+  // Negative MRO (oversold) with low Up odds = opportunity
+  const oddsDelta = 0.50 - marketOdds // positive when odds are cheap (below 50%)
+  const logitInput = rawMRO / 100 + 0.5 * oddsDelta
+  // For Up signals, MRO is negative (oversold), so flip sign for logistic
+  const probability = 1 / (1 + Math.exp(-Math.abs(logitInput)))
+  const edge = probability - marketOdds
+
+  if (edge < minEdge) return null
+  return { probability, edge }
+}
+
+// ==========================================
+// CVD (CUMULATIVE VOLUME DELTA)
+// ==========================================
+
+/**
+ * Compute CVD (Cumulative Volume Delta) from price tick history.
+ *
+ * CVD uses tick direction to estimate net buying/selling pressure.
+ * Each tick is classified as a buy (+1) if price went up, sell (-1) if down.
+ * Unchanged ticks inherit the last direction.
+ *
+ * @returns { cvd: number, priceChangePct: number, buyCount: number, sellCount: number }
+ */
+export function computeCVD(
+  priceHistory: Array<{ price: number; timestamp: number }>,
+): { cvd: number; priceChangePct: number; buyCount: number; sellCount: number } {
+  if (!priceHistory || priceHistory.length < 2) {
+    return { cvd: 0, priceChangePct: 0, buyCount: 0, sellCount: 0 }
+  }
+
+  let cvd = 0
+  let lastDirection = 0
+  let buyCount = 0
+  let sellCount = 0
+
+  for (let i = 1; i < priceHistory.length; i++) {
+    const diff = priceHistory[i].price - priceHistory[i - 1].price
+    let delta: number
+    if (diff > 0) {
+      lastDirection = 1
+      delta = 1
+      buyCount++
+    } else if (diff < 0) {
+      lastDirection = -1
+      delta = -1
+      sellCount++
+    } else {
+      delta = lastDirection
+      if (lastDirection > 0) buyCount++
+      else if (lastDirection < 0) sellCount++
+    }
+    cvd += delta
+  }
+
+  const firstPrice = priceHistory[0].price
+  const lastPrice = priceHistory[priceHistory.length - 1].price
+  const priceChangePct = firstPrice !== 0 ? ((lastPrice - firstPrice) / firstPrice) * 100 : 0
+
+  return { cvd, priceChangePct, buyCount, sellCount }
+}
+
+/**
+ * Detect CVD divergence — when price and volume delta disagree.
+ *
+ * Divergence types (from Moon Dev's CVD scanner):
+ * - BEARISH_DIV: Price up but sellers aggressive (CVD negative) → distribution → expect DOWN
+ * - BULLISH_DIV: Price down but buyers aggressive (CVD positive) → accumulation → expect UP
+ * - STRONG_BULL/BEAR: Price and CVD aligned strongly
+ * - NEUTRAL: No significant signal
+ *
+ * Returns a normalized score in [-1, 1]:
+ *   Positive = bullish divergence/confirmation
+ *   Negative = bearish divergence/confirmation
+ */
+export function detectCVDDivergence(
+  priceChangePct: number,
+  cvdValue: number,
+): { type: 'bullish_div' | 'bearish_div' | 'strong_bull' | 'strong_bear' | 'bullish' | 'bearish' | 'neutral'; score: number } {
+  if (Math.abs(priceChangePct) < 0.01 && Math.abs(cvdValue) < 5) {
+    return { type: 'neutral', score: 0 }
+  }
+
+  // Bearish divergence: price up but sellers dominate
+  if (priceChangePct > 0.02 && cvdValue < -10) {
+    const strength = Math.min(1, Math.abs(cvdValue) / 50)
+    return { type: 'bearish_div', score: -strength }
+  }
+
+  // Bullish divergence: price down but buyers dominate
+  if (priceChangePct < -0.02 && cvdValue > 10) {
+    const strength = Math.min(1, cvdValue / 50)
+    return { type: 'bullish_div', score: strength }
+  }
+
+  // Strong confirmation
+  if (priceChangePct > 0.05 && cvdValue > 20) {
+    return { type: 'strong_bull', score: Math.min(1, cvdValue / 100) }
+  }
+  if (priceChangePct < -0.05 && cvdValue < -20) {
+    return { type: 'strong_bear', score: Math.max(-1, cvdValue / 100) }
+  }
+
+  // Mild alignment
+  if (priceChangePct > 0 && cvdValue > 0) {
+    return { type: 'bullish', score: Math.min(0.5, cvdValue / 100) }
+  }
+  if (priceChangePct < 0 && cvdValue < 0) {
+    return { type: 'bearish', score: Math.max(-0.5, cvdValue / 100) }
+  }
+
+  return { type: 'neutral', score: 0 }
 }
 
 // ==========================================
@@ -148,14 +339,43 @@ export function computeSignal(
     crossAssetScore = count > 0 ? agreementSum / count : 0
   }
 
+  // === Factor 7: MRO OSCILLATOR — volume-weighted reversal signal ===
+  // MRO detects overbought/oversold via price+volume divergence.
+  // Negative MRO = oversold (supports Up), positive = overbought (supports Down).
+  // We flip sign so positive MRO aligns with the detected direction.
+  const mroResult = (config.mroEnabled && input.volumeHistory)
+    ? computeMRO(recentPriceHistory, input.volumeHistory)
+    : { raw: 0, normalized: 0 }
+  // Align MRO with direction: oversold (negative raw) supports Up, overbought (positive) supports Down
+  const mroDirectional = direction === 'up' ? -mroResult.normalized : mroResult.normalized
+
+  // === Factor 8: CVD — Cumulative Volume Delta divergence ===
+  // CVD tracks tick-level buying/selling pressure. Divergence between price
+  // direction and CVD direction signals distribution (bearish) or accumulation (bullish).
+  const cvdResult = config.cvdEnabled
+    ? computeCVD(recentPriceHistory)
+    : { cvd: 0, priceChangePct: 0, buyCount: 0, sellCount: 0 }
+  const cvdDivergence = config.cvdEnabled && cvdResult.cvd !== 0
+    ? detectCVDDivergence(cvdResult.priceChangePct, cvdResult.cvd)
+    : { type: 'neutral' as const, score: 0 }
+  // Align with direction: positive score helps if divergence supports our direction
+  const cvdDirectional = direction === 'up' ? cvdDivergence.score : -cvdDivergence.score
+
   // === COMPOSITE with dynamic weights ===
-  // orderFlow only gets weight when imbalanceScore is actually provided (non-zero).
-  // Live strategy passes 0 (MicrostructureAnalyzer removed); BacktestRunner passes
-  // real orderbook imbalance. When flow=0, its 15% redistributes proportionally.
+  // Optional factors (orderFlow, crossAsset, MRO, CVD) only get weight when data is present.
+  // When absent, their weight redistributes proportionally to core factors.
   const hasCrossData = input.crossAssets && input.crossAssets.length > 0
   const hasFlowData = imbalanceScore !== 0
-  const wMomentum = hasCrossData ? (hasFlowData ? 0.22 : 0.27) : (hasFlowData ? 0.25 : 0.30)
-  const wVelocity = hasCrossData ? (hasFlowData ? 0.22 : 0.27) : (hasFlowData ? 0.25 : 0.30)
+  const hasMroData = config.mroEnabled && mroResult.raw !== 0
+  const hasCvdData = config.cvdEnabled && cvdResult.cvd !== 0
+
+  // MRO gets 10% weight when enabled, CVD gets 8% — carved proportionally from momentum+velocity
+  const wMro = hasMroData ? 0.10 : 0.00
+  const wCvd = hasCvdData ? 0.08 : 0.00
+  // Adjust coreShrink: MRO shrinks by 5%, CVD shrinks by another 4%
+  const coreShrink = (hasMroData ? 0.95 : 1.00) * (hasCvdData ? 0.96 : 1.00)
+  const wMomentum = (hasCrossData ? (hasFlowData ? 0.22 : 0.27) : (hasFlowData ? 0.25 : 0.30)) * coreShrink
+  const wVelocity = (hasCrossData ? (hasFlowData ? 0.22 : 0.27) : (hasFlowData ? 0.25 : 0.30)) * coreShrink
   const wTime     = hasFlowData ? 0.20 : 0.22
   const wValue    = hasFlowData ? 0.15 : 0.18
   const wFlow     = hasFlowData ? 0.15 : 0.00
@@ -167,10 +387,13 @@ export function computeSignal(
     timeDecayBoost * wTime +
     cheapness * wValue +
     imbalanceScore * wFlow +
-    crossAssetScore * wCross
+    crossAssetScore * wCross +
+    mroDirectional * wMro +
+    cvdDirectional * wCvd
 
-  // Sqrt scaling: stretches [0, 0.5] → [0, 0.7]
-  const amplifiedScore = Math.sign(rawScore) * Math.sqrt(Math.abs(rawScore))
+  // Linear scaling — no artificial amplification of weak signals.
+  // Previous sqrt scaling inflated 0.16 → 0.40, crossing thresholds on noise.
+  const amplifiedScore = rawScore
 
   // Noise dampening for shorter windows
   const noiseScale = Math.sqrt(timeScale)
@@ -209,15 +432,24 @@ export function computeSignal(
     confidence *= earlyPenalty
   }
 
+  // === DIRECTION CONSISTENCY GATE ===
+  // If price has spent less than 40% of observed history on "our" side of the
+  // window open, the momentum signal is fighting the prevailing move. Zero out
+  // to avoid trading into counter-trend noise.
+  if (recentPriceHistory.length >= 10 && directionConsistency < 0.40) {
+    confidence = 0
+  }
+
   // === LATE-WINDOW MOMENTUM AMPLIFIER ===
   // When >60% into the window with strong directional momentum, the remaining
   // time makes reversal less likely. Boost confidence proportional to both
-  // time elapsed and momentum strength — max +12% at end of window with
-  // perfect momentum alignment.
+  // time elapsed and momentum strength — max +20% at end of window with
+  // perfect momentum alignment. Raised from 12% because late-window signals
+  // have highest win rate in backtests.
   if (timeRatio > 0.60 && Math.abs(momentumScore) > 0.3) {
     const lateBoost = (timeRatio - 0.60) / 0.40  // 0→1 over last 40% of window
     const momentumStrength = Math.min(1, Math.abs(momentumScore))
-    confidence = Math.min(1, confidence * (1 + 0.12 * lateBoost * momentumStrength))
+    confidence = Math.min(1, confidence * (1 + 0.20 * lateBoost * momentumStrength))
   }
 
   // === FEE-AWARE CONFIDENCE FLOOR ===
@@ -242,6 +474,8 @@ export function computeSignal(
       valueBet: cheapness,
       orderFlow: imbalanceScore,
       crossAsset: crossAssetScore,
+      mro: mroDirectional,
+      cvd: cvdDirectional,
       regime,
       regimeEfficiency,
       regimeEfficiencyLongTerm,

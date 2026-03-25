@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { readinessChecker, type ReadinessReport, type ReadinessCheck } from '@/services/trading/ReadinessChecker'
 import { useSettingsStore } from '@/stores'
-import { strategyManager } from '@/services/strategies'
+import { strategyManager } from '@/services/strategies/StrategyManager'
 
 /**
  * ReadinessPanel — Pre-flight checklist for live trading.
@@ -27,7 +27,7 @@ export const ReadinessPanel: React.FC = () => {
   }, [])
 
   const handleQuickStart = useCallback(() => {
-    // Enable LLM Prediction + BTC Up/Down
+    // Enable LLM Prediction + Crypto Up/Down
     const states = strategyManager.getStates()
     for (const s of states) {
       if (s.id === 'llm-prediction' || s.id === 'btc-updown') {
@@ -44,8 +44,8 @@ export const ReadinessPanel: React.FC = () => {
     return (
       <div className="mx-1 mb-2 px-3 py-1.5 rounded bg-green-950/30 border border-green-500/20 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="w-2 h-2 bg-green-500 rounded-full" />
-          <span className="text-[10px] font-mono font-bold text-green-400">READY</span>
+          <span className="w-2 h-2 bg-green-500 rounded-full dot-ping" />
+          <span className="text-[10px] font-mono font-bold text-green-400 animate-text-glow">READY</span>
         </div>
         {useSettingsStore.getState().dryRun && (
           <button
@@ -84,7 +84,7 @@ export const ReadinessPanel: React.FC = () => {
       </div>
 
       {/* Checks */}
-      <div className="p-2 space-y-1">
+      <div className="p-2 space-y-1 stagger-fade">
         {report.checks.map(check => (
           <CheckRow key={check.id} check={check} />
         ))}
@@ -126,7 +126,7 @@ const CheckRow: React.FC<{ check: ReadinessCheck }> = ({ check }) => {
 
   return (
     <div className="flex items-center gap-2 px-1 py-0.5">
-      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor} ${check.status === 'fail' ? 'dot-ping' : ''}`} />
       <span className={`text-[10px] font-mono ${textColor} min-w-0 truncate`}>
         {check.label}
       </span>

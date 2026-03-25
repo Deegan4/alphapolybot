@@ -1,0 +1,10 @@
+{
+  "model_profile": "balanced",
+  "commit_docs": true,
+  "search_gitignored": false,
+  "branching_strategy": "none",
+  "research": true,
+  "plan_checker": true,
+  "verifier": true,
+  "parallelization": true
+}

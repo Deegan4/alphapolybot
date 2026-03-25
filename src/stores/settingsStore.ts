@@ -6,14 +6,16 @@ export interface AppSettingsState {
   // Trading Mode
   dryRun: boolean
   pennyTraderMode: boolean
+  paperBalance: number  // Starting balance for dry-run paper trading (tracked, decreases/increases with trades)
 
   // API Keys (stored encrypted via secureStorage in production)
   openRouterApiKey: string
 
-  // LLM Provider selection — 'openrouter' (default) or 'ollama' (local)
-  llmProvider: 'openrouter' | 'ollama'
+  // LLM Provider — Ollama only (local inference)
+  llmProvider: 'openrouter' | 'ollama'  // kept for backward compat, always 'ollama'
   ollamaBaseUrl: string   // e.g. http://localhost:11434/v1
-  ollamaModel: string     // e.g. deepseek-r1:latest, llama3.1
+  ollamaModel: string     // e.g. plutus, deepseek-r1:latest
+  ollamaSecondaryModel: string  // Different model for second opinion (signal fusion)
 
   // Wallet seed phrase is in .env (VITE_WALLET_SEED_PHRASE), not stored here
 
@@ -28,6 +30,7 @@ export interface AppSettingsState {
   consecutiveFailureLimit: number
   minBalanceForTrade: number
   riskManagementEnabled: boolean
+  maxAssetExposure: number // 0.0–1.0: override correlation-aware per-asset cap (0 = use dynamic caps)
 
   // GTD Fallback
   gtcFallbackEnabled: boolean
@@ -42,7 +45,7 @@ export interface AppSettingsState {
   fwEnableCrossMarket: boolean
   fwCrossMarketBudgetUSD: number
 
-  // BTC Up/Down Strategy
+  // Crypto Up/Down Strategy
   btcEnableBtc: boolean
   btcEnableEth: boolean
   btcEnableSol: boolean
@@ -72,6 +75,10 @@ export interface AppSettingsState {
   btcLLMFusionPreFilter: number   // Min mechanical confidence to call LLM (cost control)
   btcEarlyExitEnabled: boolean    // Sell for profit before resolution instead of holding to binary payout
   btcEarlyExitTPPercent: number   // Net profit target for early exit (0.15 = 15%)
+  btcMroEnabled: boolean          // MRO oscillator factor in signal engine (volume-weighted reversal detection)
+  btcCvdEnabled: boolean          // CVD divergence factor in signal engine (tick-level buying/selling pressure)
+  btcCrossExchangeEnabled: boolean  // Cross-exchange price confirmation via Crypto.com (skip trades on divergence)
+  btcCrossExchangeMaxDivergencePct: number // Max % price divergence between Binance and Crypto.com (0.15 = 0.15%)
 
   // Aggressive Mode (meta-toggle — relaxes conservative defaults)
   aggressiveMode: boolean
@@ -107,7 +114,7 @@ export interface AppSettingsState {
   cryptoScanIntervalMs: number        // scan interval for crypto markets (default: 30s)
   cryptoMinConfidence: number         // min confidence for crypto trades (default: 0.55)
 
-  // PolyBacktest — Historical BTC Up/Down Data
+  // PolyBacktest — Historical Crypto Up/Down Data
   polyBacktestApiKey: string
 
   // Alerting — Telegram & Discord
@@ -162,6 +169,11 @@ export interface AppSettingsState {
   gabagoolMaxImbalance: number      // max qty imbalance before prioritizing lagging side
   gabagoolMinProfitMargin: number   // target max pair cost (< 1.00)
   gabagoolCooldownMs: number        // ms between orders
+  gabagoolDurations: Array<'15m' | '1h' | '4h'>  // which window durations to scan
+  gabagoolDepthAwareSizing: boolean  // scale order size to book depth
+  gabagoolAdaptiveCheapness: boolean // widen threshold when ask sum < $0.95
+  gabagoolFillRateFeedback: boolean  // adjust limit offset based on fill latency
+  gabagoolSpreadMinWidth: number     // min bid-ask spread to place orders (0 = disabled)
 
   // Impulse Sniper Strategy — latency arb on stale Polymarket odds after BTC impulse moves
   impulseEnabled: boolean
@@ -193,6 +205,50 @@ export interface AppSettingsState {
   useAvellanedaStoikov: boolean     // Toggle AS pricer (off = static offsets)
   asRiskAversion: number            // γ — inventory skew aggressiveness (higher = wider spread)
   asOrderArrivalRate: number        // κ — expected fills per minute (higher = tighter spread)
+
+  // Liquidation Momentum Strategy — Hyperliquid liquidation cascades → Polymarket 5m binaries
+  liqEnabled: boolean
+  liqMinThresholdUSD: number        // min liquidation volume to trigger ($)
+  liqMaxThresholdUSD: number        // max — above this, cascade too chaotic ($)
+  liqWindowMs: number               // rolling accumulation window (ms)
+  liqCooldownMs: number             // ms between trades
+  liqTradeSize: number              // USD per trade
+  liqMaxAskPrice: number            // don't buy above this
+  liqOrderExpiryMs: number          // GTD order expiry (ms)
+  liqStopLossPct: number            // SL for positions (0-1)
+  liqTakeProfitPct: number          // TP for positions (0-1)
+  liqPreferredDuration: '5m' | '15m'  // preferred market window
+
+  // Liquidation Heatmap — predictive cascade detection via Moon Dev API
+  moondevApiKey: string               // API key from moondev.com
+  relayerApiKey: string               // Polymarket relayer API key (gasless merges)
+  liqHeatmapEnabled: boolean          // toggle heatmap polling
+  liqHeatmapMinScore: number          // min cascade risk score to trigger pre-positioning (0-1)
+  liqHeatmapTradeSize: number         // USD per predictive trade
+  liqHeatmapMaxDistancePct: number    // max % distance from trigger price to trade (filter)
+
+  // Moon Dev Data Layer — multi-exchange liquidation, position proximity, HLP sentiment
+  moondevMultiExchangeLiqEnabled: boolean  // aggregate liqs from Binance+Bybit+OKX+Hyperliquid
+  moondevProximityEnabled: boolean         // track whale positions near liquidation
+  moondevSentimentEnabled: boolean         // HLP z-score contrarian filter
+  moondevSentimentMinZScore: number        // min |z-score| to consider extreme (default 2.0)
+  moondevProximityMaxDistancePct: number   // max distance % for proximity tracking (default 2.0)
+  // ─── Microstructure Services ─────────────────────────
+  l2DepthEnabled: boolean                  // L2 orderbook depth tracking via CLOB WS
+  orderFlowImbalanceEnabled: boolean       // Binance aggTrade order flow imbalance
+  orderFlowWindowMs: number                // Rolling window for OFI computation (default 60000)
+  feeGateEnabled: boolean                  // Per-token fee verification before trading
+
+  // ─── Hyperliquid Hedge (delta hedging for unpaired exposure) ───
+  hyperliquidHedgeEnabled: boolean         // toggle HL hedging for unpaired positions
+  hyperliquidMaxHedgeUSD: number           // max single hedge size ($)
+  hyperliquidHedgeCooldownMs: number       // ms between hedge opens
+
+  // ─── Weather Market Adapter ────────────────────────
+  weatherScanEnabled: boolean              // toggle weather market scanning
+  weatherMinLiquidity: number              // min $ liquidity to consider a market
+  weatherScanIntervalMs: number            // scan frequency (ms)
+  weatherLocations: string[]               // NWS grid point city codes
 }
 
 interface SettingsStore extends AppSettingsState {
@@ -202,6 +258,7 @@ interface SettingsStore extends AppSettingsState {
   setLlmProvider: (provider: 'openrouter' | 'ollama') => void
   setOllamaBaseUrl: (url: string) => void
   setOllamaModel: (model: string) => void
+  setOllamaSecondaryModel: (model: string) => void
   setNotifications: (enabled: boolean) => void
   setSoundAlerts: (enabled: boolean) => void
   setDailyLossLimit: (limit: number) => void
@@ -209,6 +266,7 @@ interface SettingsStore extends AppSettingsState {
   setMaxTradesPerHour: (limit: number) => void
   setConsecutiveFailureLimit: (limit: number) => void
   setMinBalanceForTrade: (amount: number) => void
+  setMaxAssetExposure: (cap: number) => void
   setRiskManagementEnabled: (enabled: boolean) => void
   setGtcFallbackEnabled: (enabled: boolean) => void
   setGtcExpiryMinutes: (minutes: number) => void
@@ -218,6 +276,7 @@ interface SettingsStore extends AppSettingsState {
   setFwEnableCrossMarket: (enabled: boolean) => void
   setFwCrossMarketBudgetUSD: (budget: number) => void
   setPennyTraderMode: (enabled: boolean) => void
+  setPaperBalance: (amount: number) => void
   setBtcEnableBtc: (enabled: boolean) => void
   setBtcEnableEth: (enabled: boolean) => void
   setBtcEnableSol: (enabled: boolean) => void
@@ -245,6 +304,7 @@ interface SettingsStore extends AppSettingsState {
   setBtcLLMFusionPreFilter: (threshold: number) => void
   setBtcEarlyExitEnabled: (enabled: boolean) => void
   setBtcEarlyExitTPPercent: (percent: number) => void
+  setBtcMroEnabled: (enabled: boolean) => void
   setLlmWebSearchEnabled: (enabled: boolean) => void
   setMicroMinCompositeSignal: (value: number) => void
   setMicroMinSignalConfidence: (value: number) => void
@@ -309,50 +369,115 @@ interface SettingsStore extends AppSettingsState {
   setGabagoolMaxImbalance: (ratio: number) => void
   setGabagoolMinProfitMargin: (margin: number) => void
   setGabagoolCooldownMs: (ms: number) => void
+  setGabagoolDurations: (durations: Array<'15m' | '1h' | '4h'>) => void
+  setGabagoolDepthAwareSizing: (enabled: boolean) => void
+  setGabagoolAdaptiveCheapness: (enabled: boolean) => void
+  setGabagoolFillRateFeedback: (enabled: boolean) => void
+  setGabagoolSpreadMinWidth: (width: number) => void
+  setImpulseEnabled: (enabled: boolean) => void
+  setImpulseThreshold: (t: number) => void
+  setImpulseConfirmationMs: (ms: number) => void
+  setImpulseSnapbackPct: (pct: number) => void
+  setImpulseTradeSize: (size: number) => void
+  setImpulseCooldownMs: (ms: number) => void
+  setImpulsePreferredDuration: (d: '15m' | '1h' | '4h') => void
+  setImpulseOrderMode: (m: 'fok' | 'gtd') => void
+  setImpulseMaxAskPrice: (p: number) => void
+  setImpulseAggressiveMode: (enabled: boolean) => void
+  setImpulseLookbackSeconds: (s: number) => void
+  setImpulseAssets: (assets: ('BTC' | 'ETH' | 'SOL' | 'XRP')[]) => void
+  setImpulseThresholdETH: (t: number) => void
+  setImpulseThresholdSOL: (t: number) => void
+  setImpulseThresholdXRP: (t: number) => void
+  setImpulseStopLossPct: (pct: number) => void
+  setImpulseTakeProfitPct: (pct: number) => void
+  setImpulseVpinFilter: (enabled: boolean) => void
   setVpinToxicityThreshold: (threshold: number) => void
   setBtcUseMonteCarloKelly: (enabled: boolean) => void
   setUseAvellanedaStoikov: (enabled: boolean) => void
   setAsRiskAversion: (gamma: number) => void
   setAsOrderArrivalRate: (kappa: number) => void
+  setLiqEnabled: (enabled: boolean) => void
+  setLiqMinThresholdUSD: (usd: number) => void
+  setLiqMaxThresholdUSD: (usd: number) => void
+  setLiqWindowMs: (ms: number) => void
+  setLiqCooldownMs: (ms: number) => void
+  setLiqTradeSize: (size: number) => void
+  setLiqMaxAskPrice: (price: number) => void
+  setLiqOrderExpiryMs: (ms: number) => void
+  setLiqStopLossPct: (pct: number) => void
+  setLiqTakeProfitPct: (pct: number) => void
+  setLiqPreferredDuration: (d: '5m' | '15m') => void
+  setMoondevApiKey: (key: string) => void
+  setRelayerApiKey: (key: string) => void
+  setLiqHeatmapEnabled: (enabled: boolean) => void
+  setLiqHeatmapMinScore: (score: number) => void
+  setLiqHeatmapTradeSize: (size: number) => void
+  setLiqHeatmapMaxDistancePct: (pct: number) => void
+  setBtcCvdEnabled: (enabled: boolean) => void
+  setBtcCrossExchangeEnabled: (enabled: boolean) => void
+  setBtcCrossExchangeMaxDivergencePct: (pct: number) => void
+  setMoondevMultiExchangeLiqEnabled: (enabled: boolean) => void
+  setMoondevProximityEnabled: (enabled: boolean) => void
+  setMoondevSentimentEnabled: (enabled: boolean) => void
+  setMoondevSentimentMinZScore: (z: number) => void
+  setMoondevProximityMaxDistancePct: (pct: number) => void
+  // Microstructure services
+  setL2DepthEnabled: (enabled: boolean) => void
+  setOrderFlowImbalanceEnabled: (enabled: boolean) => void
+  setOrderFlowWindowMs: (ms: number) => void
+  setFeeGateEnabled: (enabled: boolean) => void
+  // Hyperliquid Hedge
+  setHyperliquidHedgeEnabled: (enabled: boolean) => void
+  setHyperliquidMaxHedgeUSD: (usd: number) => void
+  setHyperliquidHedgeCooldownMs: (ms: number) => void
+  // Weather Market Adapter
+  setWeatherScanEnabled: (enabled: boolean) => void
+  setWeatherMinLiquidity: (min: number) => void
+  setWeatherScanIntervalMs: (ms: number) => void
+  setWeatherLocations: (locations: string[]) => void
   resetSettings: () => void
 }
 
 const DEFAULT_SETTINGS: AppSettingsState = {
-  dryRun: true, // SAFE DEFAULT: Always start in dry run mode
-  pennyTraderMode: false,  // $14 bankroll → use Kelly sizing for proportional bets
+  dryRun: false, // Live trading — $20 bankroll config (v66)
+  pennyTraderMode: false,  // Kelly sizing for proportional bets on $20 bankroll
+  paperBalance: 1_000,     // $1,000 starting paper balance for dry-run
   openRouterApiKey: '',
   llmProvider: 'ollama',
   ollamaBaseUrl: '/api/ollama/v1',
-  ollamaModel: 'polytrader',
+  ollamaModel: 'plutus',
+  ollamaSecondaryModel: '',
   enableNotifications: true,
   enableSoundAlerts: false,
-  dailyLossLimit: 2,       // $2/day = 14% of $14 bankroll — 7 days runway
-  weeklyLossLimit: 7,      // $7/week = 50% max weekly drawdown
-  maxTradesPerHour: 12,    // Fewer trades = less overtrading risk
-  consecutiveFailureLimit: 3, // Trip fast on small bankroll — preserve capital
-  minBalanceForTrade: 1,   // $1 CLOB minimum
+  dailyLossLimit: 3,       // $3/day — 15% of $20, ~6.6 losing days of runway
+  weeklyLossLimit: 6,      // $6/week — 30% of $20, survive 3 bad weeks
+  maxTradesPerHour: 15,    // Fewer trades = less variance on $20
+  consecutiveFailureLimit: 3, // Tight circuit breaker
+  minBalanceForTrade: 3,   // $3 floor — 15% of $20, stop before bankroll too thin
   riskManagementEnabled: true,
+  maxAssetExposure: 0,         // 0 = use dynamic correlation-aware caps (60%/45%/35%). Set 0.01–1.0 to override.
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
-  kellyFraction: 0.20,     // Conservative — reduces ruin risk on $14 bankroll
-  fwTradeSize: 1,           // $1 minimum — FW is taker (fees eat edge at small size)
+  kellyFraction: 0.15,     // 15% Kelly — conservative on $20 bankroll
+  fwTradeSize: 1,           // $1 minimum — FW is taker (fees eat edge, keep small)
   fwMinProfitBps: 30,
   fwEnableCrossMarket: false,
   fwCrossMarketBudgetUSD: 0.25,
-  btcEnableBtc: true, // BTC Up/Down primary strategy
-  btcEnableEth: false,
-  btcEnableSol: true,  // SOL has highest intra-window volatility → strongest directional signals
+  btcEnableBtc: true, // Crypto Up/Down primary strategy — strongest signal + liquidity
+  btcEnableEth: false,  // Disabled — weaker signal, dilutes capital
+  btcEnableSol: false,  // Disabled — thin liquidity, weak signal
   btcEnableXrp: false,
-  btcEnable5m: false,      // 5-min windows disabled — lower edge, higher fees, less liquidity
-  btcEnable15m: true,      // 15-min windows ON — maker mode (0% fee) makes these profitable
-  btcEnableHourly: true,   // Hourly windows — primary focus
-  btcEnable4h: true,       // 4-hour windows — primary focus
+  btcEnable5m: false,      // 5m OFF — signal is noise, snipe formula was broken, 0% win rate
+  btcEnable15m: false,     // 15m OFF — too noisy for directional signal
+  btcEnableHourly: true,   // Hourly = best edge/fee ratio with maker mode
+  btcEnable4h: true,       // 4hr ON — longer hold but higher payout asymmetry
   btcEnableDaily: false,   // Daily windows (opt-in)
   btcEnable9pm: false,  // 9PM ET daily events (disabled by default — opt-in)
-  btcTradeSize: 1.50,        // $1.50 per trade = 10.7% of $14 bankroll
+  btcTradeSize: 1.50,        // $1.50 per trade = 7.5% of $20 bankroll
   btcUseKellySizing: true,
-  btcMinConfidence: 0.38,    // Signal engine outputs 0.20–0.45 on calm markets. 0.38 lets top signals through.
-  btcMaxEntryPrice: 0.65,    // Allow outcomes up to 65c — covers typical balanced-market spreads.
+  btcMinConfidence: 0.50,    // Higher conviction only — fewer trades, better hit rate
+  btcMaxEntryPrice: 0.48,    // Buy below 48c — better payout asymmetry on resolution
   btcMinEntryPrice: 0.10,    // Low floor — only reject extreme long-shots
   btcMinWindowRemaining: 120, // 2 min before resolution
   btcStopLossPercent: 0.95,  // Effectively disabled — hold to resolution
@@ -360,15 +485,19 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   btcMinTimeIntoWindowMs: 30_000, // 30s into window — enough for initial signal, don't waste half the window
   btcRegimeFilterEnabled: true,   // Skip choppy/mean-reverting markets
   btcRsiFilterEnabled: true,      // Reduce confidence on overbought/oversold
-  btcUseLLMConfirmation: false,   // LLM confirmation gate (opt-in)
-  btcLLMModel: 'deepseek/deepseek-r1',
-  btcMinEdgeOverMarket: 0.02,    // Need 2% edge above market price to trade (maker = 0% fee)
+  btcUseLLMConfirmation: false,   // Off by default — pure mechanical speed (enable if Ollama running)
+  btcLLMModel: 'plutus',
+  btcMinEdgeOverMarket: 0.07,    // Need 7% edge above market price to trade (wider safety margin on $20)
   btcUseLLMFusion: false,        // LLM fusion (opt-in, takes priority over confirmation)
   btcLLMFusionWeight: 0.30,      // 70% mechanical / 30% LLM
   btcLLMFusionPreFilter: 0.30,   // Skip LLM call if mechanical confidence < 30%
-  btcEarlyExitEnabled: false,    // Off by default — resolution-hold is the base strategy
+  btcEarlyExitEnabled: true,     // Early exit — take profit mid-window instead of holding to resolution
   btcEarlyExitTPPercent: 0.15,   // 15% net profit target for early exit
-  aggressiveMode: false,
+  btcMroEnabled: true,           // MRO oscillator — volume edge from BinanceWS
+  btcCvdEnabled: true,           // CVD divergence — free signal from tick data, improves BTC signal quality
+  btcCrossExchangeEnabled: true,  // Cross-exchange price confirmation via Crypto.com
+  btcCrossExchangeMaxDivergencePct: 0.15, // Skip trade if Binance vs Crypto.com diverge >0.15%
+  aggressiveMode: true,  // Aggressive — maker-only strategies on $20 bankroll
   llmWebSearchEnabled: false,
   microMinCompositeSignal: 0.4,
   microMinSignalConfidence: 0.5,
@@ -411,11 +540,11 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   mrStopLossPercent: 0.03,
   mrTakeProfitPercent: 0.02,
   mrMaxHoldMs: 3_600_000,
-  dualSideEnabled: false,
-  dualSideTradeSize: 1,      // $1 per leg — dual-side needs both YES+NO
+  dualSideEnabled: true,     // ON — maker-only, 0% fees + rebates
+  dualSideTradeSize: 1.50,   // $1.50 per leg — dual-side YES+NO ($3 total = 15% of $20)
   dualSideBiasRatio: 0.50,
   dualSideMakerOnly: true,
-  dualSideMaxCombinedAsk: 0.995,
+  dualSideMaxCombinedAsk: 0.990,  // Tighter — YES+NO ask sum must be < 99c for guaranteed profit
   dualSideRequireBothLegs: true,
   btcFiveMinMakerMode: true,     // 5m maker mode ON by default — eliminates dynamic taker fees (up to 1.56%)
   btcFifteenMinMakerMode: true,  // 15m maker mode ON by default — eliminates dynamic taker fees
@@ -423,18 +552,23 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   btcFourHourMakerMode: true,    // 4hr maker mode ON — 0% fees via GTC+postOnly
   llmOrderMode: 'GTD',           // GTD-first: fill as maker (0% fees). FOK = legacy taker mode.
   microOrderMode: 'GTD',         // GTD-first with 60s expiry matching signal decay.
-  gabagoolEnabled: false,
-  gabagoolMaxExposure: 3,        // $3 max per 15-min window (30% of $10 bankroll)
-  gabagoolOrderSize: 1,          // $1 per individual maker order (CLOB minimum)
-  gabagoolCheapnessThreshold: 0.48, // buy when ask < 48c
+  gabagoolEnabled: true,           // ON — guaranteed merge profit, 0% maker fees
+  gabagoolMaxExposure: 5,        // $5 max per window (25% of $20)
+  gabagoolOrderSize: 1.50,       // $1.50 per individual maker order
+  gabagoolCheapnessThreshold: 0.46, // buy when ask < 46c (wider margin for guaranteed profit)
   gabagoolMaxImbalance: 0.20,    // 20% qty imbalance cap
-  gabagoolMinProfitMargin: 0.98, // target pair cost < 98c
+  gabagoolMinProfitMargin: 0.96, // target pair cost < 96c (4% profit margin instead of 2%)
   gabagoolCooldownMs: 3000,      // 3s between orders
-  impulseEnabled: false,
-  impulseThreshold: 200,         // $200 BTC move to trigger
+  gabagoolDurations: ['1h', '4h'] as Array<'15m' | '1h' | '4h'>,  // Added 4h for more merge opportunities
+  gabagoolDepthAwareSizing: false,
+  gabagoolAdaptiveCheapness: true,
+  gabagoolFillRateFeedback: false,
+  gabagoolSpreadMinWidth: 0.02,   // 2c min spread for maker fills
+  impulseEnabled: false,          // OFF — FOK taker fees eat edge on $20 bankroll
+  impulseThreshold: 150,         // $150 BTC move to trigger (more aggressive)
   impulseConfirmationMs: 1000,   // 1s snapback check
   impulseSnapbackPct: 0.50,      // abort if 50%+ retrace
-  impulseTradeSize: 5,           // $5 per impulse trade
+  impulseTradeSize: 1.50,        // $1.50 per impulse trade (scaled for $20)
   impulseCooldownMs: 10_000,     // 10s between trades
   impulsePreferredDuration: '1h' as const, // 1h = sweet spot (manageable fees)
   impulseOrderMode: 'fok' as const,        // FOK for instant fill
@@ -453,6 +587,46 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   useAvellanedaStoikov: false,   // Opt-in: dynamic reservation pricing (off = static 1¢ offsets)
   asRiskAversion: 0.1,           // γ: inventory skew aggressiveness
   asOrderArrivalRate: 2.0,       // κ: expected fills per minute
+  liqEnabled: false,              // OFF — less validated, preserve capital on $20
+  liqMinThresholdUSD: 25_000,    // $25K min liquidation volume to trigger
+  liqMaxThresholdUSD: 100_000,   // $100K max — above this, too chaotic
+  liqWindowMs: 60_000,           // 60s rolling window
+  liqCooldownMs: 120_000,        // 2 min between trades
+  liqTradeSize: 1.50,            // $1.50 per trade (scaled for $20)
+  liqMaxAskPrice: 0.55,          // don't buy above 55c
+  liqOrderExpiryMs: 45_000,      // 45s GTD expiry
+  liqStopLossPct: 0.30,          // 30% SL
+  liqTakeProfitPct: 0.60,        // 60% TP
+  liqPreferredDuration: '5m' as const,
+  moondevApiKey: '',
+  relayerApiKey: '',
+  liqHeatmapEnabled: false,          // opt-in: predictive cascade detection via Moon Dev API
+  liqHeatmapMinScore: 0.5,           // min cascade risk score to trigger pre-positioning (0-1)
+  liqHeatmapTradeSize: 1,            // $1 per predictive trade
+  liqHeatmapMaxDistancePct: 5,       // only trade when trigger price within 5% of current price
+
+  // Moon Dev Data Layer services (all off by default — require API key)
+  moondevMultiExchangeLiqEnabled: false,
+  moondevProximityEnabled: false,
+  moondevSentimentEnabled: false,
+  moondevSentimentMinZScore: 2.0,       // |z-score| threshold for extreme signal
+  moondevProximityMaxDistancePct: 2.0,  // track positions within 2% of liquidation
+  // Microstructure services
+  l2DepthEnabled: false,
+  orderFlowImbalanceEnabled: false,
+  orderFlowWindowMs: 60_000,
+  feeGateEnabled: true,               // always verify fees by default
+
+  // Hyperliquid Hedge — delta hedging for unpaired exposure
+  hyperliquidHedgeEnabled: false,      // OFF by default — opt-in after validating HL connection
+  hyperliquidMaxHedgeUSD: 10,          // $10 max hedge — conservative for $20 bankroll
+  hyperliquidHedgeCooldownMs: 5000,    // 5s between hedges
+
+  // Weather Market Adapter — non-crypto market scanning
+  weatherScanEnabled: false,           // OFF by default — opt-in for weather markets
+  weatherMinLiquidity: 500,            // $500 min liquidity
+  weatherScanIntervalMs: 60_000,       // 60s scan interval (weather markets are slow)
+  weatherLocations: ['NYC', 'LAX', 'CHI'],
 }
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -467,6 +641,7 @@ export const useSettingsStore = create<SettingsStore>()(
 
       setOpenRouterApiKey: (key: string) => {
         set({ openRouterApiKey: key })
+        import('@/utils/secureStorage').then(m => m.secureStorage.set('openrouter_api_key', key, { encrypt: true })).catch(() => {})
       },
 
       setLlmProvider: (provider: 'openrouter' | 'ollama') => {
@@ -479,6 +654,10 @@ export const useSettingsStore = create<SettingsStore>()(
 
       setOllamaModel: (model: string) => {
         set({ ollamaModel: model })
+      },
+
+      setOllamaSecondaryModel: (model: string) => {
+        set({ ollamaSecondaryModel: model })
       },
 
       setNotifications: (enabled: boolean) => {
@@ -512,6 +691,10 @@ export const useSettingsStore = create<SettingsStore>()(
       setMinBalanceForTrade: (amount: number) => {
         set({ minBalanceForTrade: amount })
         import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({ minBalanceForTrade: amount }))
+      },
+
+      setMaxAssetExposure: (cap: number) => {
+        set({ maxAssetExposure: cap })
       },
 
       setRiskManagementEnabled: (enabled: boolean) => {
@@ -551,6 +734,10 @@ export const useSettingsStore = create<SettingsStore>()(
       setFwCrossMarketBudgetUSD: (budget: number) => {
         set({ fwCrossMarketBudgetUSD: budget })
         import('@/services/strategies/ProjectFWStrategy').then(m => m.projectFWStrategy.setFWConfig({ crossMarketBudgetUSD: budget }))
+      },
+
+      setPaperBalance: (amount: number) => {
+        set({ paperBalance: Math.max(0, amount) })
       },
 
       setPennyTraderMode: (enabled: boolean) => {
@@ -667,9 +854,12 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ btcEarlyExitTPPercent: percent })
       },
 
+      setBtcMroEnabled: (enabled: boolean) => {
+        set({ btcMroEnabled: enabled })
+      },
+
       setLlmWebSearchEnabled: (enabled: boolean) => {
         set({ llmWebSearchEnabled: enabled })
-        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ webSearchEnabled: enabled }))
       },
 
       setMicroMinCompositeSignal: (value: number) => set({ microMinCompositeSignal: value }),
@@ -682,9 +872,16 @@ export const useSettingsStore = create<SettingsStore>()(
       setPolyBacktestApiKey: (key: string) => {
         set({ polyBacktestApiKey: key })
         import('@/services/api/PolyBacktestClient').then(m => m.polyBacktestClient.setApiKey(key))
+        import('@/utils/secureStorage').then(m => m.secureStorage.set('polybacktest_api_key', key, { encrypt: true })).catch(() => {})
       },
-      setCoinbaseApiKey: (key: string) => set({ coinbaseApiKey: key }),
-      setCoinbaseSecret: (secret: string) => set({ coinbaseSecret: secret }),
+      setCoinbaseApiKey: (key: string) => {
+        set({ coinbaseApiKey: key })
+        import('@/utils/secureStorage').then(m => m.secureStorage.set('coinbase_api_key', key, { encrypt: true })).catch(() => {})
+      },
+      setCoinbaseSecret: (secret: string) => {
+        set({ coinbaseSecret: secret })
+        import('@/utils/secureStorage').then(m => m.secureStorage.set('coinbase_secret', secret, { encrypt: true })).catch(() => {})
+      },
       setMrEnableBtc: (enabled: boolean) => set({ mrEnableBtc: enabled }),
       setMrEnableEth: (enabled: boolean) => set({ mrEnableEth: enabled }),
       setMrEnableSol: (enabled: boolean) => set({ mrEnableSol: enabled }),
@@ -710,15 +907,12 @@ export const useSettingsStore = create<SettingsStore>()(
 
       setLlmPremiumModel: (model: string) => {
         set({ llmPremiumModel: model })
-        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ premiumModel: model || undefined }))
       },
       setLlmPremiumThreshold: (threshold: number) => {
         set({ llmPremiumThreshold: threshold })
-        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ premiumModelThreshold: threshold }))
       },
       setLlmPremiumBudgetUSD: (budget: number) => {
         set({ llmPremiumBudgetUSD: budget })
-        import('@/services/llm/OpenRouterService').then(m => m.openRouterService.setConfig({ premiumBudgetUSD: budget }))
       },
       setCryptoLLMEnabled: (enabled: boolean) => {
         set({ cryptoLLMEnabled: enabled })
@@ -737,9 +931,15 @@ export const useSettingsStore = create<SettingsStore>()(
         import('@/services/strategies/LLMPredictionStrategy').then(m => m.llmPredictionStrategy.setLLMConfig?.({ cryptoMinConfidence: confidence })).catch(() => {})
       },
 
-      setTelegramBotToken: (token: string) => set({ telegramBotToken: token }),
+      setTelegramBotToken: (token: string) => {
+        set({ telegramBotToken: token })
+        import('@/utils/secureStorage').then(m => m.secureStorage.set('telegram_bot_token', token, { encrypt: true })).catch(() => {})
+      },
       setTelegramChatId: (chatId: string) => set({ telegramChatId: chatId }),
-      setDiscordWebhookUrl: (url: string) => set({ discordWebhookUrl: url }),
+      setDiscordWebhookUrl: (url: string) => {
+        set({ discordWebhookUrl: url })
+        import('@/utils/secureStorage').then(m => m.secureStorage.set('discord_webhook_url', url, { encrypt: true })).catch(() => {})
+      },
       setAlertOnTrade: (enabled: boolean) => set({ alertOnTrade: enabled }),
       setAlertOnError: (enabled: boolean) => set({ alertOnError: enabled }),
 
@@ -794,6 +994,11 @@ export const useSettingsStore = create<SettingsStore>()(
       setGabagoolMaxImbalance: (ratio: number) => set({ gabagoolMaxImbalance: ratio }),
       setGabagoolMinProfitMargin: (margin: number) => set({ gabagoolMinProfitMargin: margin }),
       setGabagoolCooldownMs: (ms: number) => set({ gabagoolCooldownMs: ms }),
+      setGabagoolDurations: (durations: Array<'15m' | '1h' | '4h'>) => set({ gabagoolDurations: durations }),
+      setGabagoolDepthAwareSizing: (enabled: boolean) => set({ gabagoolDepthAwareSizing: enabled }),
+      setGabagoolAdaptiveCheapness: (enabled: boolean) => set({ gabagoolAdaptiveCheapness: enabled }),
+      setGabagoolFillRateFeedback: (enabled: boolean) => set({ gabagoolFillRateFeedback: enabled }),
+      setGabagoolSpreadMinWidth: (width: number) => set({ gabagoolSpreadMinWidth: width }),
       setImpulseEnabled: (enabled: boolean) => set({ impulseEnabled: enabled }),
       setImpulseThreshold: (t: number) => set({ impulseThreshold: t }),
       setImpulseConfirmationMs: (ms: number) => set({ impulseConfirmationMs: ms }),
@@ -817,34 +1022,116 @@ export const useSettingsStore = create<SettingsStore>()(
       setUseAvellanedaStoikov: (enabled: boolean) => set({ useAvellanedaStoikov: enabled }),
       setAsRiskAversion: (gamma: number) => set({ asRiskAversion: gamma }),
       setAsOrderArrivalRate: (kappa: number) => set({ asOrderArrivalRate: kappa }),
+      setLiqEnabled: (enabled: boolean) => set({ liqEnabled: enabled }),
+      setLiqMinThresholdUSD: (usd: number) => set({ liqMinThresholdUSD: usd }),
+      setLiqMaxThresholdUSD: (usd: number) => set({ liqMaxThresholdUSD: usd }),
+      setLiqWindowMs: (ms: number) => set({ liqWindowMs: ms }),
+      setLiqCooldownMs: (ms: number) => set({ liqCooldownMs: ms }),
+      setLiqTradeSize: (size: number) => set({ liqTradeSize: size }),
+      setLiqMaxAskPrice: (price: number) => set({ liqMaxAskPrice: price }),
+      setLiqOrderExpiryMs: (ms: number) => set({ liqOrderExpiryMs: ms }),
+      setLiqStopLossPct: (pct: number) => set({ liqStopLossPct: pct }),
+      setLiqTakeProfitPct: (pct: number) => set({ liqTakeProfitPct: pct }),
+      setLiqPreferredDuration: (d: '5m' | '15m') => set({ liqPreferredDuration: d }),
+      setMoondevApiKey: (key: string) => {
+        set({ moondevApiKey: key })
+        import('@/services/api/MoonDevClient').then(({ moonDevClient }) => moonDevClient.setApiKey(key)).catch(() => {})
+      },
+      setRelayerApiKey: (key: string) => set({ relayerApiKey: key }),
+      setLiqHeatmapEnabled: (enabled: boolean) => set({ liqHeatmapEnabled: enabled }),
+      setLiqHeatmapMinScore: (score: number) => set({ liqHeatmapMinScore: score }),
+      setLiqHeatmapTradeSize: (size: number) => set({ liqHeatmapTradeSize: size }),
+      setLiqHeatmapMaxDistancePct: (pct: number) => set({ liqHeatmapMaxDistancePct: pct }),
+      setBtcCvdEnabled: (enabled: boolean) => set({ btcCvdEnabled: enabled }),
+      setBtcCrossExchangeEnabled: (enabled: boolean) => set({ btcCrossExchangeEnabled: enabled }),
+      setBtcCrossExchangeMaxDivergencePct: (pct: number) => set({ btcCrossExchangeMaxDivergencePct: pct }),
+      setMoondevMultiExchangeLiqEnabled: (enabled: boolean) => set({ moondevMultiExchangeLiqEnabled: enabled }),
+      setMoondevProximityEnabled: (enabled: boolean) => set({ moondevProximityEnabled: enabled }),
+      setMoondevSentimentEnabled: (enabled: boolean) => set({ moondevSentimentEnabled: enabled }),
+      setMoondevSentimentMinZScore: (z: number) => set({ moondevSentimentMinZScore: z }),
+      setMoondevProximityMaxDistancePct: (pct: number) => set({ moondevProximityMaxDistancePct: pct }),
+      // Microstructure services
+      setL2DepthEnabled: (enabled: boolean) => set({ l2DepthEnabled: enabled }),
+      setOrderFlowImbalanceEnabled: (enabled: boolean) => set({ orderFlowImbalanceEnabled: enabled }),
+      setOrderFlowWindowMs: (ms: number) => set({ orderFlowWindowMs: ms }),
+      setFeeGateEnabled: (enabled: boolean) => set({ feeGateEnabled: enabled }),
+      // Hyperliquid Hedge
+      setHyperliquidHedgeEnabled: (enabled: boolean) => set({ hyperliquidHedgeEnabled: enabled }),
+      setHyperliquidMaxHedgeUSD: (usd: number) => set({ hyperliquidMaxHedgeUSD: usd }),
+      setHyperliquidHedgeCooldownMs: (ms: number) => set({ hyperliquidHedgeCooldownMs: ms }),
+      // Weather Market Adapter
+      setWeatherScanEnabled: (enabled: boolean) => set({ weatherScanEnabled: enabled }),
+      setWeatherMinLiquidity: (min: number) => set({ weatherMinLiquidity: min }),
+      setWeatherScanIntervalMs: (ms: number) => set({ weatherScanIntervalMs: ms }),
+      setWeatherLocations: (locations: string[]) => set({ weatherLocations: locations }),
 
       setAggressiveMode: (enabled: boolean) => {
         console.log(`[Settings] Aggressive mode ${enabled ? 'ENABLED' : 'DISABLED'}`)
         set({ aggressiveMode: enabled })
 
         if (enabled) {
-          // Batch-apply aggressive overrides (does NOT touch dryRun — that's separate)
+          // ── $20 BANKROLL — MAKER-ONLY FOCUS ────────────────────────
+          // Only 3 strategies ON — all maker (0% fees):
+          // Gabagool (guaranteed merge profit), BTC Up/Down (8-factor signal),
+          // Dual-Side Hedge (hedged positions). Everything else OFF.
+
+          const riskConfig = {
+            dailyLossLimit: 3,         // $3/day — 15% of $20, ~6.6 losing days of runway
+            weeklyLossLimit: 6,        // $6/week — 30% of $20
+            maxTradesPerHour: 15,      // fewer trades = less variance
+            consecutiveFailureLimit: 3, // tight circuit breaker
+          }
+
           set({
             pennyTraderMode: false,
-            kellyFraction: 0.40,
-            dailyLossLimit: 5,
-            weeklyLossLimit: 10,
-            maxTradesPerHour: 40,
-            consecutiveFailureLimit: 8,
-            microMinCompositeSignal: 0.30,
-            fwMinProfitBps: 30,
+
+            // Risk limits — tuned for $20 bankroll
+            kellyFraction: 0.15,       // 15% Kelly — conservative at $20
+            ...riskConfig,
+            maxAssetExposure: 0,       // 0 = dynamic correlation-aware caps (60%/45%/35%)
+
+            // ── Crypto Up/Down (primary edge — maker 0% fee) ──
             btcEnableBtc: true,
-            btcEnableEth: true,
-            btcEnable5m: false,
-            btcEnable15m: true,
+            btcEnableEth: false,       // BTC-only — altcoin signals dilute capital
+            btcEnableSol: false,       // SOL markets less liquid
+            btcEnable5m: false,        // 5m OFF — too fast, positions pile up before loss limit triggers
+            btcEnable15m: false,       // 15m OFF — noisy signal, 10% taker fee on 15m crypto markets
+            btcEnableHourly: true,     // best edge/fee ratio with maker mode
+            btcEnable4h: true,         // longer hold, higher payout asymmetry
+            btcTradeSize: 1.50,        // $1.50/trade = 7.5% of $20
+            btcMinConfidence: 0.50,    // higher conviction only
+            btcMaxEntryPrice: 0.48,    // tighter — buy below 48c for better payout asymmetry
+            btcMinEdgeOverMarket: 0.07, // 7% edge required (wider safety margin)
+            btcEarlyExitEnabled: true,
+            btcEarlyExitTPPercent: 0.15, // take profit at 15%
+            btcMroEnabled: true,       // MRO oscillator for volume edge
+            btcCvdEnabled: true,       // CVD divergence for tick-level pressure
+            btcCrossExchangeEnabled: true, // Crypto.com price confirmation
+            btcUseLLMConfirmation: false, // skip LLM — pure mechanical speed
+            btcUseLLMFusion: false,
+
+            // ── MAKER STRATEGIES on $20 — smallest viable sizes ──
+            gabagoolEnabled: true,     // guaranteed merge profit — keep ON
+            gabagoolMaxExposure: 5,    // $5 max per window (25% of $20)
+            gabagoolOrderSize: 1.50,   // $1.50 per order
+            gabagoolCheapnessThreshold: 0.46, // tighter: buy below 46c
+            gabagoolMinProfitMargin: 0.96, // 4% profit margin
+            gabagoolDurations: ['1h', '4h'] as Array<'15m' | '1h' | '4h'>,
+            dualSideEnabled: true,     // maker-only + rebates — keep ON
+            dualSideTradeSize: 1.50,   // $1.50 per leg ($3 total = 15% of bankroll)
+            dualSideMaxCombinedAsk: 0.990, // tighter guaranteed-profit gate
+            impulseEnabled: false,     // OFF — FOK taker pays fees, not viable on $20
+            impulseTradeSize: 1.50,
+            liqEnabled: false,         // OFF — less validated, preserve capital
+            liqTradeSize: 1.50,
+
+            // ── ProjectFW (taker arb — only on wide spreads) ──
+            fwMinProfitBps: 30,
+            fwEnableCrossMarket: true,
           })
-          // Push to singletons via dynamic imports (same pattern as individual setters)
-          import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({
-            dailyLossLimit: 5,
-            weeklyLossLimit: 10,
-            maxTradesPerHour: 40,
-            consecutiveFailureLimit: 8,
-          })).catch(() => {})
+
+          // Push to singletons via dynamic imports — MUST match store values above (bug fix: desync)
+          import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig(riskConfig)).catch(() => {})
           import('@/services/strategies/ProjectFWStrategy').then(m => m.projectFWStrategy.setFWConfig({
             minProfitBps: 30,
           })).catch(() => {})
@@ -860,12 +1147,35 @@ export const useSettingsStore = create<SettingsStore>()(
             weeklyLossLimit: DEFAULT_SETTINGS.weeklyLossLimit,
             maxTradesPerHour: DEFAULT_SETTINGS.maxTradesPerHour,
             consecutiveFailureLimit: DEFAULT_SETTINGS.consecutiveFailureLimit,
-            microMinCompositeSignal: DEFAULT_SETTINGS.microMinCompositeSignal,
             fwMinProfitBps: DEFAULT_SETTINGS.fwMinProfitBps,
+            fwEnableCrossMarket: DEFAULT_SETTINGS.fwEnableCrossMarket,
             btcEnableBtc: DEFAULT_SETTINGS.btcEnableBtc,
             btcEnableEth: DEFAULT_SETTINGS.btcEnableEth,
+            btcEnableSol: DEFAULT_SETTINGS.btcEnableSol,
             btcEnable5m: DEFAULT_SETTINGS.btcEnable5m,
             btcEnable15m: DEFAULT_SETTINGS.btcEnable15m,
+            btcEnableHourly: DEFAULT_SETTINGS.btcEnableHourly,
+            btcEnable4h: DEFAULT_SETTINGS.btcEnable4h,
+            btcTradeSize: DEFAULT_SETTINGS.btcTradeSize,
+            btcMinConfidence: DEFAULT_SETTINGS.btcMinConfidence,
+            btcMaxEntryPrice: DEFAULT_SETTINGS.btcMaxEntryPrice,
+            btcMinEdgeOverMarket: DEFAULT_SETTINGS.btcMinEdgeOverMarket,
+            btcEarlyExitEnabled: DEFAULT_SETTINGS.btcEarlyExitEnabled,
+            btcEarlyExitTPPercent: DEFAULT_SETTINGS.btcEarlyExitTPPercent,
+            btcMroEnabled: DEFAULT_SETTINGS.btcMroEnabled,
+            gabagoolEnabled: DEFAULT_SETTINGS.gabagoolEnabled,
+            gabagoolMaxExposure: DEFAULT_SETTINGS.gabagoolMaxExposure,
+            gabagoolCheapnessThreshold: DEFAULT_SETTINGS.gabagoolCheapnessThreshold,
+            gabagoolMinProfitMargin: DEFAULT_SETTINGS.gabagoolMinProfitMargin,
+            gabagoolCooldownMs: DEFAULT_SETTINGS.gabagoolCooldownMs,
+            dualSideEnabled: DEFAULT_SETTINGS.dualSideEnabled,
+            dualSideTradeSize: DEFAULT_SETTINGS.dualSideTradeSize,
+            dualSideMaxCombinedAsk: DEFAULT_SETTINGS.dualSideMaxCombinedAsk,
+            impulseEnabled: DEFAULT_SETTINGS.impulseEnabled,
+            impulseAssets: DEFAULT_SETTINGS.impulseAssets,
+            impulseAggressiveMode: DEFAULT_SETTINGS.impulseAggressiveMode,
+            impulseTradeSize: DEFAULT_SETTINGS.impulseTradeSize,
+            impulseVpinFilter: DEFAULT_SETTINGS.impulseVpinFilter,
           })
           import('@/services/trading/RiskManager').then(m => m.riskManager.setConfig({
             dailyLossLimit: DEFAULT_SETTINGS.dailyLossLimit,
@@ -885,7 +1195,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'alphapolybot-settings',
-      version: 52, // v52: Impulse Sniper v2 — multi-asset, SL/TP, VPIN filter
+      version: 67, // v67: HL hedge, weather adapter, copy trading wiring, per-category fees
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
         if (version < 1) {
@@ -929,7 +1239,7 @@ export const useSettingsStore = create<SettingsStore>()(
           }
         }
         if (version < 6) {
-          // v5→v6: Add BTC Up/Down strategy defaults
+          // v5→v6: Add Crypto Up/Down strategy defaults
           if (state.btcEnableBtc === undefined) state.btcEnableBtc = true
           if (state.btcEnableEth === undefined) state.btcEnableEth = false
           if (state.btcEnableSol === undefined) state.btcEnableSol = false
@@ -970,7 +1280,7 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.btcMinWindowRemaining === 300) state.btcMinWindowRemaining = 120
         }
         if (version < 11) {
-          // v10→v11: Add 5-minute window support for BTC Up/Down strategy
+          // v10→v11: Add 5-minute window support for Crypto Up/Down strategy
           if (state.btcEnable5m === undefined) state.btcEnable5m = true
           if (state.btcEnable15m === undefined) state.btcEnable15m = true
         }
@@ -998,7 +1308,7 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.mrMaxHoldMs === undefined) state.mrMaxHoldMs = 3_600_000
         }
         if (version < 14) {
-          // v13→v14: BTC Up/Down overhaul — fee-aware parameters for 10% crypto fee
+          // v13→v14: Crypto Up/Down overhaul — fee-aware parameters for 10% crypto fee
           // New signal filters
           if (state.btcMinTimeIntoWindowMs === undefined) state.btcMinTimeIntoWindowMs = 45_000
           if (state.btcRegimeFilterEnabled === undefined) state.btcRegimeFilterEnabled = true
@@ -1070,7 +1380,7 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.btcEnableDaily === undefined) state.btcEnableDaily = false
         }
         if (version < 23) {
-          // v22→v23: Add LLM confirmation gate for BTC Up/Down strategy
+          // v22→v23: Add LLM confirmation gate for Crypto Up/Down strategy
           if (state.btcUseLLMConfirmation === undefined) state.btcUseLLMConfirmation = false
         }
         if (version < 24) {
@@ -1098,7 +1408,7 @@ export const useSettingsStore = create<SettingsStore>()(
         }
         if (version < 28) {
           // v27→v28: Add BTC LLM model setting (DeepSeek R1 default).
-          if (state.btcLLMModel === undefined) state.btcLLMModel = 'deepseek/deepseek-r1'
+          if (state.btcLLMModel === undefined) state.btcLLMModel = 'polytrader'
         }
         if (version < 29) {
           // v28→v29: Clean up old CLOB credential fields
@@ -1171,11 +1481,11 @@ export const useSettingsStore = create<SettingsStore>()(
         }
         if (version < 37) {
           // v36→v37: Raise btcMaxEntryPrice 0.40→0.55.
-          // 0.40 (and prior 0.42/0.45) rejected ALL trades because BTC Up/Down
+          // 0.40 (and prior 0.42/0.45) rejected ALL trades because Crypto Up/Down
           // outcomes are typically priced near 50c. At 55c with maker mode (0 fee),
           // break-even = 55% vs minConfidence 65% → 10% edge. With taker (10%),
           // break-even = 60.5% vs 65% → 4.5% edge. Both are profitable.
-          if (state.btcMaxEntryPrice <= 0.45) state.btcMaxEntryPrice = 0.55
+          if (Number(state.btcMaxEntryPrice) <= 0.45) state.btcMaxEntryPrice = 0.55
           // Also lower minConfidence slightly (0.65→0.60) to match taker break-even
           // at 55c entry: 60.5% BE means 0.60 conf still has marginal edge, and
           // maker mode (0 fee, BE=55%) has 5% edge at 60% confidence.
@@ -1235,7 +1545,7 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.btcMinEdgeOverMarket === 0.10) state.btcMinEdgeOverMarket = 0.02
         }
         if (version < 46) {
-          // v45→v46: LLM signal fusion for BTC Up/Down
+          // v45→v46: LLM signal fusion for Crypto Up/Down
           if (state.btcUseLLMFusion === undefined) state.btcUseLLMFusion = false
           if (state.btcLLMFusionWeight === undefined) state.btcLLMFusionWeight = 0.30
           if (state.btcLLMFusionPreFilter === undefined) state.btcLLMFusionPreFilter = 0.30
@@ -1243,19 +1553,19 @@ export const useSettingsStore = create<SettingsStore>()(
         if (version < 47) {
           // v46→v47: $10 bankroll tuning — all sizes to $1 CLOB minimum,
           // tighten risk limits, reduce max exposure.
-          if (state.btcTradeSize > 1) state.btcTradeSize = 1
-          if (state.fwTradeSize > 1) state.fwTradeSize = 1
-          if (state.dualSideTradeSize > 1) state.dualSideTradeSize = 1
-          if (state.gabagoolMaxExposure > 3) state.gabagoolMaxExposure = 3
-          if (state.maxTradesPerHour > 15) state.maxTradesPerHour = 15
-          if (state.consecutiveFailureLimit > 3) state.consecutiveFailureLimit = 3
+          if (Number(state.btcTradeSize) > 1) state.btcTradeSize = 1
+          if (Number(state.fwTradeSize) > 1) state.fwTradeSize = 1
+          if (Number(state.dualSideTradeSize) > 1) state.dualSideTradeSize = 1
+          if (Number(state.gabagoolMaxExposure) > 3) state.gabagoolMaxExposure = 3
+          if (Number(state.maxTradesPerHour) > 15) state.maxTradesPerHour = 15
+          if (Number(state.consecutiveFailureLimit) > 3) state.consecutiveFailureLimit = 3
         }
         if (version < 48) {
           // v47→v48: Switch to custom polytrader Modelfile (Qwen3 Coder 30B + trading system prompt)
           state.ollamaModel = 'polytrader'
         }
         if (version < 49) {
-          // v48→v49: Shift BTC Up/Down focus to 1hr + 4hr markets
+          // v48→v49: Shift Crypto Up/Down focus to 1hr + 4hr markets
           if (state.btcEnable4h === undefined) state.btcEnable4h = true
           if (state.btcHourlyMakerMode === undefined) state.btcHourlyMakerMode = true
           if (state.btcFourHourMakerMode === undefined) state.btcFourHourMakerMode = true
@@ -1263,7 +1573,7 @@ export const useSettingsStore = create<SettingsStore>()(
           state.btcEnableHourly = true
         }
         if (version < 50) {
-          // v49→v50: BTC Up/Down early exit mode (opt-in, off by default)
+          // v49→v50: Crypto Up/Down early exit mode (opt-in, off by default)
           if (state.btcEarlyExitEnabled === undefined) state.btcEarlyExitEnabled = false
           if (state.btcEarlyExitTPPercent === undefined) state.btcEarlyExitTPPercent = 0.15
         }
@@ -1291,11 +1601,201 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.impulseTakeProfitPct === undefined) state.impulseTakeProfitPct = 0.50
           if (state.impulseVpinFilter === undefined) state.impulseVpinFilter = false
         }
-        return state as AppSettingsState
+        if (version < 54) {
+          // v53→v54: MRO oscillator factor for BTC signal engine
+          if (state.btcMroEnabled === undefined) state.btcMroEnabled = false
+        }
+        if (version < 55) {
+          // v54→v55: Remove OpenRouter, Ollama-only LLM provider
+          state.llmProvider = 'ollama'
+          if (state.ollamaSecondaryModel === undefined) state.ollamaSecondaryModel = ''
+        }
+        if (version < 56) {
+          // v55→v56: Gabagool v2 — multi-duration, depth sizing, adaptive cheapness, fill feedback, spread gate
+          if (state.gabagoolDurations === undefined) state.gabagoolDurations = ['1h']
+          if (state.gabagoolDepthAwareSizing === undefined) state.gabagoolDepthAwareSizing = false
+          if (state.gabagoolAdaptiveCheapness === undefined) state.gabagoolAdaptiveCheapness = true
+          if (state.gabagoolFillRateFeedback === undefined) state.gabagoolFillRateFeedback = false
+          if (state.gabagoolSpreadMinWidth === undefined) state.gabagoolSpreadMinWidth = 0.02
+        }
+        if (version < 57) {
+          // v56→v57: Fix btcLLMModel — was OpenRouter-style 'deepseek/deepseek-r1', now Ollama name
+          if (state.btcLLMModel === 'deepseek/deepseek-r1') state.btcLLMModel = 'polytrader'
+        }
+        if (version < 58) {
+          // v57→v58: Liquidation Momentum strategy
+          if (state.liqEnabled === undefined) state.liqEnabled = false
+          if (state.liqMinThresholdUSD === undefined) state.liqMinThresholdUSD = 25_000
+          if (state.liqMaxThresholdUSD === undefined) state.liqMaxThresholdUSD = 100_000
+          if (state.liqWindowMs === undefined) state.liqWindowMs = 60_000
+          if (state.liqCooldownMs === undefined) state.liqCooldownMs = 120_000
+          if (state.liqTradeSize === undefined) state.liqTradeSize = 1
+          if (state.liqMaxAskPrice === undefined) state.liqMaxAskPrice = 0.55
+          if (state.liqOrderExpiryMs === undefined) state.liqOrderExpiryMs = 45_000
+          if (state.liqStopLossPct === undefined) state.liqStopLossPct = 0.30
+          if (state.liqTakeProfitPct === undefined) state.liqTakeProfitPct = 0.60
+          if (state.liqPreferredDuration === undefined) state.liqPreferredDuration = '5m'
+        }
+        if (version < 59) {
+          // v58→v59: Liquidation Heatmap (Moon Dev API)
+          if (state.moondevApiKey === undefined) state.moondevApiKey = ''
+          if (state.relayerApiKey === undefined) state.relayerApiKey = ''
+          if (state.liqHeatmapEnabled === undefined) state.liqHeatmapEnabled = false
+          if (state.liqHeatmapMinScore === undefined) state.liqHeatmapMinScore = 0.5
+          if (state.liqHeatmapTradeSize === undefined) state.liqHeatmapTradeSize = 1
+          if (state.liqHeatmapMaxDistancePct === undefined) state.liqHeatmapMaxDistancePct = 5
+        }
+        if (version < 60) {
+          // v59→v60: $33 aggressive bankroll config — maximize opportunity surface
+          // Risk management
+          state.dryRun = false
+          state.dailyLossLimit = 5
+          state.weeklyLossLimit = 15
+          state.maxTradesPerHour = 40
+          state.consecutiveFailureLimit = 5
+          state.minBalanceForTrade = 3
+          state.kellyFraction = 0.25
+          state.aggressiveMode = true
+          // Crypto Up/Down — multi-timeframe, bigger sizing
+          state.btcEnableBtc = true
+          state.btcEnableEth = false      // concentrate on BTC — altcoin signals too weak
+          state.btcEnable5m = true        // 5m = fastest compounding, maker mode = 0% fee
+          state.btcEnable15m = true
+          state.btcEnableHourly = true
+          state.btcEnable4h = true
+          state.btcTradeSize = 3
+          state.btcMinConfidence = 0.38
+          state.btcMaxEntryPrice = 0.55
+          // Dual-Side Hedge — maker-only
+          state.dualSideEnabled = true
+          state.dualSideTradeSize = 2
+          // Gabagool — guaranteed merge profit
+          state.gabagoolEnabled = true
+          state.gabagoolMaxExposure = 8
+          state.gabagoolOrderSize = 2
+          // Impulse Sniper — latency arb
+          state.impulseEnabled = true
+          state.impulseThreshold = 150
+          state.impulseTradeSize = 2.50
+          // Liquidation Momentum — novel signal
+          state.liqEnabled = true
+          state.liqTradeSize = 2
+        }
+        if (version < 61) {
+          // v60→v61: Moon Dev data integration — CVD, multi-exchange liqs, proximity, sentiment
+          if (state.btcCvdEnabled === undefined) state.btcCvdEnabled = false
+          if (state.moondevMultiExchangeLiqEnabled === undefined) state.moondevMultiExchangeLiqEnabled = false
+          if (state.moondevProximityEnabled === undefined) state.moondevProximityEnabled = false
+          if (state.moondevSentimentEnabled === undefined) state.moondevSentimentEnabled = false
+          if (state.moondevSentimentMinZScore === undefined) state.moondevSentimentMinZScore = 2.0
+          if (state.moondevProximityMaxDistancePct === undefined) state.moondevProximityMaxDistancePct = 2.0
+        }
+        if (version < 62) {
+          // v61→v62: $39 bankroll sizing + disable LLM + BTC-only focus
+          state.dailyLossLimit = 6
+          state.weeklyLossLimit = 18
+          state.minBalanceForTrade = 4
+          state.btcTradeSize = 3.50
+          state.dualSideTradeSize = 2.50
+          state.gabagoolMaxExposure = 10
+          state.gabagoolOrderSize = 2.50
+          state.impulseTradeSize = 3.00
+          state.liqTradeSize = 2.50
+          state.btcUseLLMConfirmation = false  // no Ollama dependency — pure mechanical speed
+          state.btcUseLLMFusion = false
+          state.btcEnableEth = false  // BTC-only — altcoins dilute $39 capital
+          state.btcEnableSol = false
+          state.btcEnableXrp = false
+        }
+        if (version < 63) {
+          // v62→v63: paper trading balance for dry-run mode
+          if (state.paperBalance === undefined) state.paperBalance = 1_000
+          // Microstructure services
+          if (state.l2DepthEnabled === undefined) state.l2DepthEnabled = false
+          if (state.orderFlowImbalanceEnabled === undefined) state.orderFlowImbalanceEnabled = false
+          if (state.orderFlowWindowMs === undefined) state.orderFlowWindowMs = 60_000
+          if (state.feeGateEnabled === undefined) state.feeGateEnabled = true
+        }
+        if (version < 64) {
+          // v63→v64: Harden BTC Up/Down after 0% win rate on 5m windows.
+          // Snipe confidence formula was broken (inflated to 70%+ on noise).
+          // Force disable 5m/15m, tighten confidence + entry price gates.
+          state.btcEnable5m = false
+          state.btcEnable15m = false
+          state.btcMinConfidence = 0.55
+          state.btcMaxEntryPrice = 0.45
+          // Also force BTC-only — portfolio shows ETH/XRP losses
+          state.btcEnableEth = false
+          state.btcEnableSol = false
+          state.btcEnableXrp = false
+        }
+        if (version < 65) {
+          // v64→v65: $29 bankroll hardening after $10 loss.
+          // Tighter risk limits, smaller trade sizes, disable unvalidated strategies.
+          state.dailyLossLimit = 4
+          state.weeklyLossLimit = 10
+          state.maxTradesPerHour = 20
+          state.consecutiveFailureLimit = 3
+          state.kellyFraction = 0.20
+          state.btcTradeSize = 2.50
+          state.btcMinConfidence = 0.45
+          state.btcMaxEntryPrice = 0.50
+          state.btcMinEdgeOverMarket = 0.05
+          state.gabagoolOrderSize = 2.00
+          state.gabagoolMaxExposure = 7
+          state.dualSideTradeSize = 2.00
+          state.impulseEnabled = false   // OFF — taker fees eat edge on small bankroll
+          state.liqEnabled = false       // OFF — preserve capital
+        }
+        if (version < 66) {
+          // v65→v66: $20 bankroll — tighter limits, smaller sizes, cross-exchange confirmation
+          state.dailyLossLimit = 3
+          state.weeklyLossLimit = 6
+          state.maxTradesPerHour = 15
+          state.kellyFraction = 0.15
+          state.minBalanceForTrade = 3
+          state.btcTradeSize = 1.50
+          state.btcMinConfidence = 0.50
+          state.btcMaxEntryPrice = 0.48
+          state.btcMinEdgeOverMarket = 0.07
+          state.btcCvdEnabled = true
+          state.btcEnable4h = true
+          state.btcEnable5m = false
+          state.btcEnable15m = false
+          state.btcEnableEth = false
+          state.btcEnableSol = false
+          state.btcEnableXrp = false
+          state.gabagoolOrderSize = 1.50
+          state.gabagoolMaxExposure = 5
+          state.gabagoolCheapnessThreshold = 0.46
+          state.gabagoolMinProfitMargin = 0.96
+          state.gabagoolDurations = ['1h', '4h']
+          state.dualSideTradeSize = 1.50
+          state.dualSideMaxCombinedAsk = 0.990
+          state.impulseEnabled = false
+          state.impulseTradeSize = 1.50
+          state.liqEnabled = false
+          state.liqTradeSize = 1.50
+          // New cross-exchange confirmation fields
+          if (state.btcCrossExchangeEnabled === undefined) state.btcCrossExchangeEnabled = true
+          if (state.btcCrossExchangeMaxDivergencePct === undefined) state.btcCrossExchangeMaxDivergencePct = 0.15
+        }
+        if (version < 67) {
+          // v66→v67: Hyperliquid hedge, weather adapter, copy trading wiring
+          if (state.hyperliquidHedgeEnabled === undefined) state.hyperliquidHedgeEnabled = false
+          if (state.hyperliquidMaxHedgeUSD === undefined) state.hyperliquidMaxHedgeUSD = 10
+          if (state.hyperliquidHedgeCooldownMs === undefined) state.hyperliquidHedgeCooldownMs = 5000
+          if (state.weatherScanEnabled === undefined) state.weatherScanEnabled = false
+          if (state.weatherMinLiquidity === undefined) state.weatherMinLiquidity = 500
+          if (state.weatherScanIntervalMs === undefined) state.weatherScanIntervalMs = 60_000
+          if (state.weatherLocations === undefined) state.weatherLocations = ['NYC', 'LAX', 'CHI']
+        }
+        return state as unknown as AppSettingsState
       },
       partialize: (state) => ({
         dryRun: state.dryRun,
-        openRouterApiKey: state.openRouterApiKey,
+        paperBalance: state.paperBalance,
+        // openRouterApiKey: REMOVED — secrets must not persist in plain-text localStorage
         enableNotifications: state.enableNotifications,
         enableSoundAlerts: state.enableSoundAlerts,
         dailyLossLimit: state.dailyLossLimit,
@@ -1341,6 +1841,10 @@ export const useSettingsStore = create<SettingsStore>()(
         btcLLMFusionPreFilter: state.btcLLMFusionPreFilter,
         btcEarlyExitEnabled: state.btcEarlyExitEnabled,
         btcEarlyExitTPPercent: state.btcEarlyExitTPPercent,
+        btcMroEnabled: state.btcMroEnabled,
+        btcCvdEnabled: state.btcCvdEnabled,
+        btcCrossExchangeEnabled: state.btcCrossExchangeEnabled,
+        btcCrossExchangeMaxDivergencePct: state.btcCrossExchangeMaxDivergencePct,
         aggressiveMode: state.aggressiveMode,
         llmWebSearchEnabled: state.llmWebSearchEnabled,
         microMinCompositeSignal: state.microMinCompositeSignal,
@@ -1363,11 +1867,10 @@ export const useSettingsStore = create<SettingsStore>()(
         cryptoModel: state.cryptoModel,
         cryptoScanIntervalMs: state.cryptoScanIntervalMs,
         cryptoMinConfidence: state.cryptoMinConfidence,
-        polyBacktestApiKey: state.polyBacktestApiKey,
+        // polyBacktestApiKey: REMOVED — secrets must not persist in plain-text localStorage
         wallets: state.wallets,
         activeWalletId: state.activeWalletId,
-        coinbaseApiKey: state.coinbaseApiKey,
-        coinbaseSecret: state.coinbaseSecret,
+        // coinbaseApiKey, coinbaseSecret: REMOVED — secrets must not persist in plain-text localStorage
         mrEnableBtc: state.mrEnableBtc,
         mrEnableEth: state.mrEnableEth,
         mrEnableSol: state.mrEnableSol,
@@ -1398,6 +1901,11 @@ export const useSettingsStore = create<SettingsStore>()(
         gabagoolMaxImbalance: state.gabagoolMaxImbalance,
         gabagoolMinProfitMargin: state.gabagoolMinProfitMargin,
         gabagoolCooldownMs: state.gabagoolCooldownMs,
+        gabagoolDurations: state.gabagoolDurations,
+        gabagoolDepthAwareSizing: state.gabagoolDepthAwareSizing,
+        gabagoolAdaptiveCheapness: state.gabagoolAdaptiveCheapness,
+        gabagoolFillRateFeedback: state.gabagoolFillRateFeedback,
+        gabagoolSpreadMinWidth: state.gabagoolSpreadMinWidth,
         impulseEnabled: state.impulseEnabled,
         impulseThreshold: state.impulseThreshold,
         impulseConfirmationMs: state.impulseConfirmationMs,
@@ -1424,6 +1932,34 @@ export const useSettingsStore = create<SettingsStore>()(
         llmProvider: state.llmProvider,
         ollamaBaseUrl: state.ollamaBaseUrl,
         ollamaModel: state.ollamaModel,
+        ollamaSecondaryModel: state.ollamaSecondaryModel,
+        liqEnabled: state.liqEnabled,
+        liqMinThresholdUSD: state.liqMinThresholdUSD,
+        liqMaxThresholdUSD: state.liqMaxThresholdUSD,
+        liqWindowMs: state.liqWindowMs,
+        liqCooldownMs: state.liqCooldownMs,
+        liqTradeSize: state.liqTradeSize,
+        liqMaxAskPrice: state.liqMaxAskPrice,
+        liqOrderExpiryMs: state.liqOrderExpiryMs,
+        liqStopLossPct: state.liqStopLossPct,
+        liqTakeProfitPct: state.liqTakeProfitPct,
+        liqPreferredDuration: state.liqPreferredDuration,
+        // moondevApiKey: NOT persisted — secrets must not persist in plain-text localStorage
+        // relayerApiKey: NOT persisted — secrets must not persist in plain-text localStorage
+        liqHeatmapEnabled: state.liqHeatmapEnabled,
+        liqHeatmapMinScore: state.liqHeatmapMinScore,
+        liqHeatmapTradeSize: state.liqHeatmapTradeSize,
+        liqHeatmapMaxDistancePct: state.liqHeatmapMaxDistancePct,
+        moondevMultiExchangeLiqEnabled: state.moondevMultiExchangeLiqEnabled,
+        moondevProximityEnabled: state.moondevProximityEnabled,
+        moondevSentimentEnabled: state.moondevSentimentEnabled,
+        moondevSentimentMinZScore: state.moondevSentimentMinZScore,
+        moondevProximityMaxDistancePct: state.moondevProximityMaxDistancePct,
+        // Microstructure services
+        l2DepthEnabled: state.l2DepthEnabled,
+        orderFlowImbalanceEnabled: state.orderFlowImbalanceEnabled,
+        orderFlowWindowMs: state.orderFlowWindowMs,
+        feeGateEnabled: state.feeGateEnabled,
       }),
     }
   )

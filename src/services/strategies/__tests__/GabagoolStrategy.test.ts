@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { GabagoolStrategy } from '../GabagoolStrategy'
+import type { AccumulationFill } from '../GabagoolStrategy'
 import type { Market } from '@/types'
 
 // ==========================================
@@ -15,6 +16,11 @@ const { mockSettings } = vi.hoisted(() => {
     gabagoolMaxImbalance: 0.20,
     gabagoolMinProfitMargin: 0.98,
     gabagoolCooldownMs: 3000,
+    gabagoolDurations: ['1h'],
+    gabagoolDepthAwareSizing: false,
+    gabagoolAdaptiveCheapness: false,
+    gabagoolFillRateFeedback: false,
+    gabagoolSpreadMinWidth: 0,
   }
   return { mockSettings }
 })
@@ -87,6 +93,19 @@ vi.mock('@/services/wallet/WalletService', () => ({
   },
 }))
 
+vi.mock('@/services/trading/OrderBookDepth', () => ({
+  orderBookDepth: {
+    checkBuyDepth: vi.fn().mockResolvedValue({
+      sufficient: true,
+      maxFillableUSD: 50,
+      availableLiquidity: 50,
+      estimatedFillPrice: 0.45,
+      estimatedSlippage: 0.001,
+      bestPrice: 0.45,
+    }),
+  },
+}))
+
 // Suppress console.log in tests
 vi.spyOn(console, 'log').mockImplementation(() => {})
 
@@ -97,14 +116,14 @@ vi.spyOn(console, 'log').mockImplementation(() => {})
 function makeMarket(overrides?: Partial<Market>): Market {
   return {
     id: 'market-1',
-    slug: 'btc-updown-15m-1700000000',
-    question: 'Will BTC go up in 15 minutes?',
+    slug: 'bitcoin-up-or-down-march-6-3pm-et',
+    question: 'Will BTC go up or down in 1 hour?',
     outcomes: ['Up', 'Down'],
     outcomePrices: [0.50, 0.50],
     clobTokenIds: ['token-yes-1', 'token-no-1'],
     active: true,
     closed: false,
-    endDate: new Date(Date.now() + 600_000).toISOString(), // 10 min from now
+    endDate: new Date(Date.now() + 3_000_000).toISOString(), // ~50 min from now
     createdAt: new Date().toISOString(),
     volume: 10000,
     liquidity: 5000,
@@ -117,7 +136,7 @@ function makeStrategy(): GabagoolStrategy {
   return new GabagoolStrategy()
 }
 
-function makeAccumulator(strategy: GabagoolStrategy, market: Market) {
+function makeAccumulator(strategy: GabagoolStrategy, market: Market, duration: '15m' | '1h' | '4h' = '1h') {
   const acc = {
     marketId: market.id,
     market,
@@ -125,9 +144,10 @@ function makeAccumulator(strategy: GabagoolStrategy, market: Market) {
     yesTokenId: market.clobTokenIds![0],
     noTokenId: market.clobTokenIds![1],
     windowEndMs: new Date(market.endDate).getTime(),
+    duration,
     qtyYes: 0, qtyNo: 0,
     costYes: 0, costNo: 0,
-    fills: [],
+    fills: [] as AccumulationFill[],
     pairCost: Infinity,
     lockedProfit: 0,
     imbalance: 0,
@@ -156,6 +176,11 @@ describe('GabagoolStrategy', () => {
     mockSettings.gabagoolMaxImbalance = 0.20
     mockSettings.gabagoolMinProfitMargin = 0.98
     mockSettings.gabagoolCooldownMs = 3000
+    mockSettings.gabagoolDurations = ['1h']
+    mockSettings.gabagoolDepthAwareSizing = false
+    mockSettings.gabagoolAdaptiveCheapness = false
+    mockSettings.gabagoolFillRateFeedback = false
+    mockSettings.gabagoolSpreadMinWidth = 0
     strategy = makeStrategy()
   })
 
@@ -202,7 +227,8 @@ describe('GabagoolStrategy', () => {
       const acc = makeAccumulator(strategy, market)
       const config = strategy.gabagoolConfig
 
-      const result = strategy.chooseSide(acc, 0.45, 0.55, config)
+      // askSum must be < 1.00 for one-sided buy (merge arb viability gate)
+      const result = strategy.chooseSide(acc, 0.45, 0.52, config)
       expect(result).toBe('yes')
     })
 
@@ -211,7 +237,8 @@ describe('GabagoolStrategy', () => {
       const acc = makeAccumulator(strategy, market)
       const config = strategy.gabagoolConfig
 
-      const result = strategy.chooseSide(acc, 0.55, 0.43, config)
+      // askSum must be < 1.00 for one-sided buy (merge arb viability gate)
+      const result = strategy.chooseSide(acc, 0.52, 0.43, config)
       expect(result).toBe('no')
     })
 
@@ -255,6 +282,75 @@ describe('GabagoolStrategy', () => {
       // So YES at 0.50 should be bought even though 0.50 > cheapnessThreshold (0.40)
       const result = strategy.chooseSide(acc, 0.50, 0.55, config)
       expect(result).toBe('yes')
+    })
+  })
+
+  // ==========================================
+  // ADAPTIVE CHEAPNESS
+  // ==========================================
+
+  describe('adaptive cheapness', () => {
+    it('widens threshold when ask sum is far below 1.00', () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      // Static threshold 0.48, but ask sum = 0.42+0.43 = 0.85, boost = (0.95-0.85)*0.5 = 0.05
+      // Effective threshold = 0.48 + 0.05 = 0.53
+      const config = { ...strategy.gabagoolConfig, adaptiveCheapness: true }
+
+      // 0.51 is above static 0.48 but below adaptive 0.53
+      const result = strategy.chooseSide(acc, 0.51, 0.43, config)
+      expect(result).toBe('no') // 0.43 < 0.53 — still cheap
+    })
+
+    it('makes previously-rejected price acceptable via adaptive boost', () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      // Static threshold 0.45. yesAsk=0.46 would normally be rejected (0.46 > 0.45).
+      // With adaptive: ask sum = 0.46 + 0.42 = 0.88, boost = (0.95-0.88)*0.5 = 0.035
+      // Effective threshold = 0.45 + 0.035 = 0.485
+      // Both cheap: 0.46 < 0.485 ✓, 0.42 < 0.485 ✓ → buy cheaper = NO (0.42)
+      const config = { ...strategy.gabagoolConfig, cheapnessThreshold: 0.45 }
+
+      // Without adaptive: yesAsk 0.46 > 0.45, only NO qualifies
+      const withoutAdaptive = strategy.chooseSide(acc, 0.46, 0.42, { ...config, adaptiveCheapness: false })
+      expect(withoutAdaptive).toBe('no')
+
+      // With adaptive: both qualify, cheaper wins (still NO but YES is now valid too)
+      const withAdaptive = strategy.chooseSide(acc, 0.42, 0.46, { ...config, adaptiveCheapness: true })
+      // Now YES=0.42 is cheaper, both below 0.485 → picks YES
+      expect(withAdaptive).toBe('yes')
+    })
+
+    it('does not widen when ask sum >= 0.95', () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      const config = { ...strategy.gabagoolConfig, adaptiveCheapness: true }
+
+      // ask sum = 0.49 + 0.52 = 1.01, no boost
+      const result = strategy.chooseSide(acc, 0.49, 0.52, config)
+      expect(result).toBeNull() // 0.49 > 0.48 threshold, no adaptive boost
+    })
+
+    it('caps adaptive boost to not exceed hard cap', () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      // ask sum = 0.30 + 0.30 = 0.60, boost = (0.95-0.60)*0.5 = 0.175 → capped at 0.07
+      // Effective threshold = 0.48 + 0.07 = 0.55 = HARD_CAP
+      const config = { ...strategy.gabagoolConfig, adaptiveCheapness: true }
+
+      // 0.54 < 0.55 hard cap and < adaptive threshold
+      const result = strategy.chooseSide(acc, 0.54, 0.30, config)
+      expect(result).toBe('no') // 0.30 < 0.55
+    })
+
+    it('does not apply when disabled', () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      const config = { ...strategy.gabagoolConfig, adaptiveCheapness: false }
+
+      // ask sum = 0.49 + 0.40 = 0.89, would boost if enabled
+      const result = strategy.chooseSide(acc, 0.49, 0.60, config)
+      expect(result).toBeNull() // 0.49 > 0.48, no adaptive
     })
   })
 
@@ -419,6 +515,272 @@ describe('GabagoolStrategy', () => {
   })
 
   // ==========================================
+  // FILL-RATE FEEDBACK
+  // ==========================================
+
+  describe('fill-rate feedback', () => {
+    it('tracks fill latency via EMA', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const strat = strategy as any
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.pendingOrderIds.add('o1')
+      strat.tokenToMarketMap.set('token-yes-1', { marketId: market.id, side: 'yes' })
+
+      // Place order 3 seconds ago
+      strat.orderPlacedAt.set('o1', Date.now() - 3000)
+
+      strat.onFill('o1', 'token-yes-1', '0.45', '10')
+
+      const fillRate = strategy.getFillRate()
+      expect(fillRate.totalFills).toBe(1)
+      // EMA = 0.3 * ~3000 + 0.7 * 5000 = ~4400
+      expect(fillRate.emaFillLatencyMs).toBeGreaterThan(3000)
+      expect(fillRate.emaFillLatencyMs).toBeLessThan(5000)
+    })
+
+    it('effectiveLimitOffset widens on fast fills', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const strat = strategy as any
+      strat.fillRate = { emaFillLatencyMs: 1000, totalFills: 5, totalOrders: 10 }
+
+      const config = { ...strategy.gabagoolConfig, fillRateFeedback: true, limitPriceOffset: 0.01 }
+      const offset = strat.effectiveLimitOffset(config)
+      expect(offset).toBe(0.015) // widened by 0.005
+    })
+
+    it('effectiveLimitOffset tightens on slow fills', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const strat = strategy as any
+      strat.fillRate = { emaFillLatencyMs: 15000, totalFills: 5, totalOrders: 10 }
+
+      const config = { ...strategy.gabagoolConfig, fillRateFeedback: true, limitPriceOffset: 0.01 }
+      const offset = strat.effectiveLimitOffset(config)
+      expect(offset).toBe(0.007) // tightened by 0.003
+    })
+
+    it('returns static offset when feedback disabled', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const strat = strategy as any
+      strat.fillRate = { emaFillLatencyMs: 1000, totalFills: 5, totalOrders: 10 }
+
+      const config = { ...strategy.gabagoolConfig, fillRateFeedback: false, limitPriceOffset: 0.01 }
+      const offset = strat.effectiveLimitOffset(config)
+      expect(offset).toBe(0.01) // unchanged
+    })
+
+    it('returns static offset when insufficient fill data', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const strat = strategy as any
+      strat.fillRate = { emaFillLatencyMs: 1000, totalFills: 2, totalOrders: 3 }
+
+      const config = { ...strategy.gabagoolConfig, fillRateFeedback: true, limitPriceOffset: 0.01 }
+      const offset = strat.effectiveLimitOffset(config)
+      expect(offset).toBe(0.01) // need >= 3 fills
+    })
+  })
+
+  // ==========================================
+  // SPREAD MONITORING
+  // ==========================================
+
+  describe('spread monitoring', () => {
+    it('skips when spread is too tight', async () => {
+      mockSettings.gabagoolSpreadMinWidth = 0.03
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.lastOrderTime = 0
+
+      // Spread = 0.45 - 0.44 = 0.01 < minWidth 0.03
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: () => ({ ask: 0.45, bid: 0.44, mid: 0.445, spread: 0.01, timestamp: new Date() }),
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc)
+      expect(mockPlaceBet).not.toHaveBeenCalled()
+    })
+
+    it('allows orders when spread exceeds minimum', async () => {
+      mockSettings.gabagoolSpreadMinWidth = 0.01
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.lastOrderTime = 0
+
+      // Spread = 0.45 - 0.42 = 0.03 > minWidth 0.01
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: (tokenId: string) => {
+          if (tokenId === 'token-yes-1') return { ask: 0.45, bid: 0.42, mid: 0.435, spread: 0.03, timestamp: new Date() }
+          return { ask: 0.52, bid: 0.49, mid: 0.505, spread: 0.03, timestamp: new Date() }
+        },
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc)
+      expect(mockPlaceBet).toHaveBeenCalled()
+    })
+
+    it('disabled when spreadMinWidth is 0', async () => {
+      mockSettings.gabagoolSpreadMinWidth = 0
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.lastOrderTime = 0
+
+      // Tight spread but spread gate disabled
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: (tokenId: string) => {
+          if (tokenId === 'token-yes-1') return { ask: 0.45, bid: 0.449, mid: 0.4495, spread: 0.001, timestamp: new Date() }
+          return { ask: 0.52, bid: 0.519, mid: 0.5195, spread: 0.001, timestamp: new Date() }
+        },
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc)
+      expect(mockPlaceBet).toHaveBeenCalled()
+    })
+  })
+
+  // ==========================================
+  // MULTI-DURATION
+  // ==========================================
+
+  describe('multi-duration', () => {
+    it('config reads durations from settings', () => {
+      mockSettings.gabagoolDurations = ['15m', '4h']
+      const config = strategy.gabagoolConfig
+      expect(config.durations).toEqual(['15m', '4h'])
+    })
+
+    it('defaults to 1h when durations not set', () => {
+      mockSettings.gabagoolDurations = undefined
+      const config = strategy.gabagoolConfig
+      expect(config.durations).toEqual(['1h'])
+    })
+
+    it('stops 15m window earlier than 1h window (per-duration timing)', async () => {
+      // 15m window with only 30s left — minWindowRemainingMs for 15m is 60s
+      const market15m = makeMarket({
+        id: 'market-15m',
+        endDate: new Date(Date.now() + 30_000).toISOString(), // 30s left
+      })
+      const acc15m = makeAccumulator(strategy, market15m, '15m')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: () => ({ ask: 0.45, bid: 0.44, mid: 0.445, spread: 0.01, timestamp: new Date() }),
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc15m)
+      expect(acc15m.stopped).toBe(true)
+      expect(mockPlaceBet).not.toHaveBeenCalled()
+    })
+
+    it('continues 4h window with 10 min left (per-duration timing)', async () => {
+      // 4h window with 10 min left — minWindowRemainingMs for 4h is 15 min
+      const market4h = makeMarket({
+        id: 'market-4h',
+        endDate: new Date(Date.now() + 600_000).toISOString(), // 10 min left
+      })
+      const acc4h = makeAccumulator(strategy, market4h, '4h')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: () => ({ ask: 0.45, bid: 0.44, mid: 0.445, spread: 0.01, timestamp: new Date() }),
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc4h)
+      expect(acc4h.stopped).toBe(true) // 10 min < 15 min threshold
+    })
+
+    it('accumulator tracks its duration', () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market, '4h')
+      expect(acc.duration).toBe('4h')
+    })
+  })
+
+  // ==========================================
+  // DEPTH-AWARE SIZING
+  // ==========================================
+
+  describe('depth-aware sizing', () => {
+    it('caps order to 50% of available liquidity when depth is thin', async () => {
+      const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(orderBookDepth.checkBuyDepth as any).mockResolvedValueOnce({
+        sufficient: false,
+        maxFillableUSD: 1.5, // only $1.50 available
+        availableLiquidity: 1.5,
+        estimatedFillPrice: 0.45,
+        estimatedSlippage: 0.02,
+        bestPrice: 0.45,
+      })
+
+      mockSettings.gabagoolDepthAwareSizing = true
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.lastOrderTime = 0
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: (tokenId: string) => {
+          if (tokenId === 'token-yes-1') return { ask: 0.45, bid: 0.42, mid: 0.435, spread: 0.03, timestamp: new Date() }
+          return { ask: 0.52, bid: 0.49, mid: 0.505, spread: 0.03, timestamp: new Date() }
+        },
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc)
+      expect(mockPlaceBet).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        0.75, // 50% of 1.50
+        expect.anything(),
+      )
+    })
+
+    it('uses full order size when depth is sufficient', async () => {
+      const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(orderBookDepth.checkBuyDepth as any).mockResolvedValueOnce({
+        sufficient: true,
+        maxFillableUSD: 50,
+        availableLiquidity: 50,
+        estimatedFillPrice: 0.45,
+        estimatedSlippage: 0.001,
+        bestPrice: 0.45,
+      })
+
+      mockSettings.gabagoolDepthAwareSizing = true
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.lastOrderTime = 0
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: (tokenId: string) => {
+          if (tokenId === 'token-yes-1') return { ask: 0.45, bid: 0.42, mid: 0.435, spread: 0.03, timestamp: new Date() }
+          return { ask: 0.52, bid: 0.49, mid: 0.505, spread: 0.03, timestamp: new Date() }
+        },
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc)
+      expect(mockPlaceBet).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        1, // full orderSize
+        expect.anything(),
+      )
+    })
+  })
+
+  // ==========================================
   // PROFIT LOCK
   // ==========================================
 
@@ -542,7 +904,7 @@ describe('GabagoolStrategy', () => {
       ;(strategy as any).realtimeServiceRef = {
         getPrice: (tokenId: string) => {
           if (tokenId === 'token-yes-1') return { ask: 0.45, bid: 0.44, mid: 0.445, spread: 0.01, timestamp: new Date() }
-          return { ask: 0.55, bid: 0.54, mid: 0.545, spread: 0.01, timestamp: new Date() }
+          return { ask: 0.52, bid: 0.51, mid: 0.515, spread: 0.01, timestamp: new Date() }
         },
         isStale: () => false,
       }
@@ -571,7 +933,7 @@ describe('GabagoolStrategy', () => {
       ;(strategy as any).realtimeServiceRef = {
         getPrice: (tokenId: string) => {
           if (tokenId === 'token-no-1') return { ask: 0.43, bid: 0.42, mid: 0.425, spread: 0.01, timestamp: new Date() }
-          return { ask: 0.57, bid: 0.56, mid: 0.565, spread: 0.01, timestamp: new Date() }
+          return { ask: 0.52, bid: 0.51, mid: 0.515, spread: 0.01, timestamp: new Date() }
         },
         isStale: () => false,
       }
@@ -620,6 +982,93 @@ describe('GabagoolStrategy', () => {
       }
 
       await strategy.evaluateAndOrder(acc)
+      expect(mockPlaceBet).not.toHaveBeenCalled()
+    })
+
+    it('tracks order placement time for fill-rate feedback', async () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.lastOrderTime = 0
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: (tokenId: string) => {
+          if (tokenId === 'token-yes-1') return { ask: 0.45, bid: 0.42, mid: 0.435, spread: 0.03, timestamp: new Date() }
+          return { ask: 0.52, bid: 0.49, mid: 0.505, spread: 0.03, timestamp: new Date() }
+        },
+        isStale: () => false,
+      }
+
+      await strategy.evaluateAndOrder(acc)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const strat = strategy as any
+      expect(strat.orderPlacedAt.has('order-123')).toBe(true)
+    })
+  })
+
+  // ==========================================
+  // CROSS-WINDOW RECYCLING
+  // ==========================================
+
+  describe('cross-window recycling', () => {
+    it('attempts sell when orphaned position has favorable bid', async () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.qtyYes = 10
+      acc.costYes = 4.5 // avg 0.45
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: () => ({ ask: 0.52, bid: 0.47, mid: 0.495, spread: 0.05, timestamp: new Date() }),
+        isStale: () => false,
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (strategy as any).recycleOrphanedPosition(acc)
+
+      // recoverable = 0.50 * 10 = $5 > 0.80 * $4.50 = $3.60, so should sell
+      expect(mockPlaceBet).toHaveBeenCalledWith(
+        market,
+        'no', // selling YES = placing a NO bet
+        10,
+        expect.objectContaining({
+          strategy: 'gabagool-recycle',
+          postOnly: true,
+        }),
+      )
+    })
+
+    it('skips recycle when bid is too low', async () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.qtyYes = 10
+      acc.costYes = 4.5 // avg 0.45
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = {
+        getPrice: () => ({ ask: 0.40, bid: 0.30, mid: 0.35, spread: 0.10, timestamp: new Date() }),
+        isStale: () => false,
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (strategy as any).recycleOrphanedPosition(acc)
+
+      // recoverable = 0.30 * 10 = $3 < 0.80 * $4.50 = $3.60, skip
+      expect(mockPlaceBet).not.toHaveBeenCalled()
+    })
+
+    it('skips when no realtime service', async () => {
+      const market = makeMarket()
+      const acc = makeAccumulator(strategy, market)
+      acc.qtyNo = 5
+      acc.costNo = 2.25
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(strategy as any).realtimeServiceRef = null
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (strategy as any).recycleOrphanedPosition(acc)
       expect(mockPlaceBet).not.toHaveBeenCalled()
     })
   })

@@ -34,6 +34,14 @@ vi.mock('@/stores/settingsStore', () => ({
   },
 }))
 
+// Mock balance history store (paper balance for dry run)
+vi.mock('@/stores/balanceHistoryStore', () => ({
+  useBalanceHistoryStore: {
+    getState: () => ({ simulatedBalance: 50, initialBalance: 50, snapshots: [] }),
+    subscribe: vi.fn(),
+  },
+}))
+
 // Mock polymarket client
 vi.mock('@/services/api', () => ({
   polymarketClient: {
@@ -160,16 +168,16 @@ describe('E2E Order Lifecycle', () => {
   })
 
   it('cross-strategy exposure check blocks over-concentrated trades', () => {
-    // Record heavy BTC exposure
+    // Record heavy BTC exposure from 3 strategies
     riskManager.recordAssetExposure('BTC', 'btc-updown', 20)
     riskManager.recordAssetExposure('BTC', 'dual-side', 15)
     riskManager.recordAssetExposure('BTC', 'gabagool', 10)
 
-    // Total BTC exposure = $45 out of $50 balance = 90% > 80% cap
+    // 3 strategies → dynamic cap = 35% → $50/$50 = 100% >> 35%
     const check = riskManager.checkAssetConcentration('BTC', 5)
     expect(check.allowed).toBe(false)
     expect(check.reason).toContain('BTC')
-    expect(check.reason).toContain('concentration')
+    expect(check.riskCode).toBe('CORRELATED_EXPOSURE')
   })
 
   it('drawdown throttle increases scan interval multiplier', () => {

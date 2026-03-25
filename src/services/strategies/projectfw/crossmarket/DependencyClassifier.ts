@@ -1,7 +1,7 @@
 import type { Market } from '@/types'
 import type { DependencyGraph, MarketDependency, MarketGroup } from './types'
 import type { EventAnalyzer } from './EventAnalyzer'
-import { openRouterService } from '@/services/llm/OpenRouterService'
+import { ollamaService } from '@/services/llm/OllamaService'
 
 /**
  * DependencyClassifier
@@ -47,7 +47,7 @@ export class DependencyClassifier {
     for (let i = 0; i < pairs.length; i += this.maxPairsPerCall) {
       const batch = pairs.slice(i, i + this.maxPairsPerCall)
       try {
-        const edges = await openRouterService.classifyDependencies(batch)
+        const edges = await ollamaService.classifyDependencies(batch)
         allEdges.push(...edges)
       } catch (error) {
         console.warn(

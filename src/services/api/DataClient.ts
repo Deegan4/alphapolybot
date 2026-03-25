@@ -30,10 +30,7 @@ export class DataClient extends BaseApiClient {
   async getPositions(options: {
     sizeThreshold?: number
   } = {}): Promise<Position[]> {
-    if (!this.walletAddress) {
-      console.error('Wallet address not set')
-      return []
-    }
+    if (!this.walletAddress) return []
 
     const { sizeThreshold = 0.01 } = options
 
@@ -69,10 +66,7 @@ export class DataClient extends BaseApiClient {
     limit?: number
     offset?: number
   } = {}): Promise<Trade[]> {
-    if (!this.walletAddress) {
-      console.error('Wallet address not set')
-      return []
-    }
+    if (!this.walletAddress) return []
 
     const { limit = 100, offset = 0 } = options
 
@@ -93,10 +87,7 @@ export class DataClient extends BaseApiClient {
    * Get portfolio summary
    */
   async getPortfolioSummary(): Promise<PortfolioSummary | null> {
-    if (!this.walletAddress) {
-      console.error('Wallet address not set')
-      return null
-    }
+    if (!this.walletAddress) return null
 
     try {
       const positions = await this.getPositions()
@@ -183,10 +174,7 @@ export class DataClient extends BaseApiClient {
     limit?: number
     offset?: number
   } = {}): Promise<UserActivity[]> {
-    if (!this.walletAddress) {
-      console.error('Wallet address not set')
-      return []
-    }
+    if (!this.walletAddress) return []
 
     const { limit = 100, offset = 0 } = options
 
@@ -208,10 +196,7 @@ export class DataClient extends BaseApiClient {
     limit?: number
     offset?: number
   } = {}): Promise<Position[]> {
-    if (!this.walletAddress) {
-      console.error('Wallet address not set')
-      return []
-    }
+    if (!this.walletAddress) return []
 
     const { limit = 100, offset = 0 } = options
 

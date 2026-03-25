@@ -76,11 +76,16 @@ export class TradingService {
     market: Market,
     outcome: 'yes' | 'no',
     amount: number,
-    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number; postOnly?: boolean; limitPrice?: number }
+    options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number; postOnly?: boolean; limitPrice?: number; asset?: string }
   ): Promise<OrderResult> {
-    // Risk management gate (pass marketSlug for per-market concentration check)
-    const riskCheck = riskManager.validateTrade(amount, market.slug)
+    // Reserve capital atomically BEFORE risk check to prevent concurrent overdraw
+    const tradeReservationId = `${market.slug}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    this.inFlightTrades.set(tradeReservationId, amount)
+
+    // Risk management gate — pass asset + strategy for correlation-aware exposure check
+    const riskCheck = riskManager.validateTrade(amount, market.slug, undefined, options?.asset, options?.strategy)
     if (!riskCheck.allowed) {
+      this.inFlightTrades.delete(tradeReservationId)
       console.warn(`[TradingService] BLOCKED by risk check: ${riskCheck.reason}`)
       rejectionTracker.record('risk', 'system', riskCheck.reason)
       activityLogger.logWarning(`Trade blocked by risk manager: ${riskCheck.reason}`)
@@ -95,6 +100,7 @@ export class TradingService {
     const currentPrice = market.outcomePrices[outcomeIndex]
 
     if (!currentPrice) {
+      this.inFlightTrades.delete(tradeReservationId)
       return { success: false, error: 'Invalid market data' }
     }
 
@@ -148,9 +154,10 @@ export class TradingService {
       stopLossPercent: options?.stopLossPercent ?? 0.15,
       takeProfitPercent: options?.takeProfitPercent ?? 0.30,
       strategy: options?.strategy ?? 'llm',
+      asset: options?.asset,
     } : undefined
 
-    return this.executeOrder(orderRequest, gtdMeta)
+    return this.executeOrder(orderRequest, gtdMeta, tradeReservationId)
   }
 
   /**
@@ -243,11 +250,14 @@ export class TradingService {
       stopLossPercent: number
       takeProfitPercent: number
       strategy?: string
+      asset?: string
     },
+    existingTradeId?: string,
   ): Promise<OrderResult> {
     // Pre-flight: CLOB requires $1 minimum for marketable orders.
     const orderDollarValue = request.price * request.size
     if (request.side === 'BUY' && orderDollarValue < 1.00) {
+      if (existingTradeId) this.inFlightTrades.delete(existingTradeId)
       rejectionTracker.record('order_too_small', 'system', `$${orderDollarValue.toFixed(2)} < $1.00 minimum`)
       return {
         success: false,
@@ -255,9 +265,9 @@ export class TradingService {
       }
     }
 
-    // Track in-flight trade value so concurrent trades don't overdraw balance
-    const tradeId = `${request.marketSlug}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-    if (request.side === 'BUY') {
+    // Use existing reservation from placeBet, or create one for direct executeOrder calls (sells)
+    const tradeId = existingTradeId ?? `${request.marketSlug}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    if (!existingTradeId && request.side === 'BUY') {
       this.inFlightTrades.set(tradeId, orderDollarValue)
     }
 
@@ -299,6 +309,9 @@ export class TradingService {
       // Track per-market exposure for concentration limits (dry run too)
       if (request.side === 'BUY') {
         riskManager.recordMarketExposure(request.marketSlug, orderDollarValue)
+        if (gtdMeta?.asset) {
+          riskManager.recordAssetExposure(gtdMeta.asset, gtdMeta.strategy ?? 'unknown', orderDollarValue)
+        }
       }
 
       const dryRunOrderId = `dry-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -346,8 +359,12 @@ export class TradingService {
           this.inFlightTrades.delete(tradeId)
           return { success: false, error: msg }
         }
-      } catch {
-        // Balance check failed — proceed anyway (best-effort pre-flight)
+      } catch (balErr) {
+        // Fail-closed: if we can't verify balance, don't trade
+        const msg = `Balance check failed: ${balErr instanceof Error ? balErr.message : 'unknown error'}`
+        console.error(`[TradingService] ${msg}`)
+        this.inFlightTrades.delete(tradeId)
+        return { success: false, error: msg }
       }
     }
 
@@ -369,6 +386,9 @@ export class TradingService {
           // Track per-market exposure for concentration limits
           if (request.side === 'BUY') {
             riskManager.recordMarketExposure(request.marketSlug, orderDollarValue)
+            if (gtdMeta?.asset) {
+              riskManager.recordAssetExposure(gtdMeta.asset, gtdMeta.strategy ?? 'unknown', orderDollarValue)
+            }
           }
 
           // Query actual fill data if not in response

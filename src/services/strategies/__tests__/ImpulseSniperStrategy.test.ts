@@ -126,7 +126,7 @@ vi.mock('../BtcUpDownStrategy', () => ({
     SOL: { '5m': 'sol-updown-5m-', '15m': 'sol-updown-15m-', '4h': 'sol-updown-4h-' },
     XRP: { '5m': 'xrp-updown-5m-', '15m': 'xrp-updown-15m-', '4h': 'xrp-updown-4h-' },
   },
-  buildHourlySlug: vi.fn().mockReturnValue('bitcoin-up-or-down-february-28-1pm-et'),
+  buildHourlySlug: vi.fn().mockReturnValue('bitcoin-up-or-down-february-28-2026-1pm-et'),
   btcUpDownStrategy: {
     on: vi.fn().mockReturnValue(() => {}),
     emit: vi.fn(),
@@ -880,12 +880,12 @@ describe('ImpulseSniperStrategy', () => {
       expect(result).toBe(false)
     })
 
-    it('returns true when ask moved 3+ cents', () => {
+    it('returns true when ask rose 1.5+ cents (repricing detected)', () => {
       const history = [
         { ask: 0.50, timestamp: Date.now() - 4000 },
-        { ask: 0.51, timestamp: Date.now() - 3000 },
-        { ask: 0.52, timestamp: Date.now() - 2000 },
-        { ask: 0.54, timestamp: Date.now() - 1000 }, // +4c from first
+        { ask: 0.505, timestamp: Date.now() - 3000 },
+        { ask: 0.51, timestamp: Date.now() - 2000 },
+        { ask: 0.52, timestamp: Date.now() - 1000 }, // +2c from reference entry
       ]
       ;(strategy as any).clobAskHistory.set('token-yes', history)
 
@@ -893,17 +893,113 @@ describe('ImpulseSniperStrategy', () => {
       expect(result).toBe(true)
     })
 
-    it('returns false when ask moved less than 3 cents', () => {
+    it('returns true when ask dropped 1.5+ cents (liquidity pulled)', () => {
+      const history = [
+        { ask: 0.52, timestamp: Date.now() - 4000 },
+        { ask: 0.51, timestamp: Date.now() - 3000 },
+        { ask: 0.505, timestamp: Date.now() - 2000 },
+        { ask: 0.50, timestamp: Date.now() - 1000 }, // -2c from reference
+      ]
+      ;(strategy as any).clobAskHistory.set('token-yes', history)
+
+      const result = (strategy as any).hasClobAlreadyMoved('token-yes', 'down')
+      expect(result).toBe(true)
+    })
+
+    it('returns false when ask moved less than 1.5 cents', () => {
       const history = [
         { ask: 0.50, timestamp: Date.now() - 4000 },
         { ask: 0.50, timestamp: Date.now() - 3000 },
-        { ask: 0.51, timestamp: Date.now() - 2000 },
-        { ask: 0.52, timestamp: Date.now() - 1000 }, // +2c from first
+        { ask: 0.505, timestamp: Date.now() - 2000 },
+        { ask: 0.51, timestamp: Date.now() - 1000 }, // +1c from reference
       ]
       ;(strategy as any).clobAskHistory.set('token-yes', history)
 
       const result = (strategy as any).hasClobAlreadyMoved('token-yes', 'up')
       expect(result).toBe(false)
+    })
+  })
+
+  // ==========================================
+  // STALENESS GUARD
+  // ==========================================
+
+  describe('Staleness Guard', () => {
+    function setupMarketAndPrice(askPrice = 0.50): void {
+      const market = createTestMarket()
+      ;(strategy as any).cachedMarkets.set('BTC:1h', {
+        market,
+        yesTokenId: 'token-yes',
+        noTokenId: 'token-no',
+        windowEndMs: Date.now() + 3600_000,
+        durationKey: '1h',
+      })
+      ;(strategy as any).realtimeServiceRef = {
+        subscribeMarket: vi.fn(),
+        getPrice: vi.fn().mockReturnValue({ bid: askPrice - 0.01, ask: askPrice, mid: askPrice - 0.005, spread: 0.01, timestamp: new Date() }),
+      }
+    }
+
+    it('skips trade when impulse is stale (too much time elapsed)', async () => {
+      setupMarketAndPrice(0.50)
+      const emitSpy = vi.spyOn(strategy as any, 'emit')
+      // detectedAt is 5 seconds ago — well past confirmation + 1.5s budget
+      const impulse: any = { asset: 'BTC', direction: 'up', magnitude: 250, startPrice: 97000, endPrice: 97250, detectedAt: Date.now() - 5000 }
+
+      await (strategy as any).executeTrade(impulse)
+
+      expect(mockPlaceBet).not.toHaveBeenCalled()
+      expect(emitSpy).toHaveBeenCalledWith('impulseSkipped', expect.objectContaining({
+        reason: 'stale_impulse',
+      }))
+    })
+
+    it('allows trade when impulse is fresh', async () => {
+      setupMarketAndPrice(0.50)
+      // detectedAt is just now — within staleness budget
+      const impulse: any = { asset: 'BTC', direction: 'up', magnitude: 250, startPrice: 97000, endPrice: 97250, detectedAt: Date.now() }
+
+      await (strategy as any).executeTrade(impulse)
+
+      expect(mockPlaceBet).toHaveBeenCalled()
+    })
+  })
+
+  // ==========================================
+  // VOL-ADJUSTED THRESHOLD
+  // ==========================================
+
+  describe('Vol-Adjusted Threshold', () => {
+    it('returns base threshold when buffer too short', () => {
+      const buffer = Array.from({ length: 10 }, (_, i) => ({ price: 97000, timestamp: Date.now() - (10 - i) * 1000 }))
+      const result = (strategy as any).applyVolAdjustedThreshold(200, buffer)
+      expect(result).toBe(200)
+    })
+
+    it('raises threshold in choppy/noisy market', () => {
+      // Mix of small and large changes creates high coefficient of variation
+      // Pattern: mostly small moves with occasional large spikes
+      const prices = [97000]
+      for (let i = 1; i < 30; i++) {
+        const spike = i % 5 === 0 ? (i % 2 === 0 ? 200 : -200) : (i % 2 === 0 ? 2 : -2)
+        prices.push(prices[i - 1] + spike)
+      }
+      const buffer = prices.map((price, i) => ({
+        price,
+        timestamp: Date.now() - (30 - i) * 1000,
+      }))
+      const result = (strategy as any).applyVolAdjustedThreshold(200, buffer)
+      expect(result).toBeGreaterThan(200)
+    })
+
+    it('returns base threshold in normal volatility', () => {
+      // Steady uptrend — moderate, consistent changes
+      const buffer = Array.from({ length: 30 }, (_, i) => ({
+        price: 97000 + i * 5,
+        timestamp: Date.now() - (30 - i) * 1000,
+      }))
+      const result = (strategy as any).applyVolAdjustedThreshold(200, buffer)
+      expect(result).toBe(200)
     })
   })
 

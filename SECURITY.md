@@ -23,7 +23,7 @@ If you discover a security vulnerability in AlphaPolyBot, please report it respo
 
 ## Secure Development Practices
 
-- **Wallet credentials** are stored in encrypted localStorage via `secureStorage` with AES-GCM
+- **Wallet credentials** must be entered securely in the Settings UI or via hardware wallet/KMS. Never store secrets in env files or source control. If localStorage is used, encrypt via `secureStorage` with AES-GCM.
 - **API keys** are stored in Zustand persist (browser localStorage) — use `.env` for server-side keys
 - **CSP headers** are configured in production (`netlify.toml`) and testable via `npm run dev:strict-csp`
 - **No eval()** — Vite build uses esbuild transform, no runtime code generation

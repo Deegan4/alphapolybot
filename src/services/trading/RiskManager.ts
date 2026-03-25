@@ -1,6 +1,7 @@
 import { activityLogger } from './ActivityLogger'
 import { useWalletStore } from '@/stores/walletStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useBalanceHistoryStore } from '@/stores/balanceHistoryStore'
 
 // ==========================================
 // TYPES
@@ -30,6 +31,7 @@ export type RiskCode =
   | 'MAX_DRAWDOWN'
   | 'MARKET_CONCENTRATION'
   | 'CATEGORY_CONCENTRATION'
+  | 'CORRELATED_EXPOSURE'
 
 export interface RiskCheckResult {
   allowed: boolean
@@ -52,13 +54,13 @@ export interface RiskManagerStatus {
 // ==========================================
 
 const DEFAULT_CONFIG: RiskManagerConfig = {
-  dailyLossLimit: 2,        // $2/day = 20% of $10 bankroll
-  weeklyLossLimit: 5,       // $5/week = 50% max weekly drawdown
-  maxTradesPerHour: 15,     // Fewer trades = less fee drag at small size
-  consecutiveFailureLimit: 3, // Trip faster — preserve capital
+  dailyLossLimit: 3,        // $3/day = 15% of $20 bankroll
+  weeklyLossLimit: 6,       // $6/week = 30% of $20
+  maxTradesPerHour: 15,     // Fewer trades = less variance on small bankroll
+  consecutiveFailureLimit: 3, // Tight circuit breaker
   minBalanceForTrade: 1,    // $1 CLOB minimum
   minMaticForGas: 0.01,
-  maxDrawdownPercent: 0.30,       // 30% drawdown triggers emergency stop
+  maxDrawdownPercent: 0.25,       // 25% drawdown triggers emergency stop ($5 from $20 peak)
   maxPerMarketExposure: 0.50,     // 50% of capital max per market (was 20% — too tight for small bankrolls)
   maxCategoryExposure: 0.70,      // 70% of capital max per category (was 40% — BTC markets are same category)
   enabled: true,
@@ -90,6 +92,7 @@ export class RiskManager {
   // Cross-strategy: per-underlying-asset exposure (BTC, ETH, SOL, XRP)
   private assetExposure = new Map<string, number>() // asset → total USD across all strategies
   private strategyExposure = new Map<string, number>() // strategyId → total USD exposure
+  private strategyAssetExposure = new Map<string, number>() // "strategyId::asset" → USD (for correlation counting)
   // Drawdown throttle: reduce scan frequency after consecutive losses
   private recentLosses = 0
   private lastThrottleReset = Date.now()
@@ -149,7 +152,7 @@ export class RiskManager {
    * Pre-trade validation gate (synchronous)
    * Checks are ordered cheapest-first for fast rejection
    */
-  validateTrade(tradeAmountUSDC: number, conditionId?: string, category?: string): RiskCheckResult {
+  validateTrade(tradeAmountUSDC: number, conditionId?: string, category?: string, asset?: string, strategyId?: string): RiskCheckResult {
     // Risk management disabled: skip all checks
     if (!this.config.enabled) {
       return { allowed: true }
@@ -214,8 +217,12 @@ export class RiskManager {
       }
     }
 
-    // 5. Read wallet balance — used by drawdown, concentration, and balance checks below.
-    const { balance: currentBalance } = useWalletStore.getState()
+    // 5. Read balance — wallet in live mode, paper balance in dry run.
+    const settings = useSettingsStore.getState()
+    const isDryRun = settings.dryRun
+    const currentBalance = isDryRun
+      ? (useBalanceHistoryStore.getState().simulatedBalance || settings.paperBalance)
+      : useWalletStore.getState().balance
     const reserved = this.capitalReservationFns.reduce((sum, fn) => sum + (fn() ?? 0), 0)
     const tradeable = currentBalance - reserved
 
@@ -260,6 +267,29 @@ export class RiskManager {
           allowed: false,
           reason: `Category '${category}' concentration: $${(existingCatExposure + tradeAmountUSDC).toFixed(2)} would be ${(newCatRatio * 100).toFixed(0)}% of capital (max ${(this.config.maxCategoryExposure * 100).toFixed(0)}%)`,
           riskCode: 'CATEGORY_CONCENTRATION',
+        }
+      }
+    }
+
+    // 5d. Cross-strategy asset correlation check — caps total exposure to any single
+    // underlying asset (e.g., BTC) across ALL strategies. Tighter than category check
+    // because multiple strategies trading BTC-derived markets are effectively one bet.
+    if (asset) {
+      const assetCheck = this.checkAssetConcentration(asset, tradeAmountUSDC)
+      if (!assetCheck.allowed) {
+        return { ...assetCheck, riskCode: 'CORRELATED_EXPOSURE' }
+      }
+      // Track strategy-level exposure for diagnostics
+      if (strategyId) {
+        const stratExisting = this.strategyExposure.get(strategyId) ?? 0
+        const stratRatio = (stratExisting + tradeAmountUSDC) / (currentBalance > 0 ? currentBalance : 1)
+        if (stratRatio > 0.40) {
+          return {
+            allowed: false,
+            reason: `Strategy '${strategyId}' concentration: $${(stratExisting + tradeAmountUSDC).toFixed(2)} ` +
+              `would be ${(stratRatio * 100).toFixed(0)}% of capital (max 40%)`,
+            riskCode: 'CORRELATED_EXPOSURE',
+          }
         }
       }
     }
@@ -480,6 +510,10 @@ export class RiskManager {
     this.assetExposure.set(asset, existing + amountUSDC)
     const stratExisting = this.strategyExposure.get(strategyId) ?? 0
     this.strategyExposure.set(strategyId, stratExisting + amountUSDC)
+    // Composite key for correlation counting: which strategies are on which assets
+    const compositeKey = `${strategyId}::${asset}`
+    const compositeExisting = this.strategyAssetExposure.get(compositeKey) ?? 0
+    this.strategyAssetExposure.set(compositeKey, compositeExisting + amountUSDC)
   }
 
   /**
@@ -493,30 +527,85 @@ export class RiskManager {
     const stratRemaining = (this.strategyExposure.get(strategyId) ?? 0) - amountUSDC
     if (stratRemaining <= 0) this.strategyExposure.delete(strategyId)
     else this.strategyExposure.set(strategyId, stratRemaining)
+
+    const compositeKey = `${strategyId}::${asset}`
+    const compositeRemaining = (this.strategyAssetExposure.get(compositeKey) ?? 0) - amountUSDC
+    if (compositeRemaining <= 0) this.strategyAssetExposure.delete(compositeKey)
+    else this.strategyAssetExposure.set(compositeKey, compositeRemaining)
   }
 
   /**
    * Check if a new trade would exceed per-asset correlation limits.
-   * Default cap: 80% of capital can be exposed to any single underlying asset.
+   *
+   * The cap is DYNAMIC based on how many strategies are already exposed to this asset:
+   * - 1 strategy on the asset: 60% cap (single-strategy focus is fine)
+   * - 2 strategies on the asset: 45% cap (correlated — tighten)
+   * - 3+ strategies on the asset: 35% cap (heavily correlated — aggressive limit)
+   *
+   * This replaces the flat 80% cap. The intuition: if 3 strategies all bet BTC-up
+   * and BTC drops, you lose 3x what any single strategy would lose.
+   *
+   * Can be overridden via maxAssetExposure setting in settingsStore.
    */
-  checkAssetConcentration(asset: string, amountUSDC: number, maxAssetExposure = 0.80): RiskCheckResult {
+  checkAssetConcentration(asset: string, amountUSDC: number, maxAssetExposureOverride?: number): RiskCheckResult {
     if (!this.config.enabled) return { allowed: true }
 
-    const { balance: currentBalance } = useWalletStore.getState()
+    const settings = useSettingsStore.getState()
+    const isDryRun = settings.dryRun
+    const currentBalance = isDryRun
+      ? (useBalanceHistoryStore.getState().simulatedBalance || settings.paperBalance)
+      : useWalletStore.getState().balance
     if (currentBalance <= 0) return { allowed: true }
+
+    // Count how many distinct strategies have exposure to this asset
+    const strategiesOnAsset = this.getStrategiesOnAsset(asset)
+    const strategyCount = strategiesOnAsset.length
+
+    // Dynamic cap: tightens as more strategies pile onto the same asset
+    // maxAssetExposure=0 means "use dynamic caps", any positive value overrides
+    const settingOverride = settings.maxAssetExposure > 0 ? settings.maxAssetExposure : undefined
+    const dynamicCap = maxAssetExposureOverride
+      ?? settingOverride
+      ?? this.getCorrelationAdjustedCap(strategyCount)
 
     const existingExposure = this.assetExposure.get(asset) ?? 0
     const newRatio = (existingExposure + amountUSDC) / currentBalance
 
-    if (newRatio > maxAssetExposure) {
+    if (newRatio > dynamicCap) {
       return {
         allowed: false,
-        reason: `Asset '${asset}' concentration: $${(existingExposure + amountUSDC).toFixed(2)} ` +
-          `would be ${(newRatio * 100).toFixed(0)}% of capital (max ${(maxAssetExposure * 100).toFixed(0)}%)`,
-        riskCode: 'CATEGORY_CONCENTRATION',
+        reason: `Asset '${asset}' correlated exposure: $${(existingExposure + amountUSDC).toFixed(2)} ` +
+          `would be ${(newRatio * 100).toFixed(0)}% of capital ` +
+          `(max ${(dynamicCap * 100).toFixed(0)}% with ${strategyCount} strategies on ${asset})`,
+        riskCode: 'CORRELATED_EXPOSURE',
       }
     }
     return { allowed: true }
+  }
+
+  /**
+   * Dynamic cap based on strategy concentration on the same asset.
+   * More strategies = tighter cap, because losses are correlated.
+   */
+  private getCorrelationAdjustedCap(strategyCount: number): number {
+    if (strategyCount <= 1) return 0.60  // Single strategy: 60%
+    if (strategyCount === 2) return 0.45 // Two strategies: 45%
+    return 0.35                          // Three+: 35%
+  }
+
+  /**
+   * Get list of strategy IDs that currently have exposure to a given asset.
+   */
+  private getStrategiesOnAsset(asset: string): string[] {
+    const strategies: string[] = []
+    // strategyAssetExposure tracks per-strategy-per-asset amounts
+    for (const [key, amount] of this.strategyAssetExposure) {
+      const [stratId, assetKey] = key.split('::')
+      if (assetKey === asset && amount > 0) {
+        strategies.push(stratId)
+      }
+    }
+    return strategies
   }
 
   /**

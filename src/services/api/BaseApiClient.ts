@@ -228,8 +228,11 @@ export class BaseApiClient {
         // Payment required / credits exhausted — not a bug, suppress noisy logging.
         // Callers already handle this gracefully (circuit breakers, empty enrichment, etc.)
         console.debug(`API 402 (credits exhausted): ${error.config?.url}`)
+      } else if (status === 403) {
+        // Cloudflare WAF block or auth rejection — log URL only, not the full HTML page
+        console.warn(`API 403 Forbidden: ${error.config?.method?.toUpperCase()} ${error.config?.baseURL}${error.config?.url}`)
       } else {
-        console.error(`API Error ${status}:`, data)
+        console.error(`API Error ${status}:`, typeof data === 'string' && data.length > 500 ? data.slice(0, 200) + '...' : data)
       }
 
       // Create a more descriptive error
