@@ -125,7 +125,7 @@ export class WalletService {
     try {
       // Load secret from secureStorage
       const { secureStorage } = await import('@/utils/secureStorage')
-      const secretKey = await secureStorage.get<string>(`wallet-secret-${wallet.id}`)
+      const secretKey = await secureStorage.get<string>(`wallet-secret-${wallet.id}`, true)
       if (!secretKey) {
         this.updateState({ error: `No stored credentials for wallet "${wallet.label}"` })
         return false

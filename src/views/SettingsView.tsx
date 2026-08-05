@@ -1643,7 +1643,7 @@ const BtcUpDownSettings: React.FC = () => {
   } = useSettingsStore()
 
   // OpenRouter key may live in store, localStorage, or env var
-  const hasOpenRouterKey = !!(openRouterApiKey || localStorage.getItem('OPENROUTER_API_KEY') || import.meta.env.VITE_OPENROUTER_API_KEY)
+  const hasOpenRouterKey = !!(openRouterApiKey || import.meta.env.VITE_OPENROUTER_API_KEY)
 
   const [diagnosing, setDiagnosing] = useState(false)
   const [diagResult, setDiagResult] = useState<string | null>(null)
@@ -2377,20 +2377,32 @@ const APISettings: React.FC = () => {
     pmUsKeyId, pmUsSecretKey,
     polyBacktestApiKey, setPolyBacktestApiKey,
   } = useSettingsStore()
-  const [openRouterKey, setOpenRouterKey] = useState(openRouterApiKey || localStorage.getItem('OPENROUTER_API_KEY') || '')
+  const [openRouterKey, setOpenRouterKey] = useState(openRouterApiKey || '')
+  // Model choice isn't a secret — plain localStorage is fine for it.
   const [llmModel, setLlmModel] = useState(localStorage.getItem('OPENROUTER_MODEL') || 'meta-llama/llama-3.1-70b-instruct')
-  const [tavilyKey, setTavilyKey] = useState(localStorage.getItem('TAVILY_API_KEY') || '')
+  const [tavilyKey, setTavilyKey] = useState('')
   const [polyBacktestKey, setPolyBacktestKey] = useState(polyBacktestApiKey || '')
   const [saved, setSaved] = useState(false)
 
-  const handleSave = () => {
-    // Save to localStorage (legacy support)
-    localStorage.setItem('OPENROUTER_API_KEY', openRouterKey)
-    localStorage.setItem('TAVILY_API_KEY', tavilyKey)
+  // Tavily has no slot in the settings store, so it lives in secureStorage
+  // (encrypted) and loads asynchronously.
+  useEffect(() => {
+    let cancelled = false
+    import('@/utils/secureStorage')
+      .then(({ secureStorage }) => secureStorage.get<string>('tavily-api-key', true))
+      .then((key) => { if (!cancelled && key) setTavilyKey(key) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
-    // Save to settings store (primary storage)
+  const handleSave = () => {
+    // Credentials go to the encrypted settings store — never plain localStorage.
     setOpenRouterApiKey(openRouterKey)
     setPolyBacktestApiKey(polyBacktestKey.trim())
+
+    import('@/utils/secureStorage')
+      .then(({ secureStorage }) => secureStorage.set('tavily-api-key', tavilyKey, { encrypt: true }))
+      .catch(() => {})
 
     // Apply model selection
     localStorage.setItem('OPENROUTER_MODEL', llmModel)
