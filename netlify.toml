@@ -2,6 +2,12 @@
   command = "npm ci && npm run build"
   publish = "dist"
 
+# Landing page (static, lives in public/landing) — must precede the SPA catch-all
+[[redirects]]
+  from = "/landing"
+  to = "/landing/index.html"
+  status = 200
+
 # SPA redirect — all routes to index.html
 [[redirects]]
   from = "/*"
