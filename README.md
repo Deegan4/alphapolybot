@@ -45,6 +45,7 @@
 
 ## Table of Contents
 
+- [Landing Page](#landing-page)
 - [Architecture](#architecture)
 - [Strategies](#strategies)
 - [Risk Infrastructure](#risk-infrastructure)
@@ -83,6 +84,16 @@ Dry run mode, penny trader, wallet management, strategy parameters
 </td>
 </tr>
 </table>
+
+## Landing Page
+
+A standalone project landing page lives at [`public/landing/index.html`](public/landing/index.html) — a single self-contained file (no build step, no dependencies) that ships with the app and is served at **`/landing`** on the deployed site.
+
+```bash
+npm run dev        # then open http://localhost:4000/landing/
+```
+
+It covers the eight strategies, the layered architecture, the risk stack, the test suite breakdown, and quick start — with an animated Matrix rain hero, a live boot-log terminal, and a screenshot lightbox. Content stays fully visible without JavaScript, and all motion respects `prefers-reduced-motion`.
 
 ## Architecture
 

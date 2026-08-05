@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>document.documentElement.className+=' js'</script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AlphaPolyBot — Autonomous Polymarket Trading Engine</title>
+<meta name="description" content="A browser-based trading engine running eight independent strategies on Polymarket prediction markets — LLM analysis, Frank-Wolfe arbitrage, microstructure momentum, dual-side maker hedging, and whale copy trading." />
+<meta name="theme-color" content="#000a00" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000a00'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='20' font-weight='bold' fill='%2300ff00' text-anchor='middle'%3E%26gt;%3C/text%3E%3C/svg%3E" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:title" content="AlphaPolyBot — Autonomous Polymarket Trading Engine" />
+<meta property="og:description" content="Eight independent strategies. 511 tests. Runs entirely in your browser, signs its own orders on Polygon." />
+<meta property="og:image" content="screenshots/dashboard-main.png" />
+<meta name="twitter:card" content="summary_large_image" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<style>
+/* ─────────────────────────────  TOKENS  ───────────────────────────── */
+:root{
+  --bg:#000403;
+  --bg-1:#040a06;
+  --bg-2:#070f0a;
+  --card:rgba(8,18,12,.72);
+  --line:#12301c;
+  --line-2:#1d4a2c;
+  --green:#00ff6a;
+  --green-dim:#00b74c;
+  --cyan:#00ffff;
+  --amber:#ffb020;
+  --red:#ff2d55;
+  --purple:#b46bff;
+  --txt:#d6ffe6;
+  --txt-2:#7fae92;
+  --txt-3:#4d7861;
+  --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  --sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --maxw:1180px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);
+  line-height:1.6;overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+/* subtle scanline + vignette over the whole page */
+body::after{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:9;
+  background:
+    repeating-linear-gradient(180deg,rgba(0,255,106,.026) 0 1px,transparent 1px 3px),
+    radial-gradient(120% 80% at 50% 0%,transparent 40%,rgba(0,0,0,.7) 100%);
+  mix-blend-mode:screen;opacity:.55;
+}
+img{max-width:100%;display:block}
+a{color:inherit;text-decoration:none}
+::selection{background:rgba(0,255,106,.28);color:#eaffef}
+
+/* scrollbar */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:#020604}
+::-webkit-scrollbar-thumb{background:#14361f;border-radius:6px}
+::-webkit-scrollbar-thumb:hover{background:#1d5330}
+
+/* ─────────────────────────────  PRIMITIVES  ───────────────────────────── */
+.wrap{width:100%;max-width:var(--maxw);margin:0 auto;padding:0 24px}
+.mono{font-family:var(--mono)}
+.eyebrow{
+  font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;
+  color:var(--green-dim);display:flex;align-items:center;gap:12px;margin:0 0 18px;
+}
+.eyebrow::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line-2),transparent)}
+h1,h2,h3{line-height:1.1;letter-spacing:-.02em;margin:0}
+h2.sec{font-size:clamp(28px,4.4vw,44px);font-weight:800;margin:0 0 14px}
+.sec-sub{color:var(--txt-2);max-width:62ch;font-size:16px;margin:0 0 44px}
+.grad{
+  background:linear-gradient(100deg,#eaffef 0%,var(--green) 42%,var(--cyan) 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+section{padding:104px 0;position:relative}
+.hr{height:1px;background:linear-gradient(90deg,transparent,var(--line-2) 25%,var(--line-2) 75%,transparent)}
+
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:14px;
+  backdrop-filter:blur(8px);position:relative;overflow:hidden;
+}
+.card::before{
+  content:"";position:absolute;inset:0 0 auto;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(0,255,106,.35),transparent);
+}
+
+.btn{
+  display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);font-size:13px;
+  font-weight:500;padding:13px 22px;border-radius:9px;border:1px solid var(--line-2);
+  color:var(--txt);background:rgba(0,255,106,.05);cursor:pointer;
+  transition:transform .18s ease,box-shadow .25s ease,background .25s ease,border-color .25s ease;
+}
+.btn:hover{transform:translateY(-2px);background:rgba(0,255,106,.11);border-color:var(--green-dim);
+  box-shadow:0 0 0 1px rgba(0,255,106,.2),0 10px 34px -12px rgba(0,255,106,.5)}
+.btn-primary{
+  background:linear-gradient(180deg,#00ff6a,#00c250);color:#00170a;border-color:transparent;font-weight:700;
+  box-shadow:0 8px 28px -12px rgba(0,255,106,.8);
+}
+.btn-primary:hover{background:linear-gradient(180deg,#4dff96,#00d95a);box-shadow:0 14px 40px -12px rgba(0,255,106,.9)}
+.btn svg{width:15px;height:15px;flex:none}
+
+.tag{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+  padding:4px 9px;border-radius:5px;border:1px solid var(--line-2);color:var(--green-dim);
+  background:rgba(0,255,106,.05);white-space:nowrap;
+}
+
+/* ─────────────────────────────  NAV  ───────────────────────────── */
+header.nav{
+  position:fixed;top:0;left:0;right:0;z-index:60;
+  border-bottom:1px solid transparent;transition:background .3s,border-color .3s,backdrop-filter .3s;
+}
+header.nav.stuck{background:rgba(2,7,4,.82);backdrop-filter:blur(14px);border-bottom-color:var(--line)}
+.nav-in{display:flex;align-items:center;gap:28px;height:62px}
+.brand{font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+.brand .caret{color:var(--green);animation:blink 1.15s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.nav-links{display:flex;gap:26px;margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--txt-2)}
+.nav-links a{transition:color .2s}
+.nav-links a:hover,.nav-links a.active{color:var(--green)}
+.nav-cta{margin-left:8px}
+@media(max-width:860px){.nav-links{display:none}.nav-cta{margin-left:auto}}
+
+/* ─────────────────────────────  HERO  ───────────────────────────── */
+.hero{min-height:100svh;display:flex;align-items:center;padding:106px 0 64px;overflow:hidden}
+#rain{position:absolute;inset:0;width:100%;height:100%;opacity:.22;z-index:0}
+.hero::after{
+  content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+  background:
+    radial-gradient(60% 50% at 18% 22%,rgba(0,255,106,.13),transparent 70%),
+    radial-gradient(45% 40% at 88% 72%,rgba(0,255,255,.09),transparent 70%),
+    linear-gradient(180deg,transparent 55%,var(--bg) 100%);
+}
+.hero-in{position:relative;z-index:2;display:grid;grid-template-columns:1.02fr .98fr;gap:56px;align-items:center}
+@media(max-width:980px){.hero-in{grid-template-columns:1fr;gap:44px}}
+.hero h1{font-size:clamp(38px,5.2vw,62px);font-weight:800;margin:0 0 18px}
+.hero h1 span{display:block;white-space:nowrap}
+.hero p.lede{font-size:clamp(15px,1.5vw,17.5px);color:var(--txt-2);max-width:56ch;margin:0 0 28px}
+.hero p.lede b{color:var(--txt);font-weight:600}
+.hero-cta{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:34px}
+@media(max-width:660px){
+  .hero h1 span{white-space:normal}
+  .hero h1{font-size:clamp(31px,8.4vw,44px)}
+  .eyebrow{letter-spacing:.18em;font-size:10px}
+  #rain{opacity:.13}
+  section{padding:78px 0}
+}
+.pill-row{display:flex;flex-wrap:wrap;gap:8px}
+
+.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(0,255,106,.7);animation:pulse 2s infinite}
+@keyframes pulse{
+  0%{box-shadow:0 0 0 0 rgba(0,255,106,.6)}
+  70%{box-shadow:0 0 0 9px rgba(0,255,106,0)}
+  100%{box-shadow:0 0 0 0 rgba(0,255,106,0)}
+}
+
+/* terminal */
+.term{border-radius:13px;border:1px solid var(--line-2);background:rgba(1,7,3,.9);
+  box-shadow:0 30px 90px -40px rgba(0,255,106,.55),inset 0 1px 0 rgba(0,255,106,.09);overflow:hidden}
+.term-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(0,255,106,.06),transparent)}
+.term-bar .dots{display:flex;gap:6px}
+.term-bar i{width:10px;height:10px;border-radius:50%;display:block}
+.term-title{font-family:var(--mono);font-size:11px;color:var(--txt-3);margin-left:6px}
+.term-status{margin-left:auto;display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px;color:var(--green)}
+.term-body{font-family:var(--mono);font-size:12.4px;line-height:1.72;padding:16px 16px 20px;
+  height:300px;overflow:hidden;white-space:pre-wrap;word-break:break-word}
+@media(max-width:560px){
+  .term-title{display:none}
+  .term-status{white-space:nowrap}
+  .term-body{font-size:11px;height:250px}
+}
+.term-body .ln{display:block}
+.c-g{color:var(--green)}.c-c{color:var(--cyan)}.c-a{color:var(--amber)}
+.c-r{color:var(--red)}.c-p{color:var(--purple)}.c-d{color:var(--txt-3)}.c-w{color:#eaffef}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--green);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+
+/* stat strip */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:13px;overflow:hidden;margin-top:56px;position:relative;z-index:2}
+@media(max-width:720px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat{background:var(--bg-1);padding:22px 20px;transition:background .25s}
+.stat:hover{background:var(--bg-2)}
+.stat .n{font-family:var(--mono);font-size:clamp(26px,3.6vw,36px);font-weight:700;color:var(--green);
+  text-shadow:0 0 22px rgba(0,255,106,.45);letter-spacing:-.02em}
+.stat .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-3);margin-top:6px}
+
+/* ─────────────────────────────  STRATEGY GRID  ───────────────────────────── */
+.strat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(316px,1fr));gap:16px}
+.strat{padding:20px;transition:transform .25s ease,border-color .25s ease,box-shadow .3s ease}
+.strat:hover{transform:translateY(-4px);border-color:var(--line-2);box-shadow:0 18px 50px -26px rgba(0,255,106,.55)}
+.strat-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.strat-key{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.06em;padding:4px 7px;border-radius:5px;
+  border:1px solid currentColor;opacity:.95}
+.strat h3{font-size:16px;font-weight:700;letter-spacing:-.01em}
+.strat .num{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--txt-3)}
+.strat p{font-size:13.4px;color:var(--txt-2);margin:0 0 14px;min-height:60px}
+.meter{height:5px;border-radius:3px;background:#0c2214;overflow:hidden;margin-bottom:9px}
+.meter i{display:block;height:100%;width:0;border-radius:3px;transition:width 1.3s cubic-bezier(.2,.8,.2,1)}
+.strat-foot{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--txt-3);gap:10px}
+.strat-foot span:last-child{color:var(--txt-2);text-align:right}
+
+/* ─────────────────────────────  ARCHITECTURE  ───────────────────────────── */
+.arch{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--bg-1)}
+.layer{padding:16px 20px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:170px 1fr;gap:18px;align-items:center;
+  transition:background .25s}
+.layer:last-child{border-bottom:0}
+.layer:hover{background:rgba(0,255,106,.035)}
+.layer-name{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--green-dim)}
+.layer-items{display:flex;flex-wrap:wrap;gap:7px}
+.chip{font-family:var(--mono);font-size:11.5px;padding:5px 10px;border-radius:6px;background:var(--bg-2);
+  border:1px solid var(--line);color:var(--txt-2);transition:color .2s,border-color .2s,transform .2s}
+.chip:hover{color:var(--green);border-color:var(--line-2);transform:translateY(-1px)}
+@media(max-width:720px){.layer{grid-template-columns:1fr;gap:10px}}
+
+/* ─────────────────────────────  RISK  ───────────────────────────── */
+.risk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:16px}
+.risk{padding:18px 18px 20px}
+.risk .ico{font-family:var(--mono);font-size:12px;color:var(--red);border:1px solid rgba(255,45,85,.35);
+  background:rgba(255,45,85,.07);border-radius:6px;padding:3px 8px;display:inline-block;margin-bottom:11px}
+.risk h3{font-size:14.5px;margin-bottom:7px}
+.risk p{margin:0;font-size:13.2px;color:var(--txt-2)}
+
+/* ─────────────────────────────  SHOTS  ───────────────────────────── */
+.shots{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
+@media(max-width:820px){.shots{grid-template-columns:1fr}}
+.shot{
+  cursor:zoom-in;padding:0;display:block;width:100%;text-align:left;
+  font:inherit;color:var(--txt);
+  transition:transform .3s ease,box-shadow .35s ease,border-color .3s;
+}
+.shot:hover{transform:translateY(-5px) scale(1.006);border-color:var(--line-2);box-shadow:0 26px 70px -30px rgba(0,255,106,.55)}
+.shot img{border-bottom:1px solid var(--line);aspect-ratio:16/10;object-fit:cover;object-position:top center}
+.shot .cap{padding:14px 16px 16px}
+.shot .cap h3{font-size:14.5px;margin-bottom:4px}
+.shot .cap p{margin:0;font-size:12.8px;color:var(--txt-2)}
+.shot.wide{grid-column:1/-1}
+.shot.wide img{aspect-ratio:21/8}
+
+.lb{position:fixed;inset:0;z-index:100;background:rgba(0,4,2,.95);display:none;align-items:center;justify-content:center;padding:28px;
+  backdrop-filter:blur(6px)}
+.lb.open{display:flex}
+.lb img{max-width:min(1300px,96vw);max-height:88vh;width:auto;border:1px solid var(--line-2);border-radius:10px;
+  box-shadow:0 40px 120px -30px rgba(0,255,106,.35)}
+.lb .close{position:absolute;top:20px;right:24px;font-family:var(--mono);font-size:13px;color:var(--txt-2);
+  border:1px solid var(--line-2);background:rgba(0,0,0,.5);border-radius:8px;padding:8px 13px;cursor:pointer}
+.lb .close:hover{color:var(--green)}
+
+/* ─────────────────────────────  TESTS  ───────────────────────────── */
+.test-wrap{display:grid;grid-template-columns:1fr 340px;gap:26px;align-items:start}
+@media(max-width:900px){.test-wrap{grid-template-columns:1fr}}
+.test-rows{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--bg-1)}
+.trow{display:grid;grid-template-columns:190px 1fr 52px;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid #0d2213;
+  font-family:var(--mono);font-size:12px}
+.trow:last-child{border-bottom:0}
+.trow:hover{background:rgba(0,255,106,.035)}
+.trow .name{color:var(--txt)}
+.trow .bar{height:5px;background:#0c2214;border-radius:3px;overflow:hidden}
+.trow .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--green-dim),var(--green));border-radius:3px;
+  transition:width 1.1s cubic-bezier(.2,.8,.2,1)}
+.trow .cnt{text-align:right;color:var(--green)}
+@media(max-width:620px){.trow{grid-template-columns:1fr 44px}.trow .bar{display:none}}
+.test-side .card{padding:22px}
+.big-num{font-family:var(--mono);font-size:52px;font-weight:700;color:var(--green);letter-spacing:-.03em;
+  text-shadow:0 0 30px rgba(0,255,106,.4);line-height:1}
+.kv{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;padding:9px 0;border-bottom:1px solid #0d2213}
+.kv:last-child{border-bottom:0}
+.kv span:first-child{color:var(--txt-3)}
+.kv span:last-child{color:var(--txt)}
+
+/* ─────────────────────────────  QUICKSTART  ───────────────────────────── */
+.qs{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.qs>*{min-width:0}
+@media(max-width:900px){.qs{grid-template-columns:1fr}}
+.code{position:relative;border:1px solid var(--line);border-radius:12px;background:#020705;overflow:hidden}
+.code-bar{display:flex;align-items:center;padding:9px 14px;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:11px;color:var(--txt-3);letter-spacing:.1em;text-transform:uppercase}
+.copy{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--txt-2);background:transparent;
+  border:1px solid var(--line-2);border-radius:5px;padding:3px 9px;cursor:pointer;transition:color .2s,border-color .2s}
+.copy:hover{color:var(--green);border-color:var(--green-dim)}
+.code{min-width:0}
+.code pre{margin:0;padding:16px;font-family:var(--mono);font-size:12.6px;line-height:1.85;overflow-x:auto;color:var(--txt)}
+@media(max-width:520px){.code pre{font-size:11.4px;padding:14px}}
+.code pre .p{color:var(--green)}.code pre .c{color:var(--txt-3)}.code pre .v{color:var(--cyan)}
+.steps{counter-reset:s;list-style:none;padding:0;margin:0}
+.steps li{counter-increment:s;position:relative;padding:0 0 16px 42px;font-size:14px;color:var(--txt-2)}
+.steps li::before{content:counter(s,decimal-leading-zero);position:absolute;left:0;top:0;font-family:var(--mono);font-size:11px;
+  color:var(--green);border:1px solid var(--line-2);border-radius:6px;padding:3px 7px;background:rgba(0,255,106,.05)}
+.steps li b{color:var(--txt);font-weight:600}
+.warn{border:1px solid rgba(255,176,32,.32);background:rgba(255,176,32,.06);border-radius:11px;padding:14px 16px;
+  font-size:13.2px;color:#f4dfae;margin-top:6px}
+.warn b{color:var(--amber)}
+
+/* ─────────────────────────────  CTA + FOOTER  ───────────────────────────── */
+.cta{text-align:center;padding:110px 0 100px;position:relative;overflow:hidden}
+.cta::before{content:"";position:absolute;inset:0;
+  background:radial-gradient(50% 60% at 50% 40%,rgba(0,255,106,.12),transparent 70%)}
+.cta-in{position:relative;z-index:1}
+.cta h2{font-size:clamp(30px,5vw,52px);font-weight:800;margin-bottom:16px}
+.cta p{color:var(--txt-2);max-width:52ch;margin:0 auto 30px}
+footer{border-top:1px solid var(--line);padding:40px 0 54px;background:#010402}
+.foot{display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;
+  font-family:var(--mono);font-size:11.5px;color:var(--txt-3)}
+.foot a:hover{color:var(--green)}
+.disclaimer{border:1px solid rgba(255,45,85,.28);background:rgba(255,45,85,.05);border-radius:11px;padding:16px 18px;
+  font-size:12.8px;color:#f0c2ce;margin-bottom:28px}
+.disclaimer b{color:var(--red)}
+
+/* ─────────────────────────────  REVEAL  ───────────────────────────── */
+/* only hide pre-reveal when JS is running — no-JS visitors get the full page */
+html.js .rv{opacity:0;transform:translateY(22px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1)}
+html.js .rv.in{opacity:1;transform:none}
+html:not(.js) [data-w]{width:100%}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001s!important;animation-iteration-count:1!important;transition-duration:.001s!important}
+  html{scroll-behavior:auto}
+  .rv{opacity:1;transform:none}
+  #rain{display:none}
+  body::after{opacity:.25;background:radial-gradient(120% 80% at 50% 0%,transparent 40%,rgba(0,0,0,.7) 100%)}
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════  NAV  ══════════════════════════ -->
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top">&gt;&nbsp;AlphaPolyBot<span class="caret">_</span></a>
+    <nav class="nav-links">
+      <a href="#strategies">Strategies</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#risk">Risk</a>
+      <a href="#interface">Interface</a>
+      <a href="#tests">Tests</a>
+      <a href="#start">Quick start</a>
+    </nav>
+    <a class="btn nav-cta" href="https://github.com/Deegan4/alphapolybot" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.5 7.5 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.74.54 1.49l-.01 2.21c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<!-- ══════════════════════════  HERO  ══════════════════════════ -->
+<section class="hero" id="top">
+  <canvas id="rain" aria-hidden="true"></canvas>
+  <div class="wrap hero-in">
+    <div>
+      <p class="eyebrow">Autonomous prediction-market engine</p>
+      <h1>
+        <span class="grad">Eight strategies.</span>
+        <span class="line2">One browser tab.</span>
+      </h1>
+      <p class="lede">
+        AlphaPolyBot trades <b>Polymarket</b> prediction markets on its own — LLM market analysis,
+        Frank-Wolfe optimized arbitrage, a five-factor BTC signal engine, microstructure momentum,
+        dual-side maker hedging and whale copy trading. It signs its own orders on Polygon,
+        sizes them with fractional Kelly, and halts itself when the numbers say stop.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#start">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.5 2.5v11l9-5.5-9-5.5Z"/></svg>
+          Run it locally
+        </a>
+        <a class="btn" href="https://github.com/Deegan4/alphapolybot" target="_blank" rel="noopener">Read the source</a>
+      </div>
+      <div class="pill-row">
+        <span class="tag">React 18</span>
+        <span class="tag">TypeScript 5.3</span>
+        <span class="tag">Vite 7</span>
+        <span class="tag">Ethers v6</span>
+        <span class="tag">Zustand</span>
+        <span class="tag">MIT</span>
+      </div>
+    </div>
+
+    <!-- live terminal -->
+    <div class="term">
+      <div class="term-bar">
+        <span class="dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></span>
+        <span class="term-title">alphapolybot — strategy-manager</span>
+        <span class="term-status"><span class="live-dot"></span>DRY RUN</span>
+      </div>
+      <div class="term-body" id="term" aria-hidden="true"></div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <div class="stats rv">
+    <div class="stat"><div class="n" data-count="8">8</div><div class="l">Strategies</div></div>
+    <div class="stat"><div class="n" data-count="511">511</div><div class="l">Passing tests</div></div>
+    <div class="stat"><div class="n" data-count="21">21</div><div class="l">Test suites</div></div>
+    <div class="stat"><div class="n" data-count="5" data-suffix="-factor">5-factor</div><div class="l">BTC signal</div></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════  STRATEGIES  ══════════════════════════ -->
+<section id="strategies">
+  <div class="wrap">
+    <p class="eyebrow rv">The stack of edges</p>
+    <h2 class="sec rv">Eight independent strategies, one risk budget.</h2>
+    <p class="sec-sub rv">
+      Every strategy runs on its own clock and its own signal source, and every one of them
+      answers to the same circuit breaker. Enable one, or run the whole floor.
+    </p>
+
+    <div class="strat-grid">
+      <!-- 1 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--purple)">LLM</span>
+          <h3>LLM Prediction</h3><span class="num">01</span>
+        </div>
+        <p>OpenRouter multi-model analysis with Brier-score calibration tracking — the AI hunts mispriced markets and its own confidence is scored over time.</p>
+        <div class="meter"><i data-w="78" style="background:linear-gradient(90deg,#7b3fd4,var(--purple))"></i></div>
+        <div class="strat-foot"><span>scanning 847 markets</span><span>confidence 0.72</span></div>
+      </article>
+      <!-- 2 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--cyan)">DIP</span>
+          <h3>Dip Arbitrage</h3><span class="num">02</span>
+        </div>
+        <p>WebSocket price monitoring plus an order-book spread scan, executing GTD orders with an ask premium to catch temporary dips on binary outcomes.</p>
+        <div class="meter"><i data-w="62" style="background:linear-gradient(90deg,#0aa,var(--cyan))"></i></div>
+        <div class="strat-foot"><span>60s market / 30s spread</span><span>last dip −6.2%</span></div>
+      </article>
+      <!-- 3 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--green)">F-W</span>
+          <h3>Frank-Wolfe Arb</h3><span class="num">03</span>
+        </div>
+        <p>A Bregman-projection optimizer over CLOB books with cross-market mutex validation, exploiting outcome sets whose ask-sum falls below $1.00.</p>
+        <div class="meter"><i data-w="45" style="background:linear-gradient(90deg,var(--green-dim),var(--green))"></i></div>
+        <div class="strat-foot"><span>15s full scan</span><span>spread 1.8%</span></div>
+      </article>
+      <!-- 4 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--amber)">BTC</span>
+          <h3>BTC Up/Down</h3><span class="num">04</span>
+        </div>
+        <p>Five-factor vol-normalized signal — momentum, velocity, time decay, value and flow — with regime detection and an RSI filter, traded into resolution.</p>
+        <div class="meter"><i data-w="72" style="background:linear-gradient(90deg,#c47b0a,var(--amber))"></i></div>
+        <div class="strat-foot"><span>per 15-min window</span><span>score 0.46</span></div>
+      </article>
+      <!-- 5 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--cyan)">MIC</span>
+          <h3>Microstructure Momentum</h3><span class="num">05</span>
+        </div>
+        <p>Bid/ask imbalance, spread volatility and trade-flow toxicity from the MicrostructureAnalyzer — reading informed flow before the price catches up.</p>
+        <div class="meter"><i data-w="54" style="background:linear-gradient(90deg,#0aa,var(--cyan))"></i></div>
+        <div class="strat-foot"><span>continuous</span><span>imbalance +0.31</span></div>
+      </article>
+      <!-- 6 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--red)">MRV</span>
+          <h3>Mean Reversion</h3><span class="num">06</span>
+        </div>
+        <p>Z-score reversion on Coinbase spot BTC/ETH/SOL over a live Binance WebSocket feed, fading deviations once they stretch past the threshold.</p>
+        <div class="meter"><i data-w="88" style="background:linear-gradient(90deg,#b0203c,var(--red))"></i></div>
+        <div class="strat-foot"><span>continuous</span><span>BTC Z −2.14</span></div>
+      </article>
+      <!-- 7 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--green)">CPY</span>
+          <h3>Copy Trading</h3><span class="num">07</span>
+        </div>
+        <p>Mirrors tracked Polymarket whale wallets with configurable position sizing and its own risk limits, so whale alpha arrives sized to your book.</p>
+        <div class="meter"><i data-w="40" style="background:linear-gradient(90deg,var(--green-dim),var(--green))"></i></div>
+        <div class="strat-foot"><span>3 whales tracked</span><span>last copy 2m ago</span></div>
+      </article>
+      <!-- 8 -->
+      <article class="card strat rv">
+        <div class="strat-head">
+          <span class="strat-key" style="color:var(--amber)">DSH</span>
+          <h3>Dual-Side Hedge</h3><span class="num">08</span>
+        </div>
+        <p>Maker-only YES+NO quotes with a 70/30 directional bias, gated by the BTC signal engine and a DynamicFeeService EV check before either side goes out.</p>
+        <div class="meter"><i data-w="58" style="background:linear-gradient(90deg,#c47b0a,var(--amber))"></i></div>
+        <div class="strat-foot"><span>YES@0.52 · NO@0.51</span><span>maker spread 0.03</span></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="hr"></div></div>
+
+<!-- ══════════════════════════  ARCHITECTURE  ══════════════════════════ -->
+<section id="architecture">
+  <div class="wrap">
+    <p class="eyebrow rv">How it fits together</p>
+    <h2 class="sec rv">No backend. <span class="grad">No custody.</span></h2>
+    <p class="sec-sub rv">
+      The whole engine is a React app. Signals, sizing, order signing and risk enforcement all
+      happen in the tab in front of you — keys never leave the browser, and there is no server
+      standing between you and the exchange.
+    </p>
+
+    <div class="arch rv">
+      <div class="layer">
+        <div class="layer-name">Interface</div>
+        <div class="layer-items">
+          <span class="chip">Trading Terminal</span><span class="chip">Dashboard</span><span class="chip">Portfolio</span>
+          <span class="chip">Backtest</span><span class="chip">Activity + Logs</span><span class="chip">Settings + Wallet</span>
+          <span class="chip">Toast + Audio</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-name">State</div>
+        <div class="layer-items">
+          <span class="chip">settings (v32)</span><span class="chip">wallet</span><span class="chip">notifications</span>
+          <span class="chip">backtest</span><span class="chip">balance history</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-name">Strategy manager</div>
+        <div class="layer-items">
+          <span class="chip">LLM Predict</span><span class="chip">Dip Arb</span><span class="chip">Frank-Wolfe</span>
+          <span class="chip">BTC Up/Down</span><span class="chip">Microstructure</span><span class="chip">Mean Reversion</span>
+          <span class="chip">Copy Trade</span><span class="chip">Dual-Side</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-name">Trading service</div>
+        <div class="layer-items">
+          <span class="chip">Kelly Sizer</span><span class="chip">Gas Oracle</span><span class="chip">Order Book Depth</span>
+          <span class="chip">Trade Logger</span><span class="chip">Edge Tracker</span><span class="chip">Calibration</span>
+          <span class="chip">Rejection Tracker</span><span class="chip">Market Scanner</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-name">Risk manager</div>
+        <div class="layer-items">
+          <span class="chip">Circuit Breaker</span><span class="chip">Position Lifecycle</span><span class="chip">SL / TP</span>
+          <span class="chip">Crash Recovery</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-name">Data + execution</div>
+        <div class="layer-items">
+          <span class="chip">CLOB Client</span><span class="chip">Gamma / Data API</span><span class="chip">Market WS</span>
+          <span class="chip">User WS</span><span class="chip">RTDS</span><span class="chip">Coinbase</span><span class="chip">Binance WS</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-name">Chain</div>
+        <div class="layer-items">
+          <span class="chip">Polygon</span><span class="chip">USDC.e</span><span class="chip">CTF Exchange</span>
+          <span class="chip">NegRisk Adapter</span><span class="chip">Ethers.js v6</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════  RISK  ══════════════════════════ -->
+<section id="risk">
+  <div class="wrap">
+    <p class="eyebrow rv">Built to stop itself</p>
+    <h2 class="sec rv">The part that says <span class="grad">no</span>.</h2>
+    <p class="sec-sub rv">
+      An autonomous trader is only as good as its brakes. Seven independent guards — plus a
+      dry-run default — sit between a signal and a filled order, and any one of them can veto the trade.
+    </p>
+
+    <div class="risk-grid">
+      <div class="card risk rv"><span class="ico">HALT</span><h3>Circuit Breaker</h3>
+        <p>Daily loss limit ($10), hourly trade cap (20), and a hard stop after 5 consecutive failures.</p></div>
+      <div class="card risk rv"><span class="ico">SL/TP</span><h3>Position Lifecycle Manager</h3>
+        <p>Stop-loss and take-profit enforced over live WebSocket, plus partial and time-based exits with IndexedDB crash recovery.</p></div>
+      <div class="card risk rv"><span class="ico">SIZE</span><h3>Kelly Criterion Sizing</h3>
+        <p>Drawdown-adjusted fractional Kelly with high-water-mark tracking, so size shrinks as the book bleeds.</p></div>
+      <div class="card risk rv"><span class="ico">GAS</span><h3>Gas Oracle</h3>
+        <p>Skips any trade where Polygon gas would eat more than 50% of the expected profit.</p></div>
+      <div class="card risk rv"><span class="ico">DEPTH</span><h3>Order Book Depth</h3>
+        <p>Caps order size to the liquidity actually resting on the book instead of the size you wished for.</p></div>
+      <div class="card risk rv"><span class="ico">EDGE</span><h3>Edge Tracker</h3>
+        <p>Compares realized against predicted edge with exponential decay to catch a strategy going stale.</p></div>
+      <div class="card risk rv"><span class="ico">REJECT</span><h3>Rejection Tracker</h3>
+        <p>Watches exchange rejection patterns as an early warning of signal or credential degradation.</p></div>
+      <div class="card risk rv"><span class="ico">DRY</span><h3>Dry Run Mode</h3>
+        <p>The default. Every strategy runs end-to-end and logs the trade it would have placed — no funds at risk.</p></div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="hr"></div></div>
+
+<!-- ══════════════════════════  INTERFACE  ══════════════════════════ -->
+<section id="interface">
+  <div class="wrap">
+    <p class="eyebrow rv">The cockpit</p>
+    <h2 class="sec rv">A terminal you can actually read.</h2>
+    <p class="sec-sub rv">
+      Phosphor-green, dense, and honest about what the bot is doing. Click any panel to open it full size.
+    </p>
+
+    <div class="shots">
+      <button class="card shot wide rv" data-src="screenshots/dashboard-main.png" data-alt="AlphaPolyBot main dashboard">
+        <img src="screenshots/dashboard-main.png" alt="AlphaPolyBot main dashboard" loading="lazy" />
+        <div class="cap"><h3>Main Dashboard</h3><p>Live positions, strategy readiness, P&amp;L and the activity stream in one view.</p></div>
+      </button>
+      <button class="card shot rv" data-src="screenshots/spot-crypto.png" data-alt="Spot crypto trading view">
+        <img src="screenshots/spot-crypto.png" alt="Spot crypto trading view" loading="lazy" />
+        <div class="cap"><h3>Spot Crypto</h3><p>Real-time BTC/ETH/SOL positions with Z-score reversion signals.</p></div>
+      </button>
+      <button class="card shot rv" data-src="screenshots/backtest.png" data-alt="Backtest engine view">
+        <img src="screenshots/backtest.png" alt="Backtest engine view" loading="lazy" />
+        <div class="cap"><h3>Backtest Engine</h3><p>Historical replay with equity curves, Sharpe, drawdown and parameter sweeps.</p></div>
+      </button>
+      <button class="card shot wide rv" data-src="screenshots/settings.png" data-alt="Settings and configuration view">
+        <img src="screenshots/settings.png" alt="Settings and configuration view" loading="lazy" />
+        <div class="cap"><h3>Settings &amp; Wallet</h3><p>Dry run, penny trader, token approvals and per-strategy parameters.</p></div>
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════  TESTS  ══════════════════════════ -->
+<section id="tests">
+  <div class="wrap">
+    <p class="eyebrow rv">Proof, not vibes</p>
+    <h2 class="sec rv">511 tests. <span class="grad">Seven seconds.</span></h2>
+    <p class="sec-sub rv">
+      Money-touching code gets tested first. Every circuit breaker path, every sizing edge case,
+      every tick-size rounding rule.
+    </p>
+
+    <div class="test-wrap">
+      <div class="test-rows rv" id="testRows">
+        <div class="trow"><span class="name">MeanReversionStrategy</span><span class="bar"><i data-w="100"></i></span><span class="cnt">53</span></div>
+        <div class="trow"><span class="name">signalEngine</span><span class="bar"><i data-w="96"></i></span><span class="cnt">51</span></div>
+        <div class="trow"><span class="name">BtcUpDownStrategy</span><span class="bar"><i data-w="64"></i></span><span class="cnt">34</span></div>
+        <div class="trow"><span class="name">KellySizer</span><span class="bar"><i data-w="62"></i></span><span class="cnt">33</span></div>
+        <div class="trow"><span class="name">RiskManager</span><span class="bar"><i data-w="60"></i></span><span class="cnt">32</span></div>
+        <div class="trow"><span class="name">FrankWolfeOptimizer</span><span class="bar"><i data-w="58"></i></span><span class="cnt">31</span></div>
+        <div class="trow"><span class="name">ArbitrageProfitFormula</span><span class="bar"><i data-w="57"></i></span><span class="cnt">30</span></div>
+        <div class="trow"><span class="name">PositionLifecycleManager</span><span class="bar"><i data-w="47"></i></span><span class="cnt">25</span></div>
+        <div class="trow"><span class="name">EdgeTracker</span><span class="bar"><i data-w="45"></i></span><span class="cnt">24</span></div>
+        <div class="trow"><span class="name">CrossMarket</span><span class="bar"><i data-w="43"></i></span><span class="cnt">23</span></div>
+        <div class="trow"><span class="name">OpenRouterService</span><span class="bar"><i data-w="40"></i></span><span class="cnt">21</span></div>
+        <div class="trow"><span class="name">CopyTradingStrategy</span><span class="bar"><i data-w="40"></i></span><span class="cnt">21</span></div>
+        <div class="trow"><span class="name">DipArbStrategy</span><span class="bar"><i data-w="40"></i></span><span class="cnt">21</span></div>
+        <div class="trow"><span class="name">secureStorage</span><span class="bar"><i data-w="36"></i></span><span class="cnt">19</span></div>
+        <div class="trow"><span class="name">settingsStore</span><span class="bar"><i data-w="34"></i></span><span class="cnt">18</span></div>
+        <div class="trow"><span class="name">ProjectFWStrategy</span><span class="bar"><i data-w="32"></i></span><span class="cnt">17</span></div>
+        <div class="trow"><span class="name">PolyBacktestClient</span><span class="bar"><i data-w="28"></i></span><span class="cnt">15</span></div>
+        <div class="trow"><span class="name">MCP tools</span><span class="bar"><i data-w="23"></i></span><span class="cnt">12</span></div>
+        <div class="trow"><span class="name">BacktestRunner</span><span class="bar"><i data-w="23"></i></span><span class="cnt">12</span></div>
+        <div class="trow"><span class="name">MCP rounding</span><span class="bar"><i data-w="21"></i></span><span class="cnt">11</span></div>
+        <div class="trow"><span class="name">MCP auth</span><span class="bar"><i data-w="15"></i></span><span class="cnt">8</span></div>
+      </div>
+
+      <aside class="test-side rv">
+        <div class="card">
+          <div class="big-num" data-count="511">511</div>
+          <div class="mono" style="font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-3);margin:8px 0 18px">tests passing</div>
+          <div class="kv"><span>Suites</span><span>21</span></div>
+          <div class="kv"><span>Runner</span><span>Vitest + jsdom</span></div>
+          <div class="kv"><span>Runtime</span><span>~7s</span></div>
+          <div class="kv"><span>CI</span><span>GitHub Actions</span></div>
+          <div class="kv"><span>Gates</span><span>lint · test · build</span></div>
+          <div class="kv"><span>MCP suites</span><span>3 · 31 tests</span></div>
+        </div>
+        <div class="code" style="margin-top:16px">
+          <div class="code-bar">terminal<button class="copy" data-copy="npm test">copy</button></div>
+          <pre><span class="c">$</span> npm test
+
+ <span class="p">✓</span> 21 files  <span class="p">511 passed</span>
+   Duration  <span class="v">6.78s</span></pre>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="hr"></div></div>
+
+<!-- ══════════════════════════  QUICK START  ══════════════════════════ -->
+<section id="start">
+  <div class="wrap">
+    <p class="eyebrow rv">Sixty seconds to dry run</p>
+    <h2 class="sec rv">Clone it, key it, watch it think.</h2>
+    <p class="sec-sub rv">
+      Dry run is the default — the bot will run every strategy and log the trades it would have
+      made without touching your balance. Flip it live only when the log looks right.
+    </p>
+
+    <div class="qs">
+      <div class="rv">
+        <div class="code">
+          <div class="code-bar">install<button class="copy" data-copy="git clone https://github.com/Deegan4/alphapolybot.git
+cd alphapolybot
+npm install
+cp .env.example .env">copy</button></div>
+<pre><span class="c"># clone and install</span>
+<span class="p">git</span> clone https://github.com/Deegan4/alphapolybot.git
+<span class="p">cd</span> alphapolybot
+<span class="p">npm</span> install
+
+<span class="c"># configure</span>
+<span class="p">cp</span> .env.example .env
+<span class="c"># add VITE_WALLET_SEED_PHRASE + VITE_OPENROUTER_API_KEY</span></pre>
+        </div>
+        <div class="code" style="margin-top:16px">
+          <div class="code-bar">run<button class="copy" data-copy="npm run dev">copy</button></div>
+<pre><span class="p">npm</span> run dev            <span class="c"># dev server on :4000</span>
+<span class="p">npm</span> test               <span class="c"># 511 tests</span>
+<span class="p">npm</span> run build          <span class="c"># production build</span></pre>
+        </div>
+      </div>
+
+      <div class="rv">
+        <ol class="steps">
+          <li>Create a <b>dedicated trading wallet</b> — never your main one.</li>
+          <li>Fund it with <b>USDC.e + MATIC</b> on Polygon.</li>
+          <li>Grab an <b>OpenRouter API key</b> for the LLM strategy.</li>
+          <li>In the app: <b>Settings → Wallet → Approve Tokens</b> (3 contracts).</li>
+          <li>Start in <b>dry run</b> and read the Activity tab.</li>
+          <li>Disable dry run only once the logged trades look right.</li>
+        </ol>
+        <div class="warn">
+          <b>Use USDC.e</b> — the bridged token, not native USDC. The exchange only sees bridged USDC.e,
+          so native USDC will sit in the wallet doing nothing.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════  CTA  ══════════════════════════ -->
+<section class="cta">
+  <div class="wrap cta-in">
+    <p class="eyebrow rv" style="justify-content:center">Open source · MIT</p>
+    <h2 class="rv"><span class="grad">Go read the code.</span></h2>
+    <p class="rv">Eight strategies, a risk manager that means it, 511 tests, and an MCP server for
+      letting an agent drive. All of it in one repository.</p>
+    <div class="hero-cta rv" style="justify-content:center">
+      <a class="btn btn-primary" href="https://github.com/Deegan4/alphapolybot" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.5 7.5 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.74.54 1.49l-.01 2.21c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>
+        Deegan4/alphapolybot
+      </a>
+      <a class="btn" href="../">Open the app</a>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════  FOOTER  ══════════════════════════ -->
+<footer>
+  <div class="wrap">
+    <div class="disclaimer">
+      <b>Educational and research software.</b> Trading prediction markets carries significant
+      financial risk. The authors are not responsible for any losses. Use a dedicated wallet, and
+      never trade money you cannot afford to lose.
+    </div>
+    <div class="foot">
+      <span>&gt; AlphaPolyBot — autonomous Polymarket trading engine</span>
+      <span>
+        <a href="https://github.com/Deegan4/alphapolybot" target="_blank" rel="noopener">GitHub</a> ·
+        <a href="https://github.com/Deegan4/alphapolybot/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a> ·
+        <a href="https://github.com/Deegan4/alphapolybot/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a>
+      </span>
+    </div>
+  </div>
+</footer>
+
+<!-- lightbox -->
+<div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="Screenshot viewer">
+  <button class="close" id="lbClose" aria-label="Close viewer">ESC · close</button>
+  <img id="lbImg" src="" alt="" />
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ───────────  matrix rain  ─────────── */
+  (function rain() {
+    var cv = document.getElementById('rain');
+    if (!cv || reduce) return;
+    var ctx = cv.getContext('2d');
+    var glyphs = '01アイウエオカキクケコサシスセソタチツテトナニヌネノABCDEF$+-*/=%"\'#&_(),.;:?!|{}<>[]^~'.split('');
+    var cols, drops, fontSize = 14, dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    function size() {
+      var w = cv.clientWidth, h = cv.clientHeight;
+      cv.width = w * dpr; cv.height = h * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      cols = Math.ceil(w / fontSize);
+      drops = new Array(cols);
+      for (var i = 0; i < cols; i++) drops[i] = Math.random() * -60;
+    }
+    size();
+    window.addEventListener('resize', size);
+
+    var last = 0;
+    function frame(t) {
+      requestAnimationFrame(frame);
+      if (t - last < 55) return;           // ~18fps: cheap and more cinematic
+      last = t;
+      ctx.fillStyle = 'rgba(0,4,3,0.09)';
+      ctx.fillRect(0, 0, cv.clientWidth, cv.clientHeight);
+      ctx.font = fontSize + 'px JetBrains Mono, monospace';
+      for (var i = 0; i < cols; i++) {
+        var ch = glyphs[(Math.random() * glyphs.length) | 0];
+        var x = i * fontSize, y = drops[i] * fontSize;
+        ctx.fillStyle = Math.random() > 0.975 ? '#d9ffe8' : '#00b74c';
+        ctx.fillText(ch, x, y);
+        if (y > cv.clientHeight && Math.random() > 0.972) drops[i] = 0;
+        drops[i]++;
+      }
+    }
+    requestAnimationFrame(frame);
+  })();
+
+  /* ───────────  boot terminal  ─────────── */
+  (function terminal() {
+    var el = document.getElementById('term');
+    if (!el) return;
+    var lines = [
+      ['c-d', '$ npm run dev'],
+      ['c-d', '  VITE v7.3.1  ready in 412 ms  →  http://localhost:4000'],
+      ['c-g', '[App] Initializing AlphaPolyBot...'],
+      ['c-d', '[App] IndexedDB storage initialized (6 stores)'],
+      ['c-g', '[App] Risk manager initialized  ·  daily loss cap $10.00'],
+      ['c-g', '[App] Position lifecycle manager initialized'],
+      ['c-c', '[WS]  market channel connected  ·  user channel connected'],
+      ['c-c', '[WS]  BinanceWS streaming BTC / ETH / SOL'],
+      ['c-g', '[App] Strategy manager initialized  ·  8 registered'],
+      ['c-p', '[LLM] scanning 847 markets ......... confidence 0.72'],
+      ['c-c', '[DIP] watching 12 tokens ........... last dip -6.2%'],
+      ['c-g', '[F-W] 3 arb candidates ............. ask-sum 0.982'],
+      ['c-a', '[BTC] 5-factor signal .............. score 0.46  regime TREND'],
+      ['c-c', '[MIC] flow toxicity 0.23 ........... imbalance +0.31'],
+      ['c-r', '[MRV] BTC z-score -2.14 ............ entry SHORT'],
+      ['c-g', '[CPY] 3 whales tracked ............. last copy 2m ago'],
+      ['c-a', '[DSH] YES@0.52  NO@0.51 ............ maker spread 0.03'],
+      ['c-w', '[TRD] signal accepted  →  kelly size $4.18  gas 0.9% of EV'],
+      ['c-g', '[TRD] DRY RUN  order logged, no funds moved'],
+      ['c-d', '[RSK] risk NOMINAL  ·  trades/hr 6/20  ·  P&L +$12.47'],
+      ['c-g', '> awaiting next window ...']
+    ];
+
+    var cursor = document.createElement('span');
+    cursor.className = 'cursor';
+    var li = 0;
+
+    if (reduce) {                       // no typing: render it all at once
+      lines.forEach(function (l) {
+        var s = document.createElement('span');
+        s.className = 'ln ' + l[0]; s.textContent = l[1]; el.appendChild(s);
+      });
+      el.appendChild(cursor);
+      return;
+    }
+
+    function scroll() {                 // keep the newest line in view
+      while (el.scrollHeight > el.clientHeight && el.firstChild) el.removeChild(el.firstChild);
+    }
+
+    function typeLine() {
+      if (li >= lines.length) {         // loop the reel
+        setTimeout(function () { el.textContent = ''; li = 0; typeLine(); }, 4200);
+        return;
+      }
+      var cls = lines[li][0], text = lines[li][1], i = 0;
+      var span = document.createElement('span');
+      span.className = 'ln ' + cls;
+      el.appendChild(span);
+      el.appendChild(cursor);
+
+      (function tick() {
+        span.textContent = text.slice(0, ++i);
+        scroll();
+        if (i < text.length) setTimeout(tick, 8 + Math.random() * 14);
+        else { li++; setTimeout(typeLine, 190 + Math.random() * 240); }
+      })();
+    }
+    setTimeout(typeLine, 420);
+  })();
+
+  /* ───────────  reveal on scroll + bar/meter fills  ─────────── */
+  (function reveal() {
+    var els = document.querySelectorAll('.rv');
+    if (!('IntersectionObserver' in window)) {
+      els.forEach(function (e) { e.classList.add('in'); });
+      document.querySelectorAll('[data-w]').forEach(function (b) { b.style.width = b.dataset.w + '%'; });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (!en.isIntersecting) return;
+        var t = en.target, sibs = Array.prototype.indexOf.call(t.parentNode.children, t);
+        t.style.transitionDelay = Math.min(sibs, 7) * 55 + 'ms';
+        t.classList.add('in');
+        t.querySelectorAll('[data-w]').forEach(function (b, i) {
+          setTimeout(function () { b.style.width = b.dataset.w + '%'; }, 120 + i * 40);
+        });
+        io.unobserve(t);
+      });
+    }, { threshold: 0.14, rootMargin: '0px 0px -8% 0px' });
+    els.forEach(function (e) { io.observe(e); });
+  })();
+
+  /* ───────────  count-up numbers  ─────────── */
+  (function counters() {
+    var nodes = document.querySelectorAll('[data-count]');
+    function run(node) {
+      var target = parseInt(node.dataset.count, 10), suffix = node.dataset.suffix || '';
+      if (reduce) { node.textContent = target + suffix; return; }
+      node.textContent = '0';          // real value ships in the HTML; JS animates up to it
+      var t0 = null, dur = 1250;
+      function step(ts) {
+        if (t0 === null) t0 = ts;
+        var p = Math.min((ts - t0) / dur, 1);
+        var eased = 1 - Math.pow(1 - p, 3);
+        node.textContent = Math.round(target * eased) + (p === 1 ? suffix : '');
+        if (p < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+    if (!('IntersectionObserver' in window)) { nodes.forEach(run); return; }
+    var io = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { if (e.isIntersecting) { run(e.target); io.unobserve(e.target); } });
+    }, { threshold: 0.5 });
+    nodes.forEach(function (n) { io.observe(n); });
+  })();
+
+  /* ───────────  sticky nav + active link  ─────────── */
+  (function nav() {
+    var bar = document.getElementById('nav');
+    var links = Array.prototype.slice.call(document.querySelectorAll('.nav-links a'));
+    var targets = links.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+
+    function onScroll() {
+      bar.classList.toggle('stuck', window.scrollY > 24);
+      var y = window.scrollY + 140, active = -1;
+      targets.forEach(function (t, i) { if (t && t.offsetTop <= y) active = i; });
+      links.forEach(function (a, i) { a.classList.toggle('active', i === active); });
+    }
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+  })();
+
+  /* ───────────  copy buttons  ─────────── */
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.dataset.copy || '';
+      var done = function () {
+        var old = btn.textContent; btn.textContent = 'copied ✓';
+        setTimeout(function () { btn.textContent = old; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
+  });
+
+  /* ───────────  screenshot lightbox  ─────────── */
+  (function lightbox() {
+    var lb = document.getElementById('lb'), img = document.getElementById('lbImg');
+    var close = document.getElementById('lbClose');
+    function open(src, alt) {
+      img.src = src; img.alt = alt || '';
+      lb.classList.add('open'); document.body.style.overflow = 'hidden'; close.focus();
+    }
+    function shut() { lb.classList.remove('open'); document.body.style.overflow = ''; }
+    document.querySelectorAll('.shot').forEach(function (s) {
+      s.addEventListener('click', function () { open(s.dataset.src, s.dataset.alt); });
+    });
+    close.addEventListener('click', shut);
+    lb.addEventListener('click', function (e) { if (e.target === lb) shut(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') shut(); });
+  })();
+})();
+</script>
+</body>
+</html>

@@ -2,6 +2,12 @@
   command = "npm ci && npm run build"
   publish = "dist"
 
+# Landing page (static, lives in public/landing) — must precede the SPA catch-all
+[[redirects]]
+  from = "/landing"
+  to = "/landing/index.html"
+  status = 200
+
 # SPA redirect — all routes to index.html
 [[redirects]]
   from = "/*"
@@ -45,3 +51,55 @@
 
 [build.environment]
   NODE_VERSION = "20"
+
+# Security headers.
+#
+# The CSP matters more here than in a typical SPA: wallet signing secrets and
+# exchange API credentials live in this origin's localStorage/IndexedDB, so
+# connect-src is the control that stops injected script from shipping them
+# somewhere. Keep the allowlist tight — every host below is one the app
+# genuinely calls (see src/services/api, src/services/realtime).
+#
+# 'unsafe-inline' on style-src is required by framer-motion, which writes
+# inline styles. script-src carries no 'unsafe-inline'/'unsafe-eval', so
+# injected <script> and eval() are both blocked.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = """
+      default-src 'self'; \
+      script-src 'self'; \
+      style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+      font-src 'self' https://fonts.gstatic.com data:; \
+      img-src 'self' data: blob:; \
+      connect-src 'self' \
+        https://gamma-api.polymarket.com \
+        https://clob.polymarket.com \
+        https://data-api.polymarket.com \
+        https://api.polymarket.us \
+        https://gateway.polymarket.us \
+        wss://ws-live-data.polymarket.com \
+        wss://api.polymarket.us \
+        https://api.coinbase.com \
+        https://api.binance.com \
+        https://api.binance.us \
+        wss://stream.binance.com:9443 \
+        wss://stream.binance.us:9443 \
+        https://api.coingecko.com \
+        https://openrouter.ai \
+        https://api.polybacktest.com \
+        https://gasstation.polygon.technology \
+        https://polygon-bor-rpc.publicnode.com \
+        https://1rpc.io \
+        https://api.telegram.org \
+        https://discord.com; \
+      frame-ancestors 'none'; \
+      base-uri 'self'; \
+      form-action 'self'; \
+      object-src 'none'
+      """
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    Cross-Origin-Opener-Policy = "same-origin"

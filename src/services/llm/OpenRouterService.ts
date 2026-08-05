@@ -57,7 +57,9 @@ export class OpenRouterService {
       console.warn('[OpenRouterService] Failed to read settings store:', e)
     }
     
-    // 3. Legacy localStorage key
+    // 3. Legacy plaintext key (pre-encryption installs). migrateLegacyKeys
+    //    moves this into the encrypted store at startup and deletes it, so
+    //    this only ever fires before that migration has run.
     const legacyKey = localStorage.getItem('OPENROUTER_API_KEY')
     if (legacyKey) return legacyKey
     

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { createEncryptedPersistStorage } from '@/utils/encryptedPersistStorage'
 import type { WalletEntry } from '@/types'
 
 export interface AppSettingsState {
@@ -729,6 +730,10 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'alphapolybot-settings',
+      // Encrypted at rest with the device key — this blob holds pmUsSecretKey,
+      // coinbaseSecret and openRouterApiKey. Hydration is therefore async;
+      // await awaitSettingsHydration() before reading credentials at startup.
+      storage: createEncryptedPersistStorage(),
       version: 31, // Bump when defaults change — triggers migrate()
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
@@ -1062,3 +1067,23 @@ export const useSettingsStore = create<SettingsStore>()(
     }
   )
 )
+
+/**
+ * Resolve once the persisted settings have been decrypted and applied.
+ *
+ * Persistence is encrypted, so hydration is asynchronous: for a tick after
+ * module load the store still holds DEFAULT_SETTINGS. Defaults are safe
+ * (dryRun: true) but credentials are empty, so anything reading API keys or
+ * wallet state during startup must await this first.
+ */
+export function awaitSettingsHydration(): Promise<void> {
+  const api = useSettingsStore.persist
+  if (api.hasHydrated()) return Promise.resolve()
+
+  return new Promise<void>((resolve) => {
+    const unsubscribe = api.onFinishHydration(() => {
+      unsubscribe()
+      resolve()
+    })
+  })
+}
