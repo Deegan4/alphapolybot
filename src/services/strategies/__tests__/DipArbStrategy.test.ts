@@ -290,11 +290,12 @@ describe('DipArbStrategy', () => {
       // Should have tried to sell
       expect(mockPlaceSell).toHaveBeenCalled()
 
-      // PLM tracks via dynamic import().then() — flush microtasks
-      await new Promise(r => setTimeout(r, 0))
-      await vi.advanceTimersByTimeAsync(0)
-      // Dynamic import + .then() needs multiple microtask flushes
-      await new Promise(r => setTimeout(r, 0))
+      // PLM is tracked from a dynamic import().then(), so the call lands an
+      // indeterminate number of turns later — how many depends on whether the
+      // module graph is already warm from another suite. Wait on the condition
+      // instead of a fixed number of flushes, or a late call leaks into the
+      // next test and fails it there.
+      await vi.waitFor(() => expect(mockTrackPosition).toHaveBeenCalledTimes(1))
 
       expect(mockTrackPosition).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -393,12 +394,10 @@ describe('DipArbStrategy', () => {
       // Merge attempted 3 times (with retry)
       expect(mockMergePositions).toHaveBeenCalledTimes(3)
 
-      // PLM tracks via dynamic import().then() — flush microtasks
-      await new Promise(r => setTimeout(r, 0))
-      await vi.advanceTimersByTimeAsync(0)
-      await new Promise(r => setTimeout(r, 0))
+      // Both legs tracked via dynamic import().then() — wait on the count
+      // rather than flushing a fixed number of turns (see note above).
+      await vi.waitFor(() => expect(mockTrackPosition).toHaveBeenCalledTimes(2))
 
-      expect(mockTrackPosition).toHaveBeenCalledTimes(2)
       expect(mockTrackPosition).toHaveBeenCalledWith(
         expect.objectContaining({ tokenId: 'token-yes-001', outcome: 'yes' })
       )

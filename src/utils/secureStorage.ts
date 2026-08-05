@@ -11,6 +11,13 @@
  * set() and get() are async. Callers must await.
  */
 
+import {
+  getDeviceKey,
+  encryptWithKey,
+  decryptWithKey,
+  looksLikePlaintextJSON,
+} from './deviceKey'
+
 const STORAGE_PREFIX = 'alphapolybot_'
 const SALT = 'alphapolybot-v2-salt' // Static salt — acceptable for localStorage obfuscation
 
@@ -66,6 +73,22 @@ class SecureStorage {
   }
 
   /**
+   * Initialize with this device's non-extractable key from the keyring.
+   *
+   * This is what the app calls at startup. Without it `cryptoKey` stays null
+   * and every `set(..., { encrypt: true })` silently writes plaintext — which
+   * is exactly the bug this exists to close. Returns whether encryption is
+   * actually available; false means the caller is storing in the clear.
+   */
+  async initializeDeviceKey(): Promise<boolean> {
+    const key = await getDeviceKey()
+    if (!key) return false
+    this.cryptoKey = key
+    this.rawKey = null // device key path has no passphrase, so no legacy XOR
+    return true
+  }
+
+  /**
    * Store a value in local storage (optionally encrypted with AES-GCM)
    */
   async set<T>(key: string, value: T, options: StorageOptions = {}): Promise<void> {
@@ -87,7 +110,7 @@ class SecureStorage {
     } catch (error) {
       console.error('Failed to store item:', error)
       // Try to clear old items if storage is full
-      this.clearExpired()
+      await this.clearExpired()
       localStorage.setItem(storageKey, toStore)
     }
   }
@@ -103,25 +126,36 @@ class SecureStorage {
       const stored = localStorage.getItem(storageKey)
       if (!stored) return null
 
+      // Detect the format rather than trusting the caller's `encrypted` flag —
+      // entries written before encryption was wired up are plaintext, and a
+      // wrong flag used to mean either a crash or a silent miss.
       let serialized: string
+      let migrateFrom: 'plaintext' | 'xor' | null = null
 
-      if (encrypted && this.cryptoKey) {
-        // Try AES-GCM first
+      if (looksLikePlaintextJSON(stored)) {
+        serialized = stored
+        if (this.cryptoKey) migrateFrom = 'plaintext'
+      } else if (this.cryptoKey) {
         try {
           serialized = await this.decrypt(stored)
         } catch {
-          // Fallback: try legacy XOR for migration
+          // Not AES-GCM — try legacy XOR (only possible on the passphrase path)
           serialized = this.decryptLegacyXOR(stored)
-          // Re-encrypt with AES-GCM (auto-migrate)
-          const item: StoredItem<T> = JSON.parse(serialized)
-          await this.set(key, item.value, { encrypt: true, expiry: item.expiry })
-          console.log(`[SecureStorage] Migrated "${key}" from XOR to AES-GCM`)
+          migrateFrom = 'xor'
         }
       } else {
-        serialized = stored
+        // Ciphertext but no key: the keyring is unavailable this session.
+        // Report the miss instead of handing back unparseable bytes.
+        console.warn(`[SecureStorage] "${key}" is encrypted but no device key is available`)
+        return null
       }
 
       const item: StoredItem<T> = JSON.parse(serialized)
+
+      if (migrateFrom) {
+        await this.set(key, item.value, { encrypt: true, expiry: item.expiry })
+        console.log(`[SecureStorage] Migrated "${key}" from ${migrateFrom} to AES-GCM`)
+      }
 
       // Check expiry
       if (item.expiry && Date.now() - item.timestamp > item.expiry) {
@@ -155,27 +189,44 @@ class SecureStorage {
   }
 
   /**
-   * Clear expired items
+   * Clear expired items.
+   *
+   * Only removes entries it can actually read and prove are expired. An entry
+   * it cannot parse is left alone — with encryption on, "unparseable" is the
+   * normal state of every ciphertext, and the old behaviour of deleting those
+   * would have wiped the wallet secrets this store exists to hold.
    */
-  clearExpired(): void {
+  async clearExpired(): Promise<void> {
     const keys = Object.keys(localStorage).filter(key =>
       key.startsWith(STORAGE_PREFIX)
     )
 
-    keys.forEach(key => {
+    for (const key of keys) {
+      const stored = localStorage.getItem(key)
+      if (!stored) continue
+
+      let serialized: string
+      if (looksLikePlaintextJSON(stored)) {
+        serialized = stored
+      } else if (this.cryptoKey) {
+        try {
+          serialized = await this.decrypt(stored)
+        } catch {
+          continue // can't read it — never guess, never delete
+        }
+      } else {
+        continue
+      }
+
       try {
-        const stored = localStorage.getItem(key)
-        if (stored) {
-          const item = JSON.parse(stored) as StoredItem<unknown>
-          if (item.expiry && Date.now() - item.timestamp > item.expiry) {
-            localStorage.removeItem(key)
-          }
+        const item = JSON.parse(serialized) as StoredItem<unknown>
+        if (item.expiry && Date.now() - item.timestamp > item.expiry) {
+          localStorage.removeItem(key)
         }
       } catch {
-        // If we can't parse it, remove it
-        localStorage.removeItem(key)
+        continue
       }
-    })
+    }
   }
 
   /**
@@ -204,23 +255,7 @@ class SecureStorage {
    */
   private async encrypt(text: string): Promise<string> {
     if (!this.cryptoKey) return text
-
-    const iv = crypto.getRandomValues(new Uint8Array(12))
-    const encoded = new TextEncoder().encode(text)
-
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      this.cryptoKey,
-      encoded
-    )
-
-    // Prepend IV to ciphertext for storage
-    const combined = new Uint8Array(iv.length + ciphertext.byteLength)
-    combined.set(iv, 0)
-    combined.set(new Uint8Array(ciphertext), iv.length)
-
-    // Base64 encode for localStorage
-    return btoa(String.fromCharCode(...combined))
+    return encryptWithKey(this.cryptoKey, text)
   }
 
   /**
@@ -229,20 +264,7 @@ class SecureStorage {
    */
   private async decrypt(encoded: string): Promise<string> {
     if (!this.cryptoKey) return encoded
-
-    const combined = Uint8Array.from(atob(encoded), c => c.charCodeAt(0))
-
-    // Extract IV (first 12 bytes) and ciphertext (rest)
-    const iv = combined.slice(0, 12)
-    const ciphertext = combined.slice(12)
-
-    const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      this.cryptoKey,
-      ciphertext
-    )
-
-    return new TextDecoder().decode(decrypted)
+    return decryptWithKey(this.cryptoKey, encoded)
   }
 
   // ==========================================

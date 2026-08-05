@@ -1,7 +1,7 @@
 import React, { Suspense, useEffect, useRef } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 // AppLayout is no longer used — Settings now uses SettingsLayout
-import { useSettingsStore, useWalletStore } from '@/stores'
+import { useSettingsStore, useWalletStore, awaitSettingsHydration } from '@/stores'
 import { tradingService, riskManager, positionLifecycleManager, gtcOrderManager, activityLogger, tradeLogger } from '@/services/trading'
 import { indexedDBService } from '@/services/storage'
 import { secureStorage } from '@/utils/secureStorage'
@@ -47,6 +47,20 @@ const App: React.FC = () => {
 
     const initializeApp = async () => {
       console.log('[App] Initializing AlphaPolyBot...')
+
+      // Unlock the keyring before anything reads or writes credentials.
+      // Without this, secureStorage has no key and writes plaintext.
+      const encryptionReady = await secureStorage.initializeDeviceKey()
+      console.log(`[App] Credential encryption ${encryptionReady ? 'active (AES-256-GCM)' : 'UNAVAILABLE — storing plaintext'}`)
+
+      // Persisted settings are encrypted, so hydration is async. Wait for it
+      // before any code path reads API keys or wallet credentials.
+      await awaitSettingsHydration()
+      console.log('[App] Settings hydrated')
+
+      // Sweep up cleartext API keys written by earlier versions
+      const { migrateLegacyPlaintextKeys } = await import('@/utils/migrateLegacyKeys')
+      await migrateLegacyPlaintextKeys()
 
       // Initialize IndexedDB storage first (other services persist to it)
       await indexedDBService.initialize()
@@ -124,7 +138,7 @@ const App: React.FC = () => {
       setInterval(() => {
         indexedDBService.pruneAll().catch(() => {})
         riskManager.pruneInMemory()
-        secureStorage.clearExpired()
+        secureStorage.clearExpired().catch(() => {})
       }, PRUNE_INTERVAL_MS)
       console.log('[App] Auto-pruning scheduled (every 6h)')
 
