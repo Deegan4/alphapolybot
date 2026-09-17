@@ -21,7 +21,7 @@
     "polymarket-us": "^0.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.30.4",
+    "react-router-dom": "^6.30.6",
     "recharts": "^3.7.0",
     "tailwind-merge": "^1.14.0",
     "zustand": "^4.4.0"
