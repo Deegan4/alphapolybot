@@ -39,3 +39,8 @@ https:/
 # Local Netlify folder
 .netlify
 CLAUDE.md
+
+# Local Playwright / mobile test artifacts
+.playwright-mcp/
+iphone_*.png
+
