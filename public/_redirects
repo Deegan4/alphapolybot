@@ -1,0 +1,18 @@
+# Cloudflare Pages — API proxies (must precede SPA fallback)
+/api/gamma/*           https://gamma-api.polymarket.com/:splat  200
+/api/polygon-rpc       https://polygon-bor-rpc.publicnode.com/  200
+/api/polygon-rpc2      https://1rpc.io/matic                    200
+/api/coinbase/*        https://api.coinbase.com/:splat          200
+/api/polybacktest/*    https://api.polybacktest.com/:splat      200
+/api/binance/*         https://api.binance.us/:splat            200
+/api/coingecko/*       https://api.coingecko.com/:splat         200
+/api/pm-us/*           https://api.polymarket.us/:splat         200
+/api/pm-gateway/*      https://gateway.polymarket.us/:splat     200
+/v1/*                  https://api.polymarket.us/v1/:splat      200
+
+# Landing page
+/landing               /landing/index.html                      200
+/landing/              /landing/index.html                      200
+
+# SPA fallback
+/*                     /index.html                              200
