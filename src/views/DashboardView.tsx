@@ -35,7 +35,15 @@ const DashboardView: React.FC = () => {
   const dryRun = useSettingsStore((s) => s.dryRun)
   const [activeTab, setActiveTab] = useState<'live' | 'history' | 'spotcrypto' | 'backtest' | 'analytics'>('live')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    try { return localStorage.getItem(SIDEBAR_KEY) === '1' } catch { return false }
+    try {
+      const stored = localStorage.getItem(SIDEBAR_KEY)
+      if (stored !== null) return stored === '1'
+    } catch { /* ignore */ }
+    // Default collapsed on phone/tablet so Live fits a single column
+    if (typeof window !== 'undefined') {
+      return window.matchMedia('(max-width: 1023px)').matches
+    }
+    return false
   })
   useBalanceHistory() // drives balance snapshot pipeline
 
@@ -83,7 +91,7 @@ const DashboardView: React.FC = () => {
   }, [])
 
   return (
-    <div className="h-screen flex flex-col dashboard-bg">
+    <div className="app-viewport flex flex-col dashboard-bg overflow-hidden">
       {/* Top bar with tab switching */}
       <SniperTopBar activeTab={activeTab} onTabChange={setActiveTab} />
 
@@ -143,9 +151,12 @@ const DashboardView: React.FC = () => {
         <Suspense fallback={<LazyFallback />}><AnalyticsView /></Suspense>
       )}
 
-      {/* Floating emergency stop — fixed bottom-left */}
+      {/* Floating emergency stop — fixed bottom-left, clear of home indicator */}
       {showEmergency && (
-        <div className="fixed bottom-6 left-6 z-50">
+        <div
+          className="fixed z-50 left-4 sm:left-6"
+          style={{ bottom: 'max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 0.75rem))' }}
+        >
           {confirmStop ? (
             <div className="flex items-center gap-2 bg-red-950/90 border border-red-500/40 rounded-full px-4 py-2 backdrop-blur-sm">
               <span className="text-red-400 text-xs font-mono">Stop all?</span>

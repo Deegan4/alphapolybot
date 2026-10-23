@@ -302,6 +302,16 @@ Configured for Netlify with GitHub Actions CI:
 
 Netlify config in `netlify.toml` handles SPA routing and API proxy paths.
 
+## iPhone / mobile web app
+
+AlphaPolyBot is a progressive web app. On an iPhone:
+
+1. Open the deployed site in **Safari** (not an in-app browser).
+2. Tap **Share** → **Add to Home Screen**.
+3. Launch from the home-screen icon for a fullscreen, standalone trading UI.
+
+The dashboard stacks into a single column on small screens, tables scroll horizontally, and safe-area insets keep controls clear of the notch and home indicator. A light service worker caches the app shell only (never trading APIs).
+
 ## Disclaimer
 
 > **This software is for educational and research purposes only.** Trading on prediction markets involves significant financial risk. The authors are not responsible for any financial losses. Always use a dedicated wallet with funds you can afford to lose. Never trade with money you cannot afford to lose.

@@ -7,7 +7,7 @@ import { Outlet } from 'react-router-dom'
  */
 export const DashboardLayout: React.FC = () => {
   return (
-    <div className="bg-agent-bg min-h-screen text-agent-text font-mono">
+    <div className="bg-agent-bg app-viewport text-agent-text font-mono overflow-hidden">
       <Outlet />
     </div>
   )
