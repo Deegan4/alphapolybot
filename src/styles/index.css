@@ -57,6 +57,7 @@
 html {
   background-color: var(--agent-bg);
   font-size: 16px;
+  height: 100%;
 }
 
 body {
@@ -64,6 +65,24 @@ body {
   font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+  min-height: 100%;
+  min-height: 100dvh;
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+#root {
+  min-height: 100%;
+  min-height: 100dvh;
+}
+
+/* Standalone PWA: hide rubber-band overscroll at the root */
+@media all and (display-mode: standalone) {
+  html, body {
+    overscroll-behavior: none;
+  }
 }
 
 /* Selection */
@@ -296,4 +315,32 @@ body {
 /* Scrollbar with cyan accent */
 .scrollbar-cyan::-webkit-scrollbar-thumb {
   background-color: rgba(34, 211, 238, 0.4);
+}
+
+/* Full viewport height that respects iOS Safari chrome + notch/home indicator */
+.app-viewport {
+  box-sizing: border-box;
+  min-height: 100vh;
+  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+/* Horizontal scroll wrapper for wide data tables on phones */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
+.safe-pb {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+}
+
+.safe-pt {
+  padding-top: max(0px, env(safe-area-inset-top, 0px));
 }

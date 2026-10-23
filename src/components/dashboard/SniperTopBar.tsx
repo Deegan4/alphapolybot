@@ -88,7 +88,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
             <button
               key={tab.key}
               onClick={() => onTabChange(tab.key)}
-              className={`whitespace-nowrap px-2.5 sm:px-3.5 py-1.5 rounded-md text-xs sm:text-sm font-sans font-semibold transition-colors ${
+              className={`whitespace-nowrap px-2.5 sm:px-3.5 py-2 min-h-[40px] rounded-md text-xs sm:text-sm font-sans font-semibold transition-colors ${
                 activeTab === tab.key
                   ? 'bg-agent-green/15 text-agent-green border border-agent-green/30'
                   : 'text-agent-text-muted hover:text-agent-text'
@@ -177,8 +177,21 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
       </div>
 
       {/* Right: Stats + status */}
-      <div className="flex items-center gap-3 sm:gap-6">
-        {/* Inline stats (hidden on mobile) */}
+      <div className="flex items-center gap-2 sm:gap-6">
+        {/* Compact balance / PnL on phones — full stats from lg up */}
+        <div className="flex lg:hidden items-center gap-2 text-xs font-mono">
+          <div className="text-center px-1">
+            <div className="text-[9px] uppercase tracking-wider text-agent-text-muted font-sans">Bal</div>
+            <div className="text-agent-text font-semibold tabular-nums">${balance.toFixed(2)}</div>
+          </div>
+          <div className="text-center px-1">
+            <div className="text-[9px] uppercase tracking-wider text-agent-text-muted font-sans">PnL</div>
+            <div className={`font-semibold tabular-nums ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
+              {todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)}
+            </div>
+          </div>
+        </div>
+
         <div className="hidden lg:flex items-center gap-5 text-sm font-mono">
           <div className="text-center">
             <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans">Balance</div>
@@ -280,10 +293,11 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
         {/* Settings */}
         <Link
           to="/settings"
-          className="text-agent-text-muted hover:text-agent-text transition-colors"
+          className="text-agent-text-muted hover:text-agent-text transition-colors min-h-[44px] min-w-[44px] inline-flex items-center justify-center"
           title="Settings"
+          aria-label="Settings"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
             <circle cx="12" cy="12" r="3" />
           </svg>

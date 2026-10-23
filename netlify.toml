@@ -52,6 +52,19 @@
 [build.environment]
   NODE_VERSION = "20"
 
+# Service worker must always revalidate so clients pick up new shells
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Service-Worker-Allowed = "/"
+
+[[headers]]
+  for = "/manifest.webmanifest"
+  [headers.values]
+    Content-Type = "application/manifest+json"
+    Cache-Control = "public, max-age=3600"
+
 # Security headers.
 #
 # The CSP matters more here than in a typical SPA: wallet signing secrets and

@@ -8,8 +8,8 @@ import { secureStorage } from '@/utils/secureStorage'
 import { strategyManager } from '@/services/strategies'
 import { openRouterService } from '@/services/llm'
 import { notificationService } from '@/services/notifications'
-import { MatrixToastContainer } from '@/components/ui'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { IosInstallHint } from '@/components/ui/IosInstallHint'
 
 // Lazy-load route views — Vite code-splits each into its own chunk.
 const DashboardView = React.lazy(() => import('@/views/DashboardView'))
@@ -249,6 +249,7 @@ const App: React.FC = () => {
           </Routes>
         </Suspense>
       </BrowserRouter>
+      <IosInstallHint />
       {/* <MatrixToastContainer /> removed to disable top-right notifications */}
     </ErrorBoundary>
   )

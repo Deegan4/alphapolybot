@@ -104,7 +104,7 @@ export const HistoryView: React.FC = () => {
     : null
 
   return (
-    <div className="flex-1 flex flex-col gap-4 p-5 min-h-0 overflow-hidden">
+    <div className="flex-1 flex flex-col gap-3 sm:gap-4 p-3 sm:p-5 min-h-0 overflow-y-auto lg:overflow-hidden">
       {/* Mode filter + Summary stats */}
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1 bg-agent-elevated/50 rounded-full p-0.5 border border-agent-border/40">
@@ -112,7 +112,7 @@ export const HistoryView: React.FC = () => {
             <button
               key={mode}
               onClick={() => setModeFilter(mode)}
-              className={`text-[10px] font-mono font-bold px-3 py-1 rounded-full transition-colors ${
+              className={`text-[10px] font-mono font-bold px-3 py-1.5 min-h-[36px] rounded-full transition-colors ${
                 modeFilter === mode
                   ? mode === 'paper' ? 'bg-agent-cyan/20 text-agent-cyan'
                     : mode === 'live' ? 'bg-red-500/20 text-red-400'
@@ -130,7 +130,7 @@ export const HistoryView: React.FC = () => {
       </div>
 
       {/* Summary stats row */}
-      <div className="grid grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-4">
         {[
           { label: 'Total P&L', value: `${filteredSummary.totalPnlUSD >= 0 ? '+' : ''}$${filteredSummary.totalPnlUSD.toFixed(2)}`, color: filteredSummary.totalPnlUSD >= 0 ? 'text-agent-green' : 'text-agent-red' },
           { label: 'Win Rate', value: `${filteredSummary.totalTrades > 0 ? Math.round(filteredSummary.winRate * 100) : 0}%`, color: filteredSummary.winRate >= 0.5 ? 'text-agent-green' : 'text-agent-red' },
@@ -139,15 +139,17 @@ export const HistoryView: React.FC = () => {
           { label: 'Best Trade', value: bestTrade ? `+$${(bestTrade.pnlUSD ?? 0).toFixed(2)}` : '--', color: 'text-agent-green' },
           { label: 'Worst Trade', value: worstTrade ? `$${(worstTrade.pnlUSD ?? 0).toFixed(2)}` : '--', color: 'text-agent-red' },
         ].map((stat) => (
-          <div key={stat.label} className="card-base p-3.5 text-center">
+          <div key={stat.label} className="card-base p-3 sm:p-3.5 text-center">
             <div className="text-[11px] uppercase tracking-wider text-agent-text-muted font-sans font-medium">{stat.label}</div>
-            <div className={`text-lg font-mono font-bold tabular-nums ${stat.color}`}>{stat.value}</div>
+            <div className={`text-base sm:text-lg font-mono font-bold tabular-nums ${stat.color}`}>{stat.value}</div>
           </div>
         ))}
       </div>
 
       {/* Trade table */}
-      <div className="card-base flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div className="card-base flex-1 flex flex-col overflow-hidden min-h-[280px]">
+        <div className="table-scroll flex-1 min-h-0">
+          <div className="min-w-[720px] flex flex-col h-full">
         {/* Table header */}
         <div className="grid grid-cols-[130px_65px_90px_80px_80px_80px_80px_1fr] gap-2 px-4 py-2.5 border-b border-agent-border bg-agent-elevated/30 text-[11px] uppercase tracking-wider text-agent-text-muted font-sans font-medium">
           <button onClick={() => toggleSort('time')} className="text-left hover:text-agent-text">
@@ -169,7 +171,7 @@ export const HistoryView: React.FC = () => {
         {/* Table rows */}
         <div className="flex-1 overflow-y-auto min-h-0">
           {sorted.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-center gap-2">
+            <div className="h-full flex flex-col items-center justify-center text-center gap-2 py-10">
               <span className="text-2xl opacity-30">&#128200;</span>
               <span className="text-sm font-sans text-agent-text-label">No closed trades yet</span>
             </div>
@@ -203,6 +205,8 @@ export const HistoryView: React.FC = () => {
               )
             })
           )}
+        </div>
+          </div>
         </div>
       </div>
     </div>
