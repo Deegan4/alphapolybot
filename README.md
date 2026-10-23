@@ -290,6 +290,21 @@ mcp-server/             # Standalone MCP server for AI-assisted trading
 
 ## Deployment
 
+### Cloudflare Pages (primary)
+
+```bash
+npm ci
+npm run build
+# Needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+npm run deploy:cf
+```
+
+`public/_redirects` proxies `/api/*` (and `/v1/*`) and falls back to the SPA.  
+`public/_headers` applies the same CSP / security headers as Netlify.  
+Pushing to `main` also deploys via `.github/workflows/deploy-cloudflare.yml` once those secrets are set in the repo.
+
+### Netlify (legacy)
+
 Configured for Netlify with GitHub Actions CI:
 
 ```bash

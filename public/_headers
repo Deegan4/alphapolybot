@@ -1,0 +1,15 @@
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://gamma-api.polymarket.com https://clob.polymarket.com https://data-api.polymarket.com https://api.polymarket.us https://gateway.polymarket.us wss://ws-live-data.polymarket.com wss://api.polymarket.us https://api.coinbase.com https://api.binance.com https://api.binance.us wss://stream.binance.com:9443 wss://stream.binance.us:9443 https://api.coingecko.com https://openrouter.ai https://api.polybacktest.com https://gasstation.polygon.technology https://polygon-bor-rpc.publicnode.com https://1rpc.io https://api.telegram.org https://discord.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'
+
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+  Service-Worker-Allowed: /
+
+/manifest.webmanifest
+  Content-Type: application/manifest+json
+  Cache-Control: public, max-age=3600
