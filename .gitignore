@@ -44,3 +44,9 @@ CLAUDE.md
 .playwright-mcp/
 iphone_*.png
 
+
+# pm-us-logger output
+*.sqlite3
+*.sqlite3-*
+.venv/
+__pycache__/
