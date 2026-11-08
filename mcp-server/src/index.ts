@@ -12,7 +12,14 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-import { getMarketsSchema, getMarketDetailSchema, handleGetMarkets, handleGetMarketDetail } from './tools/markets.js';
+import {
+  getMarketsSchema,
+  getMarketDetailSchema,
+  getPriceHistorySchema,
+  handleGetMarkets,
+  handleGetMarketDetail,
+  handleGetPriceHistory,
+} from './tools/markets.js';
 import { getCryptoPricesSchema, handleGetCryptoPrices } from './tools/prices.js';
 import {
   computeKellySchema,
@@ -62,6 +69,13 @@ server.tool(
   'Detailed market data by market_slug: order book summary (best bid/ask, spread, depth, state, last trade). Pass event_slug instead to list every market in an event with prices.',
   getMarketDetailSchema,
   async (args) => json(await handleGetMarketDetail(args)),
+);
+
+server.tool(
+  'get_price_history',
+  'Historical YES/NO display prices for one market (from the order book, not trades). Pick a fixed interval (1H, 6H, 1D default, 1W, 1M, ALL, LIVE) or a custom range of up to 24h. Returns a summary (first/last/min/max/change) plus down-sampled points.',
+  getPriceHistorySchema,
+  async (args) => json(await handleGetPriceHistory(args)),
 );
 
 server.tool(

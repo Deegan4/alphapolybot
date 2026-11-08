@@ -1389,13 +1389,14 @@ const DipSettings: React.FC = () => {
   }
 
   return (
-    <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Configure dip buying parameters" variant="glass">
+    <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Two-leg arbitrage on binary events" variant="glass">
       <div className="space-y-6">
-        <ShelvedStrategyNotice />
         <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
-          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Proven Configuration</h4>
+          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">How it trades on Polymarket US</h4>
           <p className="text-agent-text-muted text-xs font-sans">
-            These settings achieved 86% ROI in backtesting. Adjust with caution.
+            Watches events with two outcome markets. When the best asks (plus the fill premium) sum to less than the
+            target, it buys the same number of shares of both outcomes with FOK orders and holds to resolution, where
+            one share of each pays exactly $1. Dip-trigger fields are kept for compatibility but unused.
           </p>
         </div>
 

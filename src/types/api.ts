@@ -272,6 +272,7 @@ export interface DipArbConfig {
   spreadScanEnabled?: boolean  // Enable periodic order book spread scan (default true)
   spreadScanIntervalMs?: number // Spread scan interval in ms (default 30000)
   spreadScanBatchSize?: number  // Max markets to check per spread scan (default 30)
+  askPremium?: number           // Added to each leg's best ask to improve FOK fill odds (default 0.01)
 }
 
 export interface DipSignal {
