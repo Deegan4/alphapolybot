@@ -146,7 +146,7 @@ export class PositionLifecycleManager {
           const matchingPos = positions.find(p =>
             p.marketSlug === position.marketSlug && p.outcome === position.outcome
           )
-          if (!matchingPos || (matchingPos.netPosition ?? 0) <= 0) {
+          if (!matchingPos || matchingPos.size <= 0) {
             console.log(`[PLM] Hydration: zero position for ${position.question.substring(0, 40)}... — skipping`)
             indexedDBService.removePosition(position.marketSlug).catch(() => {})
             // Close TradeLogger record if still open
@@ -217,18 +217,19 @@ export class PositionLifecycleManager {
    */
   private subscribeToUserChannel(): void {
     import('@/services/realtime/UserChannelService').then(({ userChannelService }) => {
+      // onTrade only fires for FILL / PARTIAL_FILL executions
       this.unsubscribeUserChannel = userChannelService.onTrade((msg) => {
-        // Only care about confirmed BUY fills
-        if (msg.side !== 'BUY' || msg.status !== 'CONFIRMED') return
+        // Only care about BUY fills (entries). US side values are 'ORDER_SIDE_BUY' / 'ORDER_SIDE_SELL'.
+        if (msg.side !== 'ORDER_SIDE_BUY' && msg.side !== 'BUY') return
 
-        // US user channel uses market_slug (not asset_id)
-        const slug = msg.market_slug ?? msg.asset_id
+        const slug = msg.marketSlug
         if (!slug) return
 
         const position = this.positions.get(slug)
         if (!position) return
 
-        const actualSize = parseFloat(msg.size)
+        // Prefer the order's cumulative filled quantity; fall back to this execution's shares
+        const actualSize = msg.cumQuantity ?? parseFloat(msg.lastShares ?? '')
         if (!actualSize || isNaN(actualSize) || actualSize <= 0) return
 
         // Only update if the size actually differs (avoids unnecessary writes)

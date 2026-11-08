@@ -153,6 +153,7 @@ interface SettingsStore extends AppSettingsState {
   setBtcEnableBtc: (enabled: boolean) => void
   setBtcEnableEth: (enabled: boolean) => void
   setBtcEnableSol: (enabled: boolean) => void
+  setBtcEnableXrp: (enabled: boolean) => void
   setBtcEnable5m: (enabled: boolean) => void
   setBtcEnable15m: (enabled: boolean) => void
   setBtcEnableHourly: (enabled: boolean) => void
@@ -980,7 +981,7 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.minBalanceForTrade === 1.50) state.minBalanceForTrade = 1.00
           if (state.kellyFraction === 0.25) state.kellyFraction = 0.15
         }
-        return state as AppSettingsState
+        return state as unknown as AppSettingsState
       },
       partialize: (state) => ({
         dryRun: state.dryRun,

@@ -25,6 +25,11 @@ export type RejectionCategory =
   | 'market_filter'
   | 'order_too_small'
   | 'dry_run'
+  | 'regime_filter'
+  | 'llm_veto'
+  | 'llm_confidence'
+  | 'edge_tracker'
+  | 'capital_exposure'
 
 export interface RejectionEvent {
   category: RejectionCategory

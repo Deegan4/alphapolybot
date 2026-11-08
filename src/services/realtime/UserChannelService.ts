@@ -258,7 +258,16 @@ export class UserChannelService {
     return `priv-${++this.requestIdCounter}-${Date.now()}`
   }
 
-  private mapExecution(exec: { id: string; order: { id: string; marketSlug: string; side: string; intent: string }; lastShares?: string; lastPx?: { value: string }; type: string }): USOrderExecution {
+  private mapExecution(exec: {
+    id: string
+    order: { id: string; marketSlug: string; side: string; intent: string; quantity?: number; cumQuantity?: number; leavesQuantity?: number; state?: string }
+    lastShares?: string
+    lastPx?: { value: string }
+    type: string
+    transactTime?: string
+    tradeId?: string
+    aggressor?: boolean
+  }): USOrderExecution {
     return {
       id: exec.id,
       orderId: exec.order.id,
@@ -268,6 +277,13 @@ export class UserChannelService {
       lastShares: exec.lastShares,
       lastPx: exec.lastPx ? parseFloat(exec.lastPx.value) : undefined,
       type: exec.type,
+      transactTime: exec.transactTime,
+      tradeId: exec.tradeId,
+      aggressor: exec.aggressor,
+      orderQuantity: exec.order.quantity,
+      cumQuantity: exec.order.cumQuantity,
+      leavesQuantity: exec.order.leavesQuantity,
+      orderState: exec.order.state,
     }
   }
 

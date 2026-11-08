@@ -18,7 +18,7 @@ let pollIntervalId: ReturnType<typeof setInterval> | null = null
 
 export const useWalletStore = create<WalletStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       // Initial state
       keyId: null,
       isConnected: false,
@@ -40,10 +40,28 @@ export const useWalletStore = create<WalletStore>()(
           isConnecting: false,
         })
 
+        if (success) {
+          // Post-connect wiring shared by Settings → Connect and App auto-reconnect:
+          // balance polling (services read balance from any route) and the private
+          // user-channel WebSocket (push-based fill/cancel events for GTD tracking + PLM).
+          get().startPolling()
+          import('@/services/realtime').then(({ userChannelService }) => {
+            userChannelService.connect().then(connected => {
+              if (connected) {
+                console.log('[WalletStore] User channel connected — push-based order updates active')
+              }
+            })
+          }).catch(() => {})
+        }
+
         return success
       },
 
       disconnect: () => {
+        get().stopPolling()
+        import('@/services/realtime')
+          .then(({ userChannelService }) => userChannelService.disconnect())
+          .catch(() => {})
         walletService.disconnect()
         set({
           keyId: null,

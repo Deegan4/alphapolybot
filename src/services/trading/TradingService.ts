@@ -1,4 +1,4 @@
-import type { Market, OrderRequest, OrderResult, Order, PendingGtcOrder } from '@/types'
+import type { Market, Order, OrderRequest, OrderResult, PendingGtcOrder } from '@/types'
 import { polymarketUSClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -35,7 +35,6 @@ const DEFAULT_CONFIG: TradingConfig = {
 export class TradingService {
   private config: TradingConfig
   private lastOrderTime = 0
-  private pendingOrders = new Map<string, Order>()
   private inFlightTrades = new Map<string, number>() // tradeId → USD amount
 
   constructor(config: Partial<TradingConfig> = {}) {
@@ -81,7 +80,7 @@ export class TradingService {
     const riskCheck = riskManager.validateTrade(amount, market.slug)
     if (!riskCheck.allowed) {
       console.warn(`[TradingService] BLOCKED by risk check: ${riskCheck.reason}`)
-      rejectionTracker.record('risk', 'system', riskCheck.reason)
+      rejectionTracker.record('risk', 'system', riskCheck.reason ?? 'risk check failed')
       activityLogger.logWarning(`Trade blocked by risk manager: ${riskCheck.reason}`)
       return { success: false, error: `Risk check failed: ${riskCheck.reason}` }
     }
@@ -120,8 +119,9 @@ export class TradingService {
 
     // Determine order type: caller can override (e.g., DipArb uses GTD), otherwise use config default
     const resolvedOrderType = options?.orderType ?? (this.config.fokOnly ? 'FOK' : 'GTC')
+    // PM US `goodTillTime` is an ISO-8601 timestamp (not unix seconds)
     const gtdExpiration = resolvedOrderType === 'GTD'
-      ? Math.floor((Date.now() + (options?.gtdExpiryMs ?? this.config.gtcExpiryMs)) / 1000)
+      ? new Date(Date.now() + (options?.gtdExpiryMs ?? this.config.gtcExpiryMs)).toISOString()
       : undefined
 
     const orderRequest: OrderRequest = {
@@ -443,11 +443,11 @@ export class TradingService {
       request.side === 'BUY'
     ) {
       try {
-        const expirationSec = Math.floor((Date.now() + this.config.gtcExpiryMs) / 1000)
+        const expiresAtMs = Date.now() + this.config.gtcExpiryMs
         const gtdRequest: OrderRequest = {
           ...request,
           type: 'GTD',
-          expiration: expirationSec,
+          expiration: new Date(expiresAtMs).toISOString(),  // PM US goodTillTime is ISO-8601
         }
 
         console.log(`[TradingService] FOK killed → submitting GTD fallback (expires in ${this.config.gtcExpiryMs / 60000}m)`)
@@ -472,7 +472,7 @@ export class TradingService {
               stopLossPercent: gtdMeta.stopLossPercent,
               takeProfitPercent: gtdMeta.takeProfitPercent,
               placedAt: Date.now(),
-              expiresAt: expirationSec,
+              expiresAt: expiresAtMs,
               status: 'pending',
             })
           }).catch(err => console.warn('[TradingService] Failed to track GTD order:', err))
@@ -569,28 +569,26 @@ export class TradingService {
         unsubOrder()
       }
 
+      // onTrade only fires for FILL / PARTIAL_FILL — either means the order matched
       const unsubTrade = userChannelService.onTrade((msg) => {
         if (resolved) return
-        const matchesMaker = msg.maker_orders?.some(o => o.order_id === orderId)
-        if (!matchesMaker) return
+        if (msg.orderId !== orderId) return
 
-        if (msg.status === 'CONFIRMED') {
-          console.log(`[TradingService] Order ${orderId} confirmed via user channel`)
-          cleanup()
-          resolve(true)
-        } else if (msg.status === 'FAILED') {
-          console.warn(`[TradingService] Order ${orderId} FAILED via user channel`)
-          cleanup()
-          resolve(false)
-        }
+        console.log(`[TradingService] Order ${orderId} ${msg.type === 'EXECUTION_TYPE_FILL' ? 'filled' : 'partially filled'} via user channel`)
+        cleanup()
+        resolve(true)
       })
 
       const unsubOrder = userChannelService.onOrder((msg) => {
         if (resolved) return
-        if (msg.order_id !== orderId) return
+        if (msg.orderId !== orderId) return
 
-        if (msg.event_type === 'CANCELLATION') {
-          console.warn(`[TradingService] Order ${orderId} cancelled via user channel`)
+        if (
+          msg.type === 'EXECUTION_TYPE_CANCELED' ||
+          msg.type === 'EXECUTION_TYPE_REJECTED' ||
+          msg.type === 'EXECUTION_TYPE_EXPIRED'
+        ) {
+          console.warn(`[TradingService] Order ${orderId} ${msg.type.replace('EXECUTION_TYPE_', '').toLowerCase()} via user channel`)
           cleanup()
           resolve(false)
         }

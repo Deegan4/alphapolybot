@@ -5,7 +5,7 @@ import type { PositionStatus } from '@/services/trading/PositionLifecycleManager
 export const ActivePositionsCard: React.FC = () => {
   const [positions, setPositions] = useState<PositionStatus[]>([])
   const [closingIds, setClosingIds] = useState<Set<string>>(new Set())
-  const [confirmAction, setConfirmAction] = useState<{ tokenId: string; type: 'close' | 'abandon' } | null>(null)
+  const [confirmAction, setConfirmAction] = useState<{ slug: string; type: 'close' | 'abandon' } | null>(null)
   const [confirmBulk, setConfirmBulk] = useState<'closeAll' | 'cleanStale' | null>(null)
 
   useEffect(() => {
@@ -17,24 +17,24 @@ export const ActivePositionsCard: React.FC = () => {
 
   const staleCount = positions.filter(p => p.isStale).length
 
-  const handleClose = async (tokenId: string) => {
+  const handleClose = async (slug: string) => {
     setConfirmAction(null)
-    setClosingIds(prev => new Set(prev).add(tokenId))
+    setClosingIds(prev => new Set(prev).add(slug))
     try {
-      await positionLifecycleManager.forceClosePosition(tokenId)
+      await positionLifecycleManager.forceClosePosition(slug)
     } finally {
-      setClosingIds(prev => { const next = new Set(prev); next.delete(tokenId); return next })
+      setClosingIds(prev => { const next = new Set(prev); next.delete(slug); return next })
     }
   }
 
-  const handleAbandon = (tokenId: string) => {
+  const handleAbandon = (slug: string) => {
     setConfirmAction(null)
-    positionLifecycleManager.abandonPosition(tokenId)
+    positionLifecycleManager.abandonPosition(slug)
   }
 
   const handleCloseAll = async () => {
     setConfirmBulk(null)
-    const ids = positions.map(p => p.tokenId)
+    const ids = positions.map(p => p.marketSlug)
     setClosingIds(new Set(ids))
     try {
       await positionLifecycleManager.forceCloseAll()
@@ -46,7 +46,7 @@ export const ActivePositionsCard: React.FC = () => {
   const handleCleanStale = () => {
     setConfirmBulk(null)
     for (const p of positions.filter(p => p.isStale)) {
-      positionLifecycleManager.abandonPosition(p.tokenId)
+      positionLifecycleManager.abandonPosition(p.marketSlug)
     }
   }
 
@@ -118,16 +118,17 @@ export const ActivePositionsCard: React.FC = () => {
         ) : (
           positions.map((pos) => {
             const holdMins = Math.round((Date.now() - pos.entryTime) / 60_000)
+            const action = confirmAction && confirmAction.slug === pos.marketSlug ? confirmAction : null
 
             return (
               <div
-                key={pos.tokenId}
+                key={pos.marketSlug}
                 className="group flex items-center justify-between bg-agent-elevated/40 rounded-md px-3 py-2 transition-colors hover:bg-agent-elevated/60"
               >
                 <div className="flex flex-col min-w-0">
                   <div className="flex items-center gap-1">
                     <span className="text-sm font-mono text-agent-text truncate max-w-[140px]">
-                      {pos.outcome || pos.tokenId.slice(0, 8)}
+                      {pos.outcome || pos.marketSlug.slice(0, 8)}
                     </span>
                     <span className="text-[10px] font-mono text-agent-cyan/50 px-1">
                       {pos.strategy?.toUpperCase() || '?'}
@@ -171,15 +172,15 @@ export const ActivePositionsCard: React.FC = () => {
 
                   {/* Per-position actions */}
                   <div className="flex flex-col items-end gap-0.5 w-12">
-                    {confirmAction?.tokenId === pos.tokenId ? (
+                    {action ? (
                       <div className="flex items-center gap-1">
                         <button
-                          onClick={() => confirmAction.type === 'close'
-                            ? handleClose(pos.tokenId)
-                            : handleAbandon(pos.tokenId)}
+                          onClick={() => action.type === 'close'
+                            ? handleClose(pos.marketSlug)
+                            : handleAbandon(pos.marketSlug)}
                           className="text-[9px] font-mono font-bold text-white bg-agent-red/80 hover:bg-agent-red px-1 py-0.5 rounded"
                         >
-                          {confirmAction.type === 'close' ? 'Sell' : 'Drop'}
+                          {action.type === 'close' ? 'Sell' : 'Drop'}
                         </button>
                         <button
                           onClick={() => setConfirmAction(null)}
@@ -188,19 +189,19 @@ export const ActivePositionsCard: React.FC = () => {
                           X
                         </button>
                       </div>
-                    ) : closingIds.has(pos.tokenId) ? (
+                    ) : closingIds.has(pos.marketSlug) ? (
                       <span className="text-[9px] font-mono text-agent-orange animate-pulse">Selling...</span>
                     ) : (
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
-                          onClick={() => setConfirmAction({ tokenId: pos.tokenId, type: 'close' })}
+                          onClick={() => setConfirmAction({ slug: pos.marketSlug, type: 'close' })}
                           className="text-[9px] font-mono text-agent-red hover:text-red-300 px-1 py-0.5 rounded hover:bg-agent-red/10"
                           title="Force sell this position"
                         >
                           Close
                         </button>
                         <button
-                          onClick={() => setConfirmAction({ tokenId: pos.tokenId, type: 'abandon' })}
+                          onClick={() => setConfirmAction({ slug: pos.marketSlug, type: 'abandon' })}
                           className="text-[9px] font-mono text-agent-orange hover:text-orange-300 px-1 py-0.5 rounded hover:bg-agent-orange/10"
                           title="Remove without selling (write off)"
                         >

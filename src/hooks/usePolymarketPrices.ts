@@ -240,8 +240,7 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
           continue
         }
 
-        const { market, upSlug, downSlug, upIndex, windowEnd, duration } = discovered
-        const downIndex = upIndex === 0 ? 1 : 0
+        const { market, upSlug, downSlug, windowEnd, duration } = discovered
 
         // Register slug → asset mapping
         slugMap.current.set(upSlug, { asset, isUp: true })

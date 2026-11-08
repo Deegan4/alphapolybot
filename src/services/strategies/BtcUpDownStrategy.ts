@@ -12,10 +12,7 @@ import { useWalletStore } from '@/stores/walletStore'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
 import {
   computeSignal as _computeSignal,
-  computeVolatility as _computeVolatility,
   classifyRegime as _classifyRegime,
-  computeRSI as _computeRSI,
-  linearRegressionSlope as _linearRegressionSlope,
 } from './btcupdown/signalEngine'
 
 // Re-export types from signalEngine for backward compatibility
@@ -68,13 +65,6 @@ export const WINDOW_DURATIONS = {
 } as const
 
 export type WindowDuration = keyof typeof WINDOW_DURATIONS
-
-const ASSET_NAMES: Record<string, string> = {
-  BTC: 'Bitcoin',
-  ETH: 'Ethereum',
-  SOL: 'Solana',
-  XRP: 'XRP',
-}
 
 /**
  * Slug prefixes for each asset × window duration on Polymarket.
@@ -848,10 +838,10 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // === Phase 3d: Liquidity pre-check ===
       try {
-        const { OrderBookDepth } = await import('@/services/trading/OrderBookDepth')
+        const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')
         const firstSlug = this.marketOutcomeSlugs.get(market.id)?.[0]
         if (firstSlug) {
-          const depthCheck = await OrderBookDepth.checkBuyDepth(firstSlug, 0.50, 1.0)
+          const depthCheck = await orderBookDepth.checkBuyDepth(firstSlug, 0.50, 1.0)
           if (depthCheck.maxFillableUSD < 1.0) {
             rejectionTracker.record('liquidity', 'btc', `${asset} ${durationLabel} depth $${depthCheck.maxFillableUSD.toFixed(2)} < $1`)
             return
@@ -1285,20 +1275,8 @@ Respond ONLY with JSON:
     }, imbalanceScore)
   }
 
-  private computeVolatility(prices: Array<{ price: number; timestamp: number }>): number {
-    return _computeVolatility(prices)
-  }
-
   classifyRegime(prices: Array<{ price: number; timestamp: number }>): 'choppy' | 'trending' | 'neutral' {
     return _classifyRegime(prices)
-  }
-
-  private computeRSI(prices: Array<{ price: number; timestamp: number }>, period = 14): number {
-    return _computeRSI(prices, period)
-  }
-
-  private linearRegressionSlope(points: Array<{ price: number; timestamp: number }>): number {
-    return _linearRegressionSlope(points)
   }
 
   // ==========================================

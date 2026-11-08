@@ -291,7 +291,7 @@ export class IndexedDBService {
     try {
       const stored: StoredArbRound = {
         ...round,
-        id: `arb-${round.marketId}-${Date.now()}`,
+        id: `arb-${round.marketSlug}-${Date.now()}`,
         _storedAt: Date.now(),
       }
       await this.db.put('arbRounds', stored)

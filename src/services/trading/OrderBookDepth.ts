@@ -9,7 +9,6 @@
  */
 
 import { polymarketUSClient } from '@/services/api'
-import type { OrderBook } from '@/types'
 
 export interface DepthCheck {
   /** Whether sufficient liquidity exists at the target price */

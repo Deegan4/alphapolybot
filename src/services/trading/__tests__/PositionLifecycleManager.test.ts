@@ -6,11 +6,12 @@ import { PositionLifecycleManager, type TrackedPosition } from '../PositionLifec
 // ==========================================
 
 // Mock RealtimeService
-const mockOnPriceUpdate = vi.fn(() => vi.fn()) // returns unsubscribe fn
-const mockSubscribeMarket = vi.fn()
-const mockUnsubscribeMarket = vi.fn()
-const mockGetPrice = vi.fn()
-const mockIsStale = vi.fn(() => false) // default: prices are fresh
+// Mocks take `...args: unknown[]` so the vi.mock factories below can forward arbitrary args.
+const mockOnPriceUpdate = vi.fn((..._args: unknown[]) => vi.fn()) // returns unsubscribe fn
+const mockSubscribeMarket = vi.fn((..._args: unknown[]) => undefined)
+const mockUnsubscribeMarket = vi.fn((..._args: unknown[]) => undefined)
+const mockGetPrice = vi.fn((..._args: unknown[]): unknown => undefined)
+const mockIsStale = vi.fn((..._args: unknown[]) => false) // default: prices are fresh
 
 vi.mock('@/services/realtime', () => ({
   realtimeService: {

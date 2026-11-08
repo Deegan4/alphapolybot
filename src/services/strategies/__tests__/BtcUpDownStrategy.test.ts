@@ -137,6 +137,7 @@ vi.mock('@/services/trading/MicrostructureAnalyzer', () => ({
 
 // Import after all mocks are set up
 import { parseReferencePrice, BtcUpDownStrategy } from '../BtcUpDownStrategy'
+import { computeVolatility, computeRSI } from '../btcupdown/signalEngine'
 
 // ==========================================
 // TESTS
@@ -294,11 +295,9 @@ describe('Volatility and RSI helpers (via strategy internals)', () => {
     strategy = new BtcUpDownStrategy()
   })
 
-  // Access private methods via type cast for testing
-  const getPrivate = (s: BtcUpDownStrategy) => s as unknown as {
-    computeVolatility: (prices: Array<{ price: number; timestamp: number }>) => number
-    computeRSI: (prices: Array<{ price: number; timestamp: number }>, period?: number) => number
-  }
+  // Volatility/RSI live in btcupdown/signalEngine (the strategy no longer wraps them);
+  // keep the call-site shape so the cases below read unchanged.
+  const getPrivate = (_s: BtcUpDownStrategy) => ({ computeVolatility, computeRSI })
 
   describe('computeVolatility', () => {
     const mkPrices = (values: number[]): Array<{ price: number; timestamp: number }> =>

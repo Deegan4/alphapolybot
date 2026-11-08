@@ -6,7 +6,7 @@ import { strategyManager } from '@/services/strategies'
 import { tradingService, riskManager } from '@/services/trading'
 import { openRouterService } from '@/services/llm'
 import { notificationService } from '@/services/notifications/NotificationService'
-import type { AppSettings, LLMPredictionConfig, DipArbConfig, ProjectFWConfig, WalletEntry } from '@/types'
+import type { LLMPredictionConfig, DipArbConfig, ProjectFWConfig, WalletEntry } from '@/types'
 import type { RiskManagerStatus } from '@/services/trading'
 import { cn } from '@/utils/cn'
 
@@ -20,7 +20,7 @@ const tabContentVariants = {
  * SettingsView - Application settings and configuration
  */
 export const SettingsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'alerts' | 'api'>('trading')
+  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'copytrading' | 'alerts' | 'api'>('trading')
 
   const tabs = [
     { id: 'trading', label: 'Trading Mode' },
@@ -551,8 +551,8 @@ const WalletSettings: React.FC = () => {
  * Wallet Registry — manage multiple PM US wallets
  */
 const WalletRegistryPanel: React.FC = () => {
-  const { wallets, activeWalletId, addWallet, removeWallet, setActiveWallet, renameWallet } = useSettingsStore()
-  const { connect, disconnect } = useWalletStore()
+  const { wallets, activeWalletId, addWallet, removeWallet, setActiveWallet } = useSettingsStore()
+  const { disconnect } = useWalletStore()
   const [showAdd, setShowAdd] = useState(false)
   const [newLabel, setNewLabel] = useState('')
   const [newKeyId, setNewKeyId] = useState('')

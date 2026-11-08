@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { MatrixSparkline } from '@/components/charts/MatrixSparkline'
+import type { WindowDuration } from '@/services/strategies/BtcUpDownStrategy'
 
 export interface AssetCardProps {
   symbol: 'BTC' | 'ETH' | 'SOL' | 'XRP'
@@ -11,7 +12,7 @@ export interface AssetCardProps {
   upPriceChange: number        // % change of Up outcome since subscription
   referencePrice: number       // Spot price from market question (e.g., 97432)
   windowEnd: number            // Unix ms when market resolves
-  windowDuration: '5m' | '15m' | '9pm' | null
+  windowDuration: WindowDuration | null
   marketFound: boolean
   // Binance spot price fallback (shown when Polymarket unavailable)
   spotPrice?: number           // Live Binance/RTDS spot price
@@ -71,7 +72,6 @@ export const AssetCard: React.FC<AssetCardProps> = ({
   wins,
   losses,
   pnl,
-  recentTradePnls,
 }) => {
   // 1-second tick for countdown
   const [now, setNow] = useState(Date.now())

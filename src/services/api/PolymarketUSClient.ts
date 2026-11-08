@@ -39,6 +39,7 @@ import type {
   Position,
   PriceData,
   SpreadData,
+  Trade,
   USEvent,
   UserActivity,
   Order,
@@ -619,6 +620,69 @@ export class PolymarketUSClient {
       })
     }
     return positions
+  }
+
+  /**
+   * Closed (fully exited or resolved) positions: net position is zero but the
+   * account traded the market. Used by the Portfolio "Closed" tab.
+   */
+  async getClosedPositions(limit = 50): Promise<Position[]> {
+    const sdk = this.getAuthSDK()
+    const resp: GetUserPositionsResponse = await sdk.portfolio.positions()
+
+    const closed: Position[] = []
+    for (const [slug, pos] of Object.entries(resp.positions)) {
+      const netPos = parseFloat(pos.netPosition || '0')
+      const qtyBought = parseFloat(pos.qtyBought || '0')
+      if (netPos !== 0 || qtyBought <= 0) continue
+
+      const cost = Math.abs(amountToNumber(pos.cost))
+      const realized = amountToNumber(pos.realized)
+      const entryPrice = qtyBought > 0 ? cost / qtyBought : 0
+      const when = pos.updateTime ? new Date(pos.updateTime) : new Date()
+
+      closed.push({
+        marketSlug: slug,
+        marketQuestion: pos.marketMetadata?.title || slug,
+        outcome: 'yes',          // side is not recoverable once flat; display only
+        size: 0,
+        entryPrice,
+        currentPrice: 0,
+        cost,
+        realized,
+        pnl: {
+          dollar: realized,
+          percent: cost > 0 ? (realized / cost) * 100 : 0,
+        },
+        entryTime: when,
+        lastUpdate: when,
+      })
+    }
+    return closed
+      .sort((a, b) => b.lastUpdate.getTime() - a.lastUpdate.getTime())
+      .slice(0, limit)
+  }
+
+  /** Recent account fills (all strategies / manual), newest first */
+  async getRecentTrades(limit = 10): Promise<Trade[]> {
+    const sdk = this.getAuthSDK()
+    const resp: GetActivitiesResponse = await sdk.portfolio.activities({ limit: Math.max(limit * 2, limit) })
+
+    const trades: Trade[] = []
+    for (const a of resp.activities) {
+      if (a.type !== 'ACTIVITY_TYPE_TRADE' || !a.trade) continue
+      const t = a.trade
+      trades.push({
+        id: t.id,
+        marketSlug: t.marketSlug,
+        price: amountToNumber(t.price),
+        size: parseFloat(t.qty || '0'),
+        timestamp: new Date(t.createTime || t.updateTime || Date.now()),
+        realizedPnl: t.realizedPnl ? amountToNumber(t.realizedPnl) : undefined,
+      })
+      if (trades.length >= limit) break
+    }
+    return trades
   }
 
   /** Get account activities */

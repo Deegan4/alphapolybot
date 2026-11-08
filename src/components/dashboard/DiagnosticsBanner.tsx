@@ -213,7 +213,7 @@ function computeBanner(ctx: {
           label: `Clean ${stalePositions.length} Stale`,
           onClick: () => {
             for (const p of stalePositions) {
-              positionLifecycleManager.abandonPosition(p.tokenId)
+              positionLifecycleManager.abandonPosition(p.marketSlug)
             }
           },
         }

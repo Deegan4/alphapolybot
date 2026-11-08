@@ -139,11 +139,13 @@ export interface PendingGtcOrder {
 export interface Trade {
   id: string
   marketSlug: string
-  side: 'BUY' | 'SELL'
+  /** PM US account trade history does not report side; undefined when unknown */
+  side?: 'BUY' | 'SELL'
   price: number
   size: number
   fee?: number
   timestamp: Date
+  realizedPnl?: number
 }
 
 // ==========================================
@@ -622,19 +624,34 @@ export interface SpreadData {
 // WEBSOCKET PRIVATE CHANNEL TYPES (US API)
 // ==========================================
 
+/** US WebSocket execution types (SDK `ExecutionType` string enum) */
+export type USExecutionType =
+  | 'EXECUTION_TYPE_FILL'
+  | 'EXECUTION_TYPE_PARTIAL_FILL'
+  | 'EXECUTION_TYPE_CANCELED'
+  | 'EXECUTION_TYPE_REPLACE'
+  | 'EXECUTION_TYPE_REJECTED'
+  | 'EXECUTION_TYPE_EXPIRED'
+  | 'EXECUTION_TYPE_DONE_FOR_DAY'
+
 /** US WebSocket order execution event */
 export interface USOrderExecution {
   id: string
   orderId: string
   marketSlug: string
-  side: string
+  side: string         // 'ORDER_SIDE_BUY' | 'ORDER_SIDE_SELL'
   intent: USOrderIntent
-  lastShares?: string
+  lastShares?: string  // shares in THIS execution (not cumulative)
   lastPx?: number
-  type: string         // ExecutionType
+  type: USExecutionType | string
   transactTime?: string
   tradeId?: string
   aggressor?: boolean
+  // Order-level quantities from the embedded order object, when present
+  orderQuantity?: number
+  cumQuantity?: number     // cumulative filled shares
+  leavesQuantity?: number  // remaining unfilled shares
+  orderState?: string      // 'ORDER_STATE_FILLED' etc.
 }
 
 /** US WebSocket position update */

@@ -98,7 +98,7 @@ export class CoinbaseClient {
 
   /** List all accounts with balances */
   async getAccounts(): Promise<CoinbaseAccountBalance[]> {
-    const resp = await this.signedRequest('GET', `${BROKERAGE}/accounts`, undefined, { limit: 250 })
+    const resp = await this.signedRequest('GET', `${BROKERAGE}/accounts`, undefined, { limit: '250' })
     if (!resp.ok) {
       const err = await resp.text()
       console.error('[CoinbaseClient] getAccounts failed:', err)

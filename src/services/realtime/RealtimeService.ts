@@ -15,7 +15,6 @@ import {
   MarketsWebSocket,
   type MarketDataLite,
   type MarketData,
-  type WebSocketOptions,
 } from 'polymarket-us'
 import type { PriceData } from '@/types'
 import { polymarketUSClient } from '@/services/api'
@@ -256,7 +255,7 @@ export class RealtimeService {
    * Feed bid/ask data to MicrostructureAnalyzer (best-effort, non-blocking).
    * Dynamic import cached after first resolution.
    */
-  private microstructureModule: typeof import('@/services/trading/MicrostructureAnalyzer') | null = null
+  private microstructureModule: Promise<typeof import('@/services/trading/MicrostructureAnalyzer')> | null = null
   private microstructureImporting = false
   private feedMicrostructureAnalyzer(slug: string, bid: number, ask: number): void {
     if (bid <= 0 || ask <= 0 || bid === ask) return

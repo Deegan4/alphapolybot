@@ -42,7 +42,7 @@ const indexedDBMock = {
           put: (value: unknown, key: string) => { keyring[key] = value; return makeRequest(undefined) },
         }),
         set oncomplete(fn: () => void) { queueMicrotask(fn) },
-        get oncomplete() { return null },
+        get oncomplete(): (() => void) | null { return null },
         onerror: null,
         error: null,
       }),
