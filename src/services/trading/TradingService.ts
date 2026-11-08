@@ -1,5 +1,5 @@
 import type { Market, Order, OrderRequest, OrderResult, PendingGtcOrder } from '@/types'
-import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome } from '@/services/api'
+import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { riskManager } from './RiskManager'
@@ -111,8 +111,12 @@ export class TradingService {
       // Depth check is best-effort — proceed if it fails
     }
 
-    // Calculate shares (amount / price)
-    const shares = amount / currentPrice
+    // Calculate shares (amount / price), rounded down to the market's step:
+    // whole contracts unless minimumTradeQty < 1, or the exchange rejects it
+    const shares = roundOrderQuantity(amount / currentPrice, market.orderMinSize)
+    if (shares <= 0) {
+      return { success: false, error: `Order too small: $${amount.toFixed(2)} at ${currentPrice.toFixed(3)} is under one contract` }
+    }
 
     // Apply slippage tolerance
     const maxPrice = currentPrice * (1 + this.config.maxSlippage)
@@ -337,8 +341,13 @@ export class TradingService {
         // Adjust for tick size
         request.price = this.adjustForTickSize(request.price)
 
-        // Place the order
-        const result = await polymarketUSClient.placeOrder(request)
+        // Place the order. A latency stopgap reject ("Order Processing Max
+        // Delay Exceeded") is transient and may be resubmitted once.
+        let result = await polymarketUSClient.placeOrder(request)
+        if (!result.success && isTransientLatencyReject(result.error)) {
+          console.warn(`[TradingService] Exchange latency reject — resubmitting once: ${result.error}`)
+          result = await polymarketUSClient.placeOrder(request)
+        }
 
         if (result.success) {
           this.lastOrderTime = Date.now()

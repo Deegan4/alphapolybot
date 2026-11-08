@@ -2,9 +2,9 @@
  * Client-side request throttle for the Polymarket US SDK.
  * (Same implementation as the app's src/services/api/requestThrottle.ts.)
  *
- * The public gateway sits behind a Cloudflare rate limit: ~30 requests in
- * under two seconds draws HTTP 429 (error 1015) and a temporary IP ban that
- * also blocks the order-book reads trading depends on. Every SDK request goes
+ * Polymarket US allows 25 requests/s per IP. Exceeding it draws HTTP 429 and,
+ * on the public gateway, a Cloudflare 1015 ban lasting minutes that also
+ * blocks the order-book reads trading depends on. Every SDK request goes
  * through `PolymarketUS#request`, so wrapping that one method throttles all
  * of them. Public (gateway) and authenticated (api) requests get separate
  * token buckets so market-data bursts never delay orders.
@@ -22,8 +22,15 @@ export interface BucketConfig {
   maxCooldownMs?: number
 }
 
-export const GATEWAY_BUCKET: BucketConfig = { ratePerSec: 3, burst: 6, cooldownMs: 20_000, maxCooldownMs: 5 * 60_000 }
-export const API_BUCKET: BucketConfig = { ratePerSec: 8, burst: 16, cooldownMs: 10_000, maxCooldownMs: 2 * 60_000 }
+/**
+ * docs.polymarket.us/api-reference/rate-limits: 25 requests/s per source IP
+ * (shared by every key on that IP); on 429 wait at least 1s, then back off
+ * exponentially. Gateway + API together stay under 25/s. Bursts of ~30
+ * requests in under two seconds drew Cloudflare 1015 bans in testing, so the
+ * gateway (bulk market data) gets the smaller share.
+ */
+export const GATEWAY_BUCKET: BucketConfig = { ratePerSec: 8, burst: 10, cooldownMs: 2_000, maxCooldownMs: 5 * 60_000 }
+export const API_BUCKET: BucketConfig = { ratePerSec: 15, burst: 15, cooldownMs: 2_000, maxCooldownMs: 2 * 60_000 }
 
 type Clock = { now: () => number; sleep: (ms: number) => Promise<void> }
 

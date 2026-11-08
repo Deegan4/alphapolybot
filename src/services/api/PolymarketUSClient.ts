@@ -53,6 +53,10 @@ import {
   priceDataFromBbo,
   orderBookFromWire,
   reportedPriceForOutcome,
+  netPositionQty,
+  qtyBought,
+  usdBalance,
+  type WirePositionQty,
   type WireEvent,
   type WireMarket,
   type WireBBO,
@@ -568,23 +572,41 @@ export class PolymarketUSClient {
   async getBalances(): Promise<{ balance: number; buyingPower: number }> {
     const sdk = this.getAuthSDK()
     const resp: GetAccountBalancesResponse = await sdk.account.balances()
-    const bal = resp.balances?.[0]
+    const bal = usdBalance(resp.balances)
     return {
       balance: bal?.currentBalance || 0,
       buyingPower: bal?.buyingPower || 0,
     }
   }
 
+  /**
+   * All position entries, following `nextCursor` until `eof` (100 per page).
+   * Keyed by market slug.
+   */
+  private async fetchAllPositions(marketSlug?: string): Promise<Array<[string, GetUserPositionsResponse['positions'][string]]>> {
+    const sdk = this.getAuthSDK()
+    const out: Array<[string, GetUserPositionsResponse['positions'][string]]> = []
+    let cursor: string | undefined
+    for (let page = 0; page < 50; page++) {
+      const params: Record<string, unknown> = { limit: 100 }
+      if (marketSlug) params.market = marketSlug
+      if (cursor) params.cursor = cursor
+      const resp = (await sdk.portfolio.positions(params as never)) as GetUserPositionsResponse & { nextCursor?: string; eof?: boolean }
+      out.push(...Object.entries(resp.positions ?? {}))
+      if (resp.eof !== false || !resp.nextCursor || resp.nextCursor === cursor) break
+      cursor = resp.nextCursor
+    }
+    return out
+  }
+
   /** Get positions, optionally filtered by market slug */
   async getPositions(marketSlug?: string): Promise<Position[]> {
-    const sdk = this.getAuthSDK()
-    const resp: GetUserPositionsResponse = await sdk.portfolio.positions(
-      marketSlug ? { market: marketSlug } : undefined
-    )
+    const entries = await this.fetchAllPositions(marketSlug)
 
     const positions: Position[] = []
-    for (const [slug, pos] of Object.entries(resp.positions)) {
-      const netPos = parseFloat(pos.netPosition || '0')
+    for (const [slug, pos] of entries) {
+      // Decimal field first: the integer one is rounded (a 0.5 position reads 0 or 1)
+      const netPos = netPositionQty(pos as WirePositionQty)
       if (netPos === 0) continue
 
       const cost = amountToNumber(pos.cost)
@@ -619,18 +641,17 @@ export class PolymarketUSClient {
    * account traded the market. Used by the Portfolio "Closed" tab.
    */
   async getClosedPositions(limit = 50): Promise<Position[]> {
-    const sdk = this.getAuthSDK()
-    const resp: GetUserPositionsResponse = await sdk.portfolio.positions()
+    const entries = await this.fetchAllPositions()
 
     const closed: Position[] = []
-    for (const [slug, pos] of Object.entries(resp.positions)) {
-      const netPos = parseFloat(pos.netPosition || '0')
-      const qtyBought = parseFloat(pos.qtyBought || '0')
-      if (netPos !== 0 || qtyBought <= 0) continue
+    for (const [slug, pos] of entries) {
+      const netPos = netPositionQty(pos as WirePositionQty)
+      const bought = qtyBought(pos as WirePositionQty)
+      if (netPos !== 0 || bought <= 0) continue
 
       const cost = Math.abs(amountToNumber(pos.cost))
       const realized = amountToNumber(pos.realized)
-      const entryPrice = qtyBought > 0 ? cost / qtyBought : 0
+      const entryPrice = bought > 0 ? cost / bought : 0
       const when = pos.updateTime ? new Date(pos.updateTime) : new Date()
 
       closed.push({

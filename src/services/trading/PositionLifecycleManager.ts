@@ -1,4 +1,5 @@
 import type { PriceData } from '@/types'
+import { PMUS_DEFAULT_TAKER_THETA, roundTripFeeFraction } from './pmusFees'
 import { realtimeService } from '@/services/realtime'
 import { tradingService } from './TradingService'
 import { riskManager } from './RiskManager'
@@ -11,10 +12,16 @@ function outcomeMid(pd: PriceData, outcome: 'yes' | 'no'): number {
   return outcome === 'no' ? 1 - pd.mid : pd.mid
 }
 
-// Default Polymarket US taker fee (flat 10 bps = 0.1%)
-// Used to adjust take-profit threshold so NET profit matches user's configured percentage.
-// SL doesn't need adjustment (a loss is a loss regardless of fee).
-const DEFAULT_TAKER_FEE_PERCENT = 0.001
+/**
+ * Fees as a fraction of entry notional, used to make take-profit and time-exit
+ * decisions on NET P&L. Without an explicit per-position override this is the
+ * Polymarket US round-trip taker fee Θ·p·(1−p) on entry and exit (pmusFees).
+ * SL doesn't need adjustment (a loss is a loss regardless of fee).
+ */
+function feeFraction(position: { entryPrice: number; takerFeeBps?: number; feeCoefficient?: number }, currentPrice: number): number {
+  if (position.takerFeeBps != null) return position.takerFeeBps / 10000
+  return roundTripFeeFraction(position.entryPrice, currentPrice, position.feeCoefficient ?? PMUS_DEFAULT_TAKER_THETA)
+}
 
 // ==========================================
 // TYPES
@@ -31,7 +38,8 @@ export interface TrackedPosition {
   stopLossPercent: number     // e.g. 0.15 = 15%
   takeProfitPercent: number   // e.g. 0.30 = 30%
   strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
-  takerFeeBps?: number        // per-position taker fee in bps (default 10 for PM US). Falls back to DEFAULT_TAKER_FEE_PERCENT if absent.
+  takerFeeBps?: number        // flat fee override in bps; when absent the PM US round-trip taker fee is used
+  feeCoefficient?: number     // market taker coefficient Θ (default 0.095)
   // Trailing stop-loss fields
   trailingStopPercent?: number  // e.g. 0.10 = 10% trail from peak
   peakPrice?: number            // highest price seen while in profit
@@ -556,7 +564,7 @@ export class PositionLifecycleManager {
     const maxHold = position.maxHoldMs ?? 4 * 60 * 60 * 1000 // default 4 hours
     if (maxHold > 0 && Date.now() - position.entryTime > maxHold) {
       const holdHours = ((Date.now() - position.entryTime) / 3_600_000).toFixed(1)
-      const takerFeePercent = position.takerFeeBps != null ? position.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+      const takerFeePercent = feeFraction(position, currentPrice)
       const netPnlPercent = pnlPercent - takerFeePercent
 
       if (netPnlPercent > 0) {
@@ -671,7 +679,7 @@ export class PositionLifecycleManager {
     }
 
     // Check TAKE-PROFIT: price rose above fee-adjusted threshold.
-    const takerFeePercent = position.takerFeeBps != null ? position.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+    const takerFeePercent = feeFraction(position, currentPrice)
     const adjustedTP = position.takeProfitPercent + takerFeePercent
     if (pnlPercent >= adjustedTP) {
       const netPnl = pnlPercent - takerFeePercent

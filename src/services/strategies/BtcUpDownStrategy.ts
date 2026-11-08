@@ -958,7 +958,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Log trade for backtest
       const kellyFraction = useSettingsStore.getState().kellyFraction
-      const fStar = KellySizer.polymarketKellyWithFee(signal.confidence, targetPrice, 1000)
+      const fStar = KellySizer.pmusKelly(signal.confidence, targetPrice, market.feeCoefficient)
       tradeLogger.logEntry({
         marketId: market.id,
         slug: market.slug,
@@ -1188,9 +1188,9 @@ Respond ONLY with JSON:
 
     const bankroll = useWalletStore.getState().balance
     const kellyFraction = useSettingsStore.getState().kellyFraction
-    // Crypto markets have 1000 bps (10%) taker fee — use fee-adjusted Kelly
+    // PM US taker fee Θ·p·(1−p) per contract (Θ = 0.095 at tier 1)
     const adaptiveProb = edgeTracker.getAdaptiveModelProb('btc', confidence)
-    const fStar = KellySizer.polymarketKellyWithFee(adaptiveProb, marketPrice, 1000)
+    const fStar = KellySizer.pmusKelly(adaptiveProb, marketPrice)
     return Math.round(KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar }) * 100) / 100
   }
 

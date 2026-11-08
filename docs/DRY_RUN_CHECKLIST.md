@@ -10,12 +10,17 @@ The public gateway was exercised live on 2026-11-08 (`npm run smoke` in `mcp-ser
 |:-----|:-------|
 | Events, markets, BBO, book, settlement, price history (gateway) | Verified live |
 | Up/Down slug format, window, price to beat | Verified live |
-| Cloudflare rate limit on the gateway | Observed (HTTP 429, error 1015). The exact threshold is unknown. curl sustained 3/s, while a Node client that had been banned once kept drawing 429s at that rate for 10+ minutes. The app's throttle (3/s, escalating pause) is a starting point. Lower `GATEWAY_BUCKET` in `requestThrottle.ts` if the console shows `HTTP 429 rate limit … pausing requests`. |
-| Authenticated REST: balances, positions, orders, activities | **Not verified**. Shapes follow the SDK typings, which were wrong for the gateway |
-| Order placement: price side for NO intents, fill price side, fractional quantity, GTD `goodTillTime` | **Not verified** |
-| WebSockets: markets feed message shape, private fills | **Not verified** |
+| Rate limit | Documented at 25 requests/s per IP. On the gateway, bursts also drew a Cloudflare 1015 ban for several minutes. The throttle runs at 8/s (gateway) + 15/s (API). If the console shows `HTTP 429 rate limit … pausing requests`, lower `GATEWAY_BUCKET` in `src/services/api/requestThrottle.ts`. |
+| Authenticated REST: balances, positions, orders | **Checked against the API reference** (2026-11-08), not live. Positions are a map keyed by slug with decimal quantity fields and a `nextCursor`; balances are a per-currency list. The code now reads those fields. |
+| `cashValue` on positions | **Ambiguous.** The reference calls it "Unrealized PnL"; the app treats it as current market value. Compare against the Polymarket US app in step 1. |
+| Order prices for NO | **Documented:** prices always refer to YES; buying NO at $0.40 is selling YES at $0.60. The code converts. |
+| Fill price side (`lastPx`) for NO orders | **Not documented.** The code accepts either reading. Step 3 confirms it. |
+| Order quantity | **Documented:** whole contracts unless the market's `minimumTradeQty` is below 1. Orders are now rounded down to that step. |
+| Fees | **Documented:** taker fee Θ × contracts × p × (1 − p), Θ = 0.095 at tier 1. Sizing and take-profit now use it. |
+| WebSockets | **Documented:** both feeds need the API key; message shapes match the code; at most 100 markets per subscription (now chunked). Not verified live. |
+| Latency reject | **Documented:** "Order Processing Max Delay Exceeded" is transient. The bot resubmits once. |
 
-The unverified rows are the point of this checklist.
+Rows not marked verified live are the point of this checklist.
 
 ## 0. Prerequisites
 
@@ -35,7 +40,7 @@ npm run smoke -- --auth    # adds balance, positions, open orders, order preview
 
 - [ ] All public checks pass. A `get_markets` failure that mentions HTML or 429 means you are rate-limited. Wait 5–10 minutes.
 - [ ] `get_balance` shows your real balance. An empty object or zeros on a funded account means the balance response shape differs from the SDK typings.
-- [ ] `get_positions` lists what the Polymarket US app shows.
+- [ ] `get_positions` lists what the Polymarket US app shows. Note whether `cash_value_usd` equals the position's market value or its unrealized P&L, and report which.
 - [ ] The `place_order` dry run returns a preview without an error. It is a BUY YES of 1 share at 1¢ and is never sent.
 
 ## 2. App in dry run (30–60 minutes)

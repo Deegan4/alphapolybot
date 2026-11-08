@@ -216,7 +216,6 @@ export class GtcOrderManager {
         stopLossPercent: order.stopLossPercent,
         takeProfitPercent: order.takeProfitPercent,
         strategy: order.strategy,
-        takerFeeBps: 10, // Flat 10bps on PM US
       })
     } catch (err) {
       console.warn('[GtcOrderManager] Failed to hand off to PLM:', err)

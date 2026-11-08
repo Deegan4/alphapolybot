@@ -332,3 +332,62 @@ export function reportedPriceForOutcome(px: number, outcome: 'yes' | 'no', limit
     ? round4(flipped)
     : px
 }
+
+/**
+ * Round an order quantity down to the market's tradeable step. Orders need
+ * whole contracts unless the market's `minimumTradeQty` is below 1
+ * (docs: Create Order -> quantity); live markets list 1 or 0.01. Unknown -> 1.
+ * Returns 0 when the quantity is below one step.
+ */
+export function roundOrderQuantity(shares: number, minimumTradeQty?: number): number {
+  const step = minimumTradeQty && minimumTradeQty > 0 ? minimumTradeQty : 1
+  if (!(shares > 0)) return 0
+  const decimals = Math.max(0, Math.ceil(-Math.log10(step) - 1e-9))
+  const steps = Math.floor(shares / step + 1e-9)
+  return Number((steps * step).toFixed(decimals))
+}
+
+// ==========================================
+// PORTFOLIO (docs: Get User Positions / Get Account Balances)
+// ==========================================
+
+/** Position quantity fields; the integer ones are rounded and deprecated */
+export interface WirePositionQty {
+  netPosition?: string
+  netPositionDecimal?: string
+  qtyBought?: string
+  qtyBoughtDecimal?: string
+}
+
+const num = (s?: string | null) => {
+  const n = parseFloat(s ?? '')
+  return Number.isFinite(n) ? n : 0
+}
+
+/** Net contracts (positive = YES/long, negative = NO/short), decimal-aware */
+export function netPositionQty(p: WirePositionQty): number {
+  return p.netPositionDecimal != null ? num(p.netPositionDecimal) : num(p.netPosition)
+}
+
+/** Total contracts bought, decimal-aware */
+export function qtyBought(p: WirePositionQty): number {
+  return p.qtyBoughtDecimal != null ? num(p.qtyBoughtDecimal) : num(p.qtyBought)
+}
+
+/** The USD balance entry (balances are listed per currency) */
+export function usdBalance<T extends { currency?: string }>(balances?: T[]): T | undefined {
+  if (!balances?.length) return undefined
+  return balances.find(b => (b.currency ?? '').toUpperCase() === 'USD') ?? balances[0]
+}
+
+/**
+ * Exchange latency stopgap: an order not processed within 5s is rejected with
+ * "Order Processing Max Delay Exceeded" (historically "Global Rate Limit
+ * Exceeded"). Both are transient latency rejects, not rate limits, and the
+ * docs say the order may be resubmitted without throttling.
+ */
+export function isTransientLatencyReject(message?: string | null): boolean {
+  if (!message) return false
+  const m = message.toLowerCase()
+  return m.includes('order processing max delay exceeded') || m.includes('global rate limit exceeded')
+}

@@ -487,7 +487,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
     }
 
     const adaptiveProb = edgeTracker.getAdaptiveModelProb('llm', confidence)
-    const fStar = KellySizer.polymarketKelly(adaptiveProb, marketPrice)
+    const fStar = KellySizer.pmusKelly(adaptiveProb, marketPrice)
     let size = KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar })
 
     // Enforce hard dollar cap per trade (only in non-penny mode)

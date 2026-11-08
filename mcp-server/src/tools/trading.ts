@@ -209,7 +209,6 @@ export interface FormattedPosition {
   cost_usd: number;
   avg_entry_price: number | null;
   cash_value_usd: number | null;
-  unrealized_pnl_usd: number | null;
   realized_pnl_usd: number;
   qty_available: number | null;
   updated_at?: string;
@@ -222,24 +221,40 @@ export async function handleGetPositions(args: {
   if (!sdk) return { error: AUTH_HELP };
 
   try {
-    const res = await sdk.portfolio.positions(args.market_slug ? { market: args.market_slug } : undefined);
+    // Follow nextCursor until eof (100 per page)
+    type PosMap = Awaited<ReturnType<typeof sdk.portfolio.positions>>['positions'];
+    const entries: Array<[string, PosMap[string]]> = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const params: Record<string, unknown> = { limit: 100 };
+      if (args.market_slug) params.market = args.market_slug;
+      if (cursor) params.cursor = cursor;
+      const res = (await sdk.portfolio.positions(params as never)) as { positions?: PosMap; nextCursor?: string; eof?: boolean };
+      entries.push(...Object.entries(res.positions ?? {}));
+      if (res.eof !== false || !res.nextCursor || res.nextCursor === cursor) break;
+      cursor = res.nextCursor;
+    }
+
     const positions: FormattedPosition[] = [];
-    for (const [slug, p] of Object.entries(res.positions)) {
-      const net = parseFloat(p.netPosition || '0');
+    for (const [slug, p] of entries) {
+      // Decimal fields first: the integer ones are rounded and deprecated
+      const w = p as typeof p & { netPositionDecimal?: string; qtyAvailableDecimal?: string | null };
+      const net = parseFloat(w.netPositionDecimal ?? p.netPosition ?? '0') || 0;
       if (net === 0) continue;
       const cost = Math.abs(amountToNumber(p.cost));
       const cashValue = p.cashValue ? amountToNumber(p.cashValue) : null;
+      const avail = w.qtyAvailableDecimal ?? p.qtyAvailable;
       positions.push({
         market_slug: slug,
         title: p.marketMetadata?.title,
         outcome: net > 0 ? 'yes' : 'no',
         net_position: Math.abs(net),
         cost_usd: cost,
-        avg_entry_price: net !== 0 ? Math.round((cost / Math.abs(net)) * 10000) / 10000 : null,
+        avg_entry_price: Math.round((cost / Math.abs(net)) * 10000) / 10000,
+        // The docs describe cashValue as "Unrealized PnL"; reported as-is
         cash_value_usd: cashValue,
-        unrealized_pnl_usd: cashValue !== null ? Math.round((cashValue - cost) * 100) / 100 : null,
         realized_pnl_usd: amountToNumber(p.realized),
-        qty_available: p.qtyAvailable !== undefined ? parseFloat(p.qtyAvailable) : null,
+        qty_available: avail != null ? parseFloat(avail) : null,
         updated_at: p.updateTime,
       });
     }

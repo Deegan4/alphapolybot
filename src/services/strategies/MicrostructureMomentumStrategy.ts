@@ -378,7 +378,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
         // Log trade for backtest
         const kellyFraction = useSettingsStore.getState().kellyFraction
-        const fStar = KellySizer.polymarketKelly(modelProb, currentPrice)
+        const fStar = KellySizer.pmusKelly(modelProb, currentPrice, market.feeCoefficient)
         tradeLogger.logEntry({
           marketId: market.id,
           slug: market.slug,
@@ -430,7 +430,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     const bankroll = useWalletStore.getState().balance
     const kellyFraction = useSettingsStore.getState().kellyFraction
     const adaptiveProb = edgeTracker.getAdaptiveModelProb('micro', modelProb)
-    const fStar = KellySizer.polymarketKelly(adaptiveProb, marketPrice)
+    const fStar = KellySizer.pmusKelly(adaptiveProb, marketPrice)
 
     if (fStar <= 0) return 0 // No edge — don't trade
 

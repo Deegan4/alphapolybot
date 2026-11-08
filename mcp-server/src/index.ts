@@ -110,7 +110,7 @@ server.tool(
 
 server.tool(
   'get_positions',
-  'List open positions (net shares, cost, average entry, cash value, unrealized and realized P&L). Optionally filter by market_slug.',
+  'List open positions (net contracts, cost, average entry, exchange cashValue, realized P&L). Optionally filter by market_slug.',
   getPositionsSchema,
   async (args) => json(await handleGetPositions(args)),
 );

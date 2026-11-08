@@ -19,6 +19,16 @@ import {
 import type { PriceData } from '@/types'
 import { polymarketUSClient } from '@/services/api'
 
+/** Max markets per WebSocket subscription (docs: Markets WebSocket → Subscription Limits) */
+export const WS_MAX_MARKETS_PER_SUBSCRIPTION = 100
+
+/** Split slugs into subscription-sized chunks */
+export function chunkSlugs(slugs: string[], size = WS_MAX_MARKETS_PER_SUBSCRIPTION): string[][] {
+  const out: string[][] = []
+  for (let i = 0; i < slugs.length; i += size) out.push(slugs.slice(i, i + size))
+  return out
+}
+
 type PriceUpdateCallback = (slug: string, price: PriceData) => void
 type ConnectionCallback = (status: 'connected' | 'disconnected' | 'error') => void
 
@@ -69,8 +79,7 @@ export class RealtimeService {
           // Re-subscribe existing markets
           if (this.subscriptions.size > 0) {
             const slugs = Array.from(this.subscriptions)
-            const reqId = this.nextRequestId()
-            this.ws!.subscribeMarketDataLite(reqId, slugs)
+            this.subscribeInChunks(slugs)
             console.log(`[RealtimeService] Subscribed to ${slugs.length} markets`)
           }
 
@@ -138,8 +147,14 @@ export class RealtimeService {
     }
 
     if (newSlugs.length > 0 && this.ws?.isConnected) {
-      const reqId = this.nextRequestId()
-      this.ws.subscribeMarketDataLite(reqId, newSlugs)
+      this.subscribeInChunks(newSlugs)
+    }
+  }
+
+  /** The markets WebSocket accepts at most 100 markets per subscription */
+  private subscribeInChunks(slugs: string[]): void {
+    for (const chunk of chunkSlugs(slugs)) {
+      this.ws?.subscribeMarketDataLite(this.nextRequestId(), chunk)
     }
   }
 
