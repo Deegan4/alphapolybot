@@ -702,9 +702,17 @@ const WalletRegistryPanel: React.FC = () => {
 /**
  * Maker-first fill statistics — shows whether fee savings outweigh missed fills
  */
+const STRATEGY_LABELS: Record<string, string> = {
+  llm: 'LLM', btc: 'BTC Up/Down', micro: 'Micro', meanrev: 'Mean Rev', dip: 'Dip Arb', fw: 'FW Arb', other: 'Other',
+}
+
 const MakerFillStatsPanel: React.FC = () => {
   const [stats, setStats] = useState<MakerFillStats>(() => makerFillTracker.getStats())
-  useEffect(() => makerFillTracker.onChange(setStats), [])
+  const [perStrategy, setPerStrategy] = useState(() => makerFillTracker.getStrategyStats())
+  useEffect(() => makerFillTracker.onChange(s => {
+    setStats(s)
+    setPerStrategy(makerFillTracker.getStrategyStats())
+  }), [])
 
   const resolved = stats.filled + stats.expired + stats.cancelled
   if (stats.placed === 0 && stats.rejected === 0) {
@@ -724,6 +732,28 @@ const MakerFillStatsPanel: React.FC = () => {
       <div className="flex justify-between"><span className="text-agent-text-muted">Expired → taker fills</span><span>{stats.takerFallbackFilled}/{stats.takerFallbackAttempted}</span></div>
       <div className="flex justify-between"><span className="text-agent-text-muted">Avg time to fill</span><span>{secs(stats.avgTimeToFillMs)}</span></div>
       <div className="flex justify-between"><span className="text-agent-text-muted">Taker fees avoided</span><span>${stats.feesSavedUSD.toFixed(2)} on ${stats.filledNotionalUSD.toFixed(2)}</span></div>
+      {perStrategy.length > 1 && (
+        <table className="w-full mt-2 border-t border-agent-green/20 pt-1">
+          <thead>
+            <tr className="text-agent-text-muted text-left">
+              <th className="font-normal py-1">Strategy</th>
+              <th className="font-normal text-right">Fill</th>
+              <th className="font-normal text-right">Avg</th>
+              <th className="font-normal text-right">Saved</th>
+            </tr>
+          </thead>
+          <tbody>
+            {perStrategy.map(({ strategy, stats: s }) => (
+              <tr key={strategy}>
+                <td className="py-0.5">{STRATEGY_LABELS[strategy] ?? strategy}</td>
+                <td className="text-right">{pct(s.fillRate)} ({s.filled}/{s.filled + s.expired + s.cancelled})</td>
+                <td className="text-right">{secs(s.avgTimeToFillMs)}</td>
+                <td className="text-right">${s.feesSavedUSD.toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       <div className="flex justify-between items-center pt-1">
         <span className="text-agent-text-muted">Since {new Date(stats.since).toLocaleDateString()}</span>
         <button type="button" className="text-agent-orange hover:underline" onClick={() => makerFillTracker.reset()}>Reset</button>

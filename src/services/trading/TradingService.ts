@@ -207,7 +207,7 @@ export class TradingService {
     const result = await this.executeOrder(request, undefined, { countFailure: false })
     if (!result.success) {
       console.log(`[TradingService] Maker entry not placed (${result.error}) — falling back to taker`)
-      import('./MakerFillTracker').then(m => m.makerFillTracker.recordRejected()).catch(() => {})
+      import('./MakerFillTracker').then(m => m.makerFillTracker.recordRejected(gtdMeta.strategy)).catch(() => {})
       return null
     }
     if (result.orderId && !result.filledSize && !this.config.dryRun) {
@@ -296,7 +296,7 @@ export class TradingService {
       stopLossPercent: order.stopLossPercent,
       takeProfitPercent: order.takeProfitPercent,
     })
-    import('./MakerFillTracker').then(m => m.makerFillTracker.recordTakerFallback(result.success)).catch(() => {})
+    import('./MakerFillTracker').then(m => m.makerFillTracker.recordTakerFallback(result.success, order.strategy)).catch(() => {})
 
     if (result.success && (result.filledSize ?? 0) > 0) {
       positionLifecycleManager.trackPosition({

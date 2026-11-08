@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-540_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-543_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
@@ -145,7 +145,7 @@ It covers the strategies, the layered architecture, the risk stack, the test sui
 - **Rate limit: 25 requests per second per IP**, shared by every key on that IP. On the public gateway a burst also draws a Cloudflare ban (HTTP 429, error 1015) that lasts minutes. Every SDK call goes through a shared token bucket (`requestThrottle.ts`): 8 requests per second for the gateway and 15 for the authenticated API, with a pause after a 429 that starts at 2 seconds and doubles while the ban lasts. Per-market stats lookups are budgeted and cached on top of that.
 - **Fees are Θ × contracts × p × (1 − p)** (Θ = 0.095 at tier 1, published per market as `feeCoefficient`): about 4.75% of the stake at 50¢. Kelly sizing and take-profit / time-exit decisions use it (`pmusFees.ts`).
 - **Orders need whole contracts** unless a market's `minimumTradeQty` is below 1, so order sizes are rounded down to that step.
-- **Maker-first entries (opt-in, Settings → Trading → Order Execution).** Makers pay no fee at tier 1, so buys can rest as post-only GTD orders one cent inside the spread instead of paying the taker fee. A one-sided book or a post-only rejection falls back to the normal taker order. The Settings panel shows the maker fill rate, average time to fill and the taker fees avoided (`MakerFillTracker.ts`), so you can judge whether the savings beat the missed fills. When a maker entry expires, any partial fill is tracked as a position, and the remainder is bought with a normal order if the ask is within the chase limit (default 2¢) of the maker price.
+- **Maker-first entries (opt-in, Settings → Trading → Order Execution).** Makers pay no fee at tier 1, so buys can rest as post-only GTD orders one cent inside the spread instead of paying the taker fee. A one-sided book or a post-only rejection falls back to the normal taker order. The Settings panel shows the maker fill rate, average time to fill and the taker fees avoided (`MakerFillTracker.ts`), so you can judge whether the savings beat the missed fills, overall and per strategy. When a maker entry expires, any partial fill is tracked as a position, and the remainder is bought with a normal order if the ask is within the chase limit (default 2¢) of the maker price.
 - **Crypto Up/Down events** use slugs like `btc-updown-15m-2026-11-08-0130z` and publish the window and price to beat in `assetPriceTerms`. There is no 9PM series.
 
 **Dip Arbitrage is shelved.** YES + NO on one market can never cost less than $1. Buying YES across an event's markets is riskless only when they form a complete, mutually exclusive set, and the gateway does not say which events do. Live events include nested markets ("BTC hits $150k before December" and "before January"). The two-leg implementation is kept at `git show f614500:src/services/strategies/DipArbStrategy.ts`. **Frank-Wolfe Arb** is shelved for the same reason plus its international-CLOB code (`git show 9eb00b9:src/services/strategies/`). Shelved strategies keep their settings, are hidden from the dashboard toggles and refuse to start. Copy Trading mirrored public Polygon wallets, which do not exist on Polymarket US, and was removed.
@@ -195,7 +195,7 @@ npm run dev        # Dev server on :4000
 npm run dev            # Vite dev server on :4000
 npm run dev:strict-csp # Dev with strict CSP (no Fast Refresh)
 npm run build          # Production build (Vite 7 + esbuild)
-npm test               # 540 tests (Vitest)
+npm test               # 543 tests (Vitest)
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
 npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
@@ -204,7 +204,7 @@ npm run preview        # Preview production build
 
 ## Testing
 
-540 tests across 29 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
+543 tests across 29 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
@@ -229,7 +229,7 @@ npm run preview        # Preview production build
 | pmusFees | 6 | Documented taker fee Θ·C·p(1−p), round-trip fee, fee-aware Kelly |
 | pmusOrders | 12 | Quantity step rounding, decimal position fields, USD balance, latency-reject detection, 100-market WS chunks, maker entry price |
 | TradingService maker-first | 7 | Post-only entry inside the spread (YES and NO), taker fallback without tripping the circuit breaker, expiry follow-up (partial fill kept, remainder taken within the chase limit), opt-in |
-| MakerFillTracker | 5 | Fill rate, time to fill, taker fees avoided, persistence and reset |
+| MakerFillTracker | 8 | Fill rate, time to fill, taker fees avoided, per-strategy split, v1 migration, persistence and reset |
 | GtcOrderManager maker | 2 | Maker orders report placement, fill, expiry and cancel; fallback orders do not |
 | BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
 | MicrostructureMomentum | 9 | Polymarket US market selection, signal slug, config |
@@ -239,7 +239,7 @@ npm run preview        # Preview production build
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
 
 ```bash
-npm test    # Runs all 540 tests in ~5s
+npm test    # Runs all 543 tests in ~5s
 ```
 
 ## MCP Server
@@ -331,7 +331,7 @@ Configured for Netlify with GitHub Actions CI:
 # 1. npm ci
 # 2. npm run lint
 # 3. npm run typecheck
-# 4. npm test (540 tests)
+# 4. npm test (543 tests)
 # 5. npm run build
 ```
 

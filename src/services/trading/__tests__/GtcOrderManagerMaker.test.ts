@@ -18,7 +18,7 @@ vi.mock('@/services/storage', () => ({
 const recordPlaced = vi.fn()
 const recordResolved = vi.fn()
 vi.mock('../MakerFillTracker', () => ({
-  makerFillTracker: { recordPlaced: () => recordPlaced(), recordResolved: (...a: unknown[]) => recordResolved(...a) },
+  makerFillTracker: { recordPlaced: (...a: unknown[]) => recordPlaced(...a), recordResolved: (...a: unknown[]) => recordResolved(...a) },
 }))
 
 import { GtcOrderManager } from '../GtcOrderManager'
@@ -37,6 +37,7 @@ describe('GtcOrderManager maker-first accounting', () => {
     m.trackOrder(order({ orderId: 'maker', entryKind: 'maker' }))
     m.trackOrder(order({ orderId: 'fallback' }))
     expect(recordPlaced).toHaveBeenCalledTimes(1)
+    expect(recordPlaced).toHaveBeenCalledWith('micro')
 
     // Both gone from the open-order list before expiry → treated as filled
     getOpenOrders.mockResolvedValue([])

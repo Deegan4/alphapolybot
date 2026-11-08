@@ -1,10 +1,12 @@
 /**
- * Maker-first fill-rate tracker.
+ * Maker-first fill-rate tracker, overall and per strategy.
  *
  * Maker-first entries trade fee savings (no taker fee at tier 1) against
  * missed trades (the resting order may expire unfilled). This records each
  * maker attempt's outcome so the trade-off can be judged from real data:
- * fill rate, time to fill, and taker fees avoided on the fills.
+ * fill rate, time to fill, and taker fees avoided on the fills. Short-window
+ * strategies (BTC 5m/15m) and long-dated ones (LLM) behave very differently,
+ * so every event is counted both in the total and in its strategy's bucket.
  *
  * Pure counting logic; persistence is best-effort localStorage (per browser).
  */
@@ -35,7 +37,7 @@ export interface MakerFillStats {
   since: number
 }
 
-interface State {
+interface Bucket {
   placed: number
   filled: number
   expired: number
@@ -49,9 +51,16 @@ interface State {
   since: number
 }
 
-const STORAGE_KEY = 'alphapolybot:maker-fill-stats:v1'
+interface State {
+  total: Bucket
+  byStrategy: Record<string, Bucket>
+}
 
-const empty = (now: number): State => ({
+const STORAGE_KEY = 'alphapolybot:maker-fill-stats:v2'
+const LEGACY_KEY = 'alphapolybot:maker-fill-stats:v1'
+const UNKNOWN = 'other'
+
+const emptyBucket = (now: number): Bucket => ({
   placed: 0, filled: 0, expired: 0, cancelled: 0, rejected: 0,
   takerFallbackFilled: 0, takerFallbackAttempted: 0,
   totalFillMs: 0, feesSavedUSD: 0, filledNotionalUSD: 0, since: now,
@@ -70,6 +79,34 @@ function defaultStorage(): StorageLike | null {
   }
 }
 
+function toStats(b: Bucket): MakerFillStats {
+  const resolved = b.filled + b.expired + b.cancelled
+  return {
+    placed: b.placed,
+    filled: b.filled,
+    expired: b.expired,
+    cancelled: b.cancelled,
+    rejected: b.rejected,
+    takerFallbackFilled: b.takerFallbackFilled,
+    takerFallbackAttempted: b.takerFallbackAttempted,
+    fillRate: resolved > 0 ? b.filled / resolved : null,
+    avgTimeToFillMs: b.filled > 0 ? b.totalFillMs / b.filled : null,
+    feesSavedUSD: Math.round(b.feesSavedUSD * 100) / 100,
+    filledNotionalUSD: Math.round(b.filledNotionalUSD * 100) / 100,
+    since: b.since,
+  }
+}
+
+function parseBucket(raw: unknown, now: number): Bucket {
+  const base = emptyBucket(now)
+  if (!raw || typeof raw !== 'object') return base
+  for (const k of Object.keys(base) as (keyof Bucket)[]) {
+    const v = (raw as Record<string, unknown>)[k]
+    if (typeof v === 'number' && Number.isFinite(v)) base[k] = v
+  }
+  return base
+}
+
 export class MakerFillTracker {
   private state: State
   private listeners = new Set<(s: MakerFillStats) => void>()
@@ -78,73 +115,78 @@ export class MakerFillTracker {
     private readonly storage: StorageLike | null = defaultStorage(),
     private readonly now: () => number = () => Date.now(),
   ) {
-    this.state = this.load() ?? empty(this.now())
+    this.state = this.load() ?? { total: emptyBucket(this.now()), byStrategy: {} }
   }
 
   /** A post-only order is resting on the book */
-  recordPlaced(): void {
-    this.state.placed++
-    this.commit()
+  recordPlaced(strategy?: string): void {
+    this.apply(strategy, b => { b.placed++ })
   }
 
   /** The exchange refused the post-only order (the bot fell back to taker) */
-  recordRejected(): void {
-    this.state.rejected++
-    this.commit()
+  recordRejected(strategy?: string): void {
+    this.apply(strategy, b => { b.rejected++ })
   }
 
   /** An expired maker entry was retried as a taker order */
-  recordTakerFallback(success: boolean): void {
-    this.state.takerFallbackAttempted++
-    if (success) this.state.takerFallbackFilled++
-    this.commit()
+  recordTakerFallback(success: boolean, strategy?: string): void {
+    this.apply(strategy, b => {
+      b.takerFallbackAttempted++
+      if (success) b.takerFallbackFilled++
+    })
   }
 
   /** A resting maker order reached a terminal state */
   recordResolved(
     outcome: Exclude<MakerOutcome, 'rejected'>,
-    order: { placedAt: number; price: number; size: number; feeCoefficient?: number },
+    order: { placedAt: number; price: number; size: number; feeCoefficient?: number; strategy?: string },
   ): void {
-    if (outcome === 'filled') {
-      this.state.filled++
-      this.state.totalFillMs += Math.max(0, this.now() - order.placedAt)
-      this.state.feesSavedUSD += takerFee(order.size, order.price, order.feeCoefficient ?? PMUS_DEFAULT_TAKER_THETA)
-      this.state.filledNotionalUSD += order.size * order.price
-    } else if (outcome === 'expired') {
-      this.state.expired++
-    } else {
-      this.state.cancelled++
-    }
-    this.commit()
+    const fee = outcome === 'filled' ? takerFee(order.size, order.price, order.feeCoefficient ?? PMUS_DEFAULT_TAKER_THETA) : 0
+    const fillMs = Math.max(0, this.now() - order.placedAt)
+    this.apply(order.strategy, b => {
+      if (outcome === 'filled') {
+        b.filled++
+        b.totalFillMs += fillMs
+        b.feesSavedUSD += fee
+        b.filledNotionalUSD += order.size * order.price
+      } else if (outcome === 'expired') {
+        b.expired++
+      } else {
+        b.cancelled++
+      }
+    })
   }
 
-  getStats(): MakerFillStats {
-    const s = this.state
-    const resolved = s.filled + s.expired + s.cancelled
-    return {
-      placed: s.placed,
-      filled: s.filled,
-      expired: s.expired,
-      cancelled: s.cancelled,
-      rejected: s.rejected,
-      takerFallbackFilled: s.takerFallbackFilled,
-      takerFallbackAttempted: s.takerFallbackAttempted,
-      fillRate: resolved > 0 ? s.filled / resolved : null,
-      avgTimeToFillMs: s.filled > 0 ? s.totalFillMs / s.filled : null,
-      feesSavedUSD: Math.round(s.feesSavedUSD * 100) / 100,
-      filledNotionalUSD: Math.round(s.filledNotionalUSD * 100) / 100,
-      since: s.since,
-    }
+  /** Overall stats, or one strategy's (all zeros if it has none yet) */
+  getStats(strategy?: string): MakerFillStats {
+    if (strategy === undefined) return toStats(this.state.total)
+    return toStats(this.state.byStrategy[strategy] ?? emptyBucket(this.state.total.since))
+  }
+
+  /** Per-strategy stats for every strategy with activity, most placements first */
+  getStrategyStats(): Array<{ strategy: string; stats: MakerFillStats }> {
+    return Object.entries(this.state.byStrategy)
+      .map(([strategy, b]) => ({ strategy, stats: toStats(b) }))
+      .filter(r => r.stats.placed + r.stats.rejected > 0)
+      .sort((a, b) => (b.stats.placed + b.stats.rejected) - (a.stats.placed + a.stats.rejected))
   }
 
   reset(): void {
-    this.state = empty(this.now())
+    this.state = { total: emptyBucket(this.now()), byStrategy: {} }
     this.commit()
   }
 
   onChange(cb: (s: MakerFillStats) => void): () => void {
     this.listeners.add(cb)
     return () => this.listeners.delete(cb)
+  }
+
+  private apply(strategy: string | undefined, fn: (b: Bucket) => void): void {
+    const key = strategy || UNKNOWN
+    const bucket = this.state.byStrategy[key] ?? (this.state.byStrategy[key] = emptyBucket(this.now()))
+    fn(this.state.total)
+    fn(bucket)
+    this.commit()
   }
 
   private commit(): void {
@@ -158,19 +200,22 @@ export class MakerFillTracker {
   }
 
   private load(): State | null {
+    const now = this.now()
     try {
       const raw = this.storage?.getItem(STORAGE_KEY)
-      if (!raw) return null
-      const parsed = JSON.parse(raw) as Partial<State>
-      const base = empty(this.now())
-      for (const k of Object.keys(base) as (keyof State)[]) {
-        const v = parsed[k]
-        if (typeof v === 'number' && Number.isFinite(v)) base[k] = v
+      if (raw) {
+        const parsed = JSON.parse(raw) as { total?: unknown; byStrategy?: Record<string, unknown> }
+        const byStrategy: Record<string, Bucket> = {}
+        for (const [k, v] of Object.entries(parsed.byStrategy ?? {})) byStrategy[k] = parseBucket(v, now)
+        return { total: parseBucket(parsed.total, now), byStrategy }
       }
-      return base
+      // v1 stored only a total — keep it, with no per-strategy split
+      const legacy = this.storage?.getItem(LEGACY_KEY)
+      if (legacy) return { total: parseBucket(JSON.parse(legacy), now), byStrategy: {} }
     } catch {
-      return null
+      // corrupt — start fresh
     }
+    return null
   }
 }
 

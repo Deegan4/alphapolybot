@@ -46,7 +46,7 @@ describe('MakerFillTracker', () => {
 
   it('survives corrupt or unavailable storage', () => {
     const storage = memoryStorage()
-    storage.data.set('alphapolybot:maker-fill-stats:v1', '{not json')
+    storage.data.set('alphapolybot:maker-fill-stats:v2', '{not json')
     expect(new MakerFillTracker(storage).getStats().placed).toBe(0)
     const t = new MakerFillTracker(null)
     t.recordPlaced()
@@ -62,5 +62,38 @@ describe('MakerFillTracker', () => {
     off()
     t.recordPlaced()
     expect(seen).toEqual([1, 2])
+  })
+
+  it('splits stats by strategy while keeping the total', () => {
+    let now = 0
+    const t = new MakerFillTracker(memoryStorage(), () => now)
+    t.recordPlaced('btc'); t.recordPlaced('btc'); t.recordPlaced('llm')
+    now = 10_000
+    t.recordResolved('expired', { placedAt: 0, price: 0.5, size: 10, strategy: 'btc' })
+    t.recordResolved('filled', { placedAt: 0, price: 0.5, size: 10, strategy: 'btc' })
+    now = 600_000
+    t.recordResolved('filled', { placedAt: 0, price: 0.4, size: 10, strategy: 'llm' })
+    t.recordRejected('micro')
+    t.recordTakerFallback(true, 'btc')
+
+    expect(t.getStats()).toMatchObject({ placed: 3, filled: 2, expired: 1, rejected: 1, takerFallbackFilled: 1 })
+    expect(t.getStats('btc')).toMatchObject({ placed: 2, filled: 1, fillRate: 0.5, avgTimeToFillMs: 10_000, takerFallbackAttempted: 1 })
+    expect(t.getStats('llm')).toMatchObject({ placed: 1, fillRate: 1, avgTimeToFillMs: 600_000 })
+    expect(t.getStats('meanrev').placed).toBe(0)
+    expect(t.getStrategyStats().map(r => r.strategy)).toEqual(['btc', 'llm', 'micro'])
+  })
+
+  it('counts events without a strategy under "other"', () => {
+    const t = new MakerFillTracker(memoryStorage())
+    t.recordPlaced()
+    expect(t.getStats('other').placed).toBe(1)
+  })
+
+  it('carries a v1 total forward with no per-strategy split', () => {
+    const storage = memoryStorage()
+    storage.data.set('alphapolybot:maker-fill-stats:v1', JSON.stringify({ placed: 4, filled: 3, expired: 1, since: 7 }))
+    const t = new MakerFillTracker(storage)
+    expect(t.getStats()).toMatchObject({ placed: 4, filled: 3, fillRate: 0.75, since: 7 })
+    expect(t.getStrategyStats()).toEqual([])
   })
 })

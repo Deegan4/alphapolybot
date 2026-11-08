@@ -125,7 +125,7 @@ export class GtcOrderManager {
    */
   trackOrder(order: PendingGtcOrder): void {
     this.orders.set(order.orderId, order)
-    if (order.entryKind === 'maker') makerFillTracker.recordPlaced()
+    if (order.entryKind === 'maker') makerFillTracker.recordPlaced(order.strategy)
 
     activityLogger.logInfo(
       `GTD order pending: ${order.question.substring(0, 40)}...`,
