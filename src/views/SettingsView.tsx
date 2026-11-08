@@ -17,10 +17,25 @@ const tabContentVariants = {
 }
 
 /**
+ * Banner shown on settings panels of strategies that are not yet runnable on
+ * Polymarket US (see ShelvedStrategy). Settings are kept so they survive the port.
+ */
+const ShelvedStrategyNotice: React.FC = () => (
+  <div className="bg-agent-orange/10 border border-agent-orange/40 rounded-lg p-4">
+    <h4 className="text-agent-orange text-sm font-bold mb-1 font-mono">Not yet available on Polymarket US</h4>
+    <p className="text-agent-text-muted text-xs font-sans">
+      This strategy's implementation targeted the international Polymarket CLOB and has not been ported
+      to Polymarket US yet. It is hidden from the dashboard toggles and will not trade. Your settings
+      are saved and will apply once the port lands.
+    </p>
+  </div>
+)
+
+/**
  * SettingsView - Application settings and configuration
  */
 export const SettingsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'copytrading' | 'alerts' | 'api'>('trading')
+  const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'alerts' | 'api'>('trading')
 
   const tabs = [
     { id: 'trading', label: 'Trading Mode' },
@@ -32,7 +47,6 @@ export const SettingsView: React.FC = () => {
     { id: 'btcupdown', label: 'BTC Up/Down' },
     { id: 'micro', label: 'Micro Momentum' },
     { id: 'meanrev', label: 'Mean Reversion' },
-    { id: 'copytrading', label: 'Copy Trading' },
     { id: 'alerts', label: 'Alerts' },
     { id: 'api', label: 'API Keys' },
   ]
@@ -105,7 +119,6 @@ export const SettingsView: React.FC = () => {
             {activeTab === 'btcupdown' && <BtcUpDownSettings />}
             {activeTab === 'micro' && <MicroMomentumSettings />}
             {activeTab === 'meanrev' && <MeanReversionSettings />}
-            {activeTab === 'copytrading' && <CopyTradingSettings />}
             {activeTab === 'alerts' && <AlertSettings />}
             {activeTab === 'api' && <APISettings />}
           </motion.div>
@@ -1040,6 +1053,7 @@ const ProjectFWSettings: React.FC = () => {
   return (
     <MatrixCard title="PROJECTFW ARBITRAGE" subtitle="Frank-Wolfe optimized spread arbitrage" variant="glass">
       <div className="space-y-6">
+        <ShelvedStrategyNotice />
         <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
           <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Bregman Projection Arbitrage</h4>
           <p className="text-agent-text-muted text-xs font-sans">
@@ -1377,6 +1391,7 @@ const DipSettings: React.FC = () => {
   return (
     <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Configure dip buying parameters" variant="glass">
       <div className="space-y-6">
+        <ShelvedStrategyNotice />
         <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
           <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Proven Configuration</h4>
           <p className="text-agent-text-muted text-xs font-sans">
@@ -2095,145 +2110,6 @@ const MeanReversionSettings: React.FC = () => {
             <li>Z-score above +{mrExitZScore.toFixed(1)}σ or SL/TP hit = SELL</li>
             <li>Executes market orders on Coinbase Advanced Trade (USD spot pairs)</li>
             <li>RiskManager circuit breaker enforces daily loss limits</li>
-          </ul>
-        </div>
-      </div>
-    </MatrixCard>
-  )
-}
-
-/**
- * Copy Trading Settings Panel
- */
-const CopyTradingSettings: React.FC = () => {
-  const {
-    followedAddress,
-    copyTradeSize, setCopyTradeSize,
-    copyMaxConcurrent, setCopyMaxConcurrent,
-    copyPollIntervalMs, setCopyPollIntervalMs,
-    copyStopLossPercent, setCopyStopLossPercent,
-    copyTakeProfitPercent, setCopyTakeProfitPercent,
-    copyBuysOnly, setCopyBuysOnly,
-  } = useSettingsStore()
-
-  return (
-    <MatrixCard title="COPY TRADING" subtitle="Mirror trades from a followed Polymarket trader" variant="glass">
-      <div className="space-y-6">
-        {!followedAddress && (
-          <div className="bg-agent-bg/60 rounded-lg p-4">
-            <p className="text-agent-orange text-xs font-mono">
-              No trader followed — paste an address in the Follow Trader panel (left sidebar) first.
-            </p>
-          </div>
-        )}
-
-        {followedAddress && (
-          <div className="bg-agent-bg/60 rounded-lg p-3">
-            <p className="text-agent-text-muted text-xs font-mono">
-              Following: <span className="text-agent-cyan">{followedAddress.slice(0, 8)}...{followedAddress.slice(-4)}</span>
-            </p>
-          </div>
-        )}
-
-        {/* Position Sizing */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
-          <div className="space-y-4">
-            <MatrixSlider
-              label="Trade Size"
-              value={copyTradeSize}
-              onChange={setCopyTradeSize}
-              min={1}
-              max={25}
-              step={1}
-              valueFormat={(v: number) => `$${v}`}
-            />
-            <p className="text-agent-text-muted text-xs font-sans -mt-2">
-              USD amount per copied trade. RiskManager daily loss limit still applies.
-            </p>
-            <MatrixSlider
-              label="Max Concurrent Positions"
-              value={copyMaxConcurrent}
-              onChange={setCopyMaxConcurrent}
-              min={1}
-              max={20}
-              step={1}
-              valueFormat={(v: number) => `${v}`}
-            />
-          </div>
-        </div>
-
-        {/* Polling */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Polling</h4>
-          <MatrixSlider
-            label="Poll Interval"
-            value={copyPollIntervalMs / 1000}
-            onChange={(v: number) => setCopyPollIntervalMs(v * 1000)}
-            min={5}
-            max={60}
-            step={5}
-            valueFormat={(v: number) => `${v}s`}
-          />
-          <p className="text-agent-text-muted text-xs font-sans mt-1">
-            How often to check for new trades from the followed wallet. Lower = faster copies, more API calls.
-          </p>
-        </div>
-
-        {/* Risk Management */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Risk Management</h4>
-          <div className="space-y-4">
-            <MatrixSlider
-              label="Stop Loss"
-              value={copyStopLossPercent}
-              onChange={setCopyStopLossPercent}
-              min={0.10}
-              max={0.95}
-              step={0.05}
-              valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
-            />
-            <MatrixSlider
-              label="Take Profit"
-              value={copyTakeProfitPercent}
-              onChange={setCopyTakeProfitPercent}
-              min={0.10}
-              max={0.95}
-              step={0.05}
-              valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
-            />
-          </div>
-          <p className="text-agent-text-muted text-xs mt-2 font-sans">
-            PLM monitors copied positions and auto-exits on SL/TP. These are separate from the whale's exit logic.
-          </p>
-        </div>
-
-        {/* Behavior */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Behavior</h4>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={copyBuysOnly}
-              onChange={(e) => setCopyBuysOnly(e.target.checked)}
-              className="accent-agent-green"
-            />
-            <span className="text-agent-text text-xs font-mono">BUYs only (exits managed by PLM)</span>
-          </label>
-          <p className="text-agent-text-muted text-xs mt-1 font-sans">
-            When enabled, only BUY trades are copied. Sell/exit decisions are handled by stop-loss and take-profit.
-          </p>
-        </div>
-
-        {/* How It Works */}
-        <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
-          <h4 className="text-agent-green text-sm font-mono">How It Works</h4>
-          <ul className="text-agent-text-muted text-xs space-y-1 font-sans">
-            <li>Polls the followed trader's trade history every {copyPollIntervalMs / 1000}s via Data API</li>
-            <li>Detects new BUY trades and mirrors them at ${copyTradeSize} per trade</li>
-            <li>PLM tracks each position with {(copyStopLossPercent * 100).toFixed(0)}% SL / {(copyTakeProfitPercent * 100).toFixed(0)}% TP</li>
-            <li>RiskManager circuit breaker enforces daily loss limits</li>
-            <li>Max {copyMaxConcurrent} concurrent copied positions</li>
           </ul>
         </div>
       </div>

@@ -1,6 +1,6 @@
 import { BaseStrategy } from './BaseStrategy'
 import type { MicroMomentumConfig, Market } from '@/types'
-import { gammaClient } from '@/services/api/GammaClient'
+import { polymarketUSClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { microstructureAnalyzer } from '@/services/trading/MicrostructureAnalyzer'
 import { tradingService } from '@/services/trading/TradingService'
@@ -31,6 +31,34 @@ const DEFAULT_CONFIG: MicroMomentumConfig = {
 }
 
 // ==========================================
+// MARKET SELECTION (pure — unit tested)
+// ==========================================
+
+/** Minimum liquidity / volume for a market to be worth watching */
+export const MICRO_MIN_LIQUIDITY = 500
+export const MICRO_MIN_VOLUME = 100
+
+/**
+ * Pick binary Polymarket US markets worth tracking: active, two outcomes with
+ * per-outcome slugs (needed for the price feed), liquid, and with some volume.
+ * Sorted by volume, capped at `batchSize`.
+ */
+export function selectEligibleMarkets(markets: Market[], batchSize: number): Market[] {
+  return markets
+    .filter(m => m.active && !m.closed)
+    .filter(m => m.outcomes.length === 2 && m.outcomeSlugs?.length === 2)
+    .filter(m => (m.liquidity ?? 0) >= MICRO_MIN_LIQUIDITY)
+    .filter(m => (m.volume24hr ?? m.volume ?? 0) >= MICRO_MIN_VOLUME)
+    .sort((a, b) => (b.volume24hr ?? b.volume ?? 0) - (a.volume24hr ?? a.volume ?? 0))
+    .slice(0, batchSize)
+}
+
+/** Slug whose order book feeds the microstructure signal (the YES outcome) */
+export function signalSlugFor(market: Market): string | undefined {
+  return market.outcomeSlugs?.[0]
+}
+
+// ==========================================
 // STRATEGY
 // ==========================================
 
@@ -41,6 +69,10 @@ const DEFAULT_CONFIG: MicroMomentumConfig = {
  * spread dynamics, order flow signals) to make directional trades.
  *
  * No LLM required — purely mechanical order flow analysis.
+ *
+ * Polymarket US model: a Market is an event with per-outcome slugs
+ * (`outcomeSlugs`). Price feeds and the analyzer are keyed by outcome slug;
+ * orders and position tracking use `market.slug` (see TradingService.placeBet).
  *
  * Sharp money patterns:
  * - Order book thinning on opposite side = directional signal
@@ -57,7 +89,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
   // Market tracking
   private trackedMarkets = new Map<string, Market>()
-  private subscribedTokens = new Set<string>()
+  private subscribedSlugs = new Set<string>()
   private positionMarkets = new Set<string>() // Markets we already have positions in
   private lastTradeTimes = new Map<string, number>() // marketId → timestamp
   private marketRefreshInterval: number | null = null
@@ -129,14 +161,14 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     }
 
     // Unsubscribe from price feeds
-    for (const tokenId of this.subscribedTokens) {
+    for (const slug of this.subscribedSlugs) {
       try {
-        realtimeService.unsubscribeMarket(tokenId)
+        realtimeService.unsubscribeMarket(slug)
       } catch { /* ignore */ }
     }
 
     this.trackedMarkets.clear()
-    this.subscribedTokens.clear()
+    this.subscribedSlugs.clear()
     this.positionMarkets.clear()
     this.lastTradeTimes.clear()
     this.warmupUntil = 0
@@ -153,28 +185,20 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     if (!this._enabled || this._status !== 'running') return
 
     try {
-      const markets = await gammaClient.getBinaryMarkets()
-
-      // Filter for active, liquid markets
-      const eligible = markets
-        .filter(m => m.active && !m.closed)
-        .filter(m => (m.liquidity ?? 0) >= 500) // Need reasonable liquidity
-        .filter(m => (m.volume24hr ?? 0) >= 100) // Need some trading activity
-        .sort((a, b) => (b.volume24hr ?? 0) - (a.volume24hr ?? 0)) // Sort by volume
-        .slice(0, this.microConfig.marketBatchSize)
+      const markets = await polymarketUSClient.getMarkets({ active: true, closed: false })
+      const eligible = selectEligibleMarkets(markets, this.microConfig.marketBatchSize)
 
       // Subscribe new markets to WebSocket feeds
       for (const market of eligible) {
-        if (this.trackedMarkets.has(market.id)) continue
-
+        // Refresh cached prices for markets we already track
         this.trackedMarkets.set(market.id, market)
 
-        // Subscribe both outcome tokens for price/order book updates
-        for (const tokenId of market.clobTokenIds) {
-          if (!this.subscribedTokens.has(tokenId)) {
+        // Subscribe both outcome slugs for price/order book updates
+        for (const slug of market.outcomeSlugs ?? []) {
+          if (!this.subscribedSlugs.has(slug)) {
             try {
-              realtimeService.subscribeMarket(tokenId)
-              this.subscribedTokens.add(tokenId)
+              realtimeService.subscribeMarket(slug)
+              this.subscribedSlugs.add(slug)
             } catch {
               // Subscription failed — will retry on next refresh
             }
@@ -184,8 +208,8 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
       this.log(
         `[Refresh] WebSocket: ${realtimeService.isConnected() ? 'connected' : 'DISCONNECTED'} | ` +
-        `API: ${markets.length} binary markets, ${eligible.length} eligible after filters | ` +
-        `Tracking: ${this.trackedMarkets.size} markets, ${this.subscribedTokens.size} tokens subscribed`,
+        `API: ${markets.length} markets, ${eligible.length} eligible after filters | ` +
+        `Tracking: ${this.trackedMarkets.size} markets, ${this.subscribedSlugs.size} slugs subscribed`,
       )
     } catch (error) {
       this.logError('Market refresh failed', error)
@@ -233,11 +257,11 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       // Position limit check
       if (microPositionCount + signalsTriggered >= this.microConfig.maxConcurrentPositions) break
 
-      // Get microstructure signal for the YES token (index 0)
-      const yesTokenId = market.clobTokenIds[0]
-      if (!yesTokenId) continue
+      // Get microstructure signal for the YES outcome's order book
+      const yesSlug = signalSlugFor(market)
+      if (!yesSlug) continue
 
-      const signal = microstructureAnalyzer.getSignal(yesTokenId)
+      const signal = microstructureAnalyzer.getSignal(yesSlug)
       if (!signal) continue // Not enough snapshots yet
 
       signalsChecked++
@@ -279,7 +303,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       try {
         const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')
         const depth = await orderBookDepth.checkBuyDepth(
-          market.clobTokenIds[outcomeIndex],
+          market.slug, // same slug TradingService.placeBet orders against
           this.microConfig.tradeSize,
           0.03, // 3% max slippage
         )
@@ -308,7 +332,13 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           market,
           outcome,
           positionSize,
-          { skipGtcFallback: false },
+          {
+            skipGtcFallback: false,
+            outcomeIndex,
+            strategy: 'micro',
+            stopLossPercent: this.microConfig.stopLossPercent,
+            takeProfitPercent: this.microConfig.takeProfitPercent,
+          },
         )
 
         if (!result.success) {
@@ -325,38 +355,32 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           { marketId: market.id, orderId: result.orderId },
         )
 
-        // Track with PLM — fetch per-token fee rate for accurate TP adjustment
+        // Track with PLM for SL/TP enforcement (PM US taker fee uses PLM's default)
         const filledSize = result.filledSize ?? positionSize / currentPrice
-        const tokenIdForPlm = market.clobTokenIds[outcomeIndex]
-        Promise.all([
-          import('@/services/trading/PositionLifecycleManager'),
-          import('@/services/api').then(api => api.clobClient.getFeeRateBps(tokenIdForPlm)).catch(() => undefined),
-        ]).then(([m, feeRate]) => {
-          m.positionLifecycleManager.trackPosition({
-            tokenId: tokenIdForPlm,
-            marketId: market.id,
-            conditionId: market.conditionId,
-            outcome,
-            question: market.question,
-            entryPrice: currentPrice,
-            size: filledSize,
-            costBasis: positionSize,
-            entryTime: Date.now(),
-            stopLossPercent: this.microConfig.stopLossPercent,
-            takeProfitPercent: this.microConfig.takeProfitPercent,
-            strategy: 'micro',
-            negRisk: market.negRisk,
-            maxHoldMs: this.microConfig.maxHoldMs,
-            takerFeeBps: feeRate,
-          })
-        }).catch(err => console.warn('[MicroMomentum] PLM track failed:', err))
+        if (!result.pending) {
+          import('@/services/trading/PositionLifecycleManager').then(m => {
+            m.positionLifecycleManager.trackPosition({
+              marketSlug: market.slug,
+              outcome,
+              question: market.question,
+              entryPrice: result.avgPrice ?? currentPrice,
+              size: filledSize,
+              costBasis: positionSize,
+              entryTime: Date.now(),
+              stopLossPercent: this.microConfig.stopLossPercent,
+              takeProfitPercent: this.microConfig.takeProfitPercent,
+              strategy: 'micro',
+              maxHoldMs: this.microConfig.maxHoldMs,
+            })
+          }).catch(err => console.warn('[MicroMomentum] PLM track failed:', err))
+        }
 
         // Log trade for backtest
         const kellyFraction = useSettingsStore.getState().kellyFraction
         const fStar = KellySizer.polymarketKelly(modelProb, currentPrice)
         tradeLogger.logEntry({
           marketId: market.id,
-          conditionId: market.conditionId,
+          slug: market.slug,
           question: market.question,
           outcomes: market.outcomes,
           strategy: 'micro',

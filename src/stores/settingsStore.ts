@@ -78,15 +78,6 @@ export interface AppSettingsState {
   microStopLossPercent: number
   microTakeProfitPercent: number
 
-  // Follow & Copy Trader
-  followedAddress: string
-  copyTradeSize: number           // USD per copied trade
-  copyMaxConcurrent: number       // Max simultaneous copied positions
-  copyPollIntervalMs: number      // Polling frequency (ms)
-  copyStopLossPercent: number     // SL for copied positions (0-1)
-  copyTakeProfitPercent: number   // TP for copied positions (0-1)
-  copyBuysOnly: boolean           // Only copy BUY trades
-
   // LLM Premium Model Tiering
   llmPremiumModel: string             // e.g. 'openai/gpt-4o' (empty = disabled)
   llmPremiumThreshold: number         // min qualityScore to use premium (default: 25)
@@ -193,13 +184,6 @@ interface SettingsStore extends AppSettingsState {
   setMrStopLossPercent: (percent: number) => void
   setMrTakeProfitPercent: (percent: number) => void
   setMrMaxHoldMs: (ms: number) => void
-  setFollowedAddress: (address: string) => void
-  setCopyTradeSize: (size: number) => void
-  setCopyMaxConcurrent: (max: number) => void
-  setCopyPollIntervalMs: (ms: number) => void
-  setCopyStopLossPercent: (percent: number) => void
-  setCopyTakeProfitPercent: (percent: number) => void
-  setCopyBuysOnly: (enabled: boolean) => void
   setLlmPremiumModel: (model: string) => void
   setLlmPremiumThreshold: (threshold: number) => void
   setLlmPremiumBudgetUSD: (budget: number) => void
@@ -270,13 +254,6 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   microTradeSize: 2.0,
   microStopLossPercent: 0.15,
   microTakeProfitPercent: 0.20,
-  followedAddress: '',
-  copyTradeSize: 5,
-  copyMaxConcurrent: 5,
-  copyPollIntervalMs: 15_000,
-  copyStopLossPercent: 0.30,
-  copyTakeProfitPercent: 0.50,
-  copyBuysOnly: true,
   llmPremiumModel: '',
   llmPremiumThreshold: 25,
   llmPremiumBudgetUSD: 0.50,
@@ -579,17 +556,6 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ mrMaxHoldMs: ms })
         import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ maxHoldMs: ms }))
       },
-
-      setFollowedAddress: (address: string) => {
-        set({ followedAddress: address.toLowerCase().trim() })
-      },
-
-      setCopyTradeSize: (size: number) => set({ copyTradeSize: size }),
-      setCopyMaxConcurrent: (max: number) => set({ copyMaxConcurrent: max }),
-      setCopyPollIntervalMs: (ms: number) => set({ copyPollIntervalMs: ms }),
-      setCopyStopLossPercent: (percent: number) => set({ copyStopLossPercent: percent }),
-      setCopyTakeProfitPercent: (percent: number) => set({ copyTakeProfitPercent: percent }),
-      setCopyBuysOnly: (enabled: boolean) => set({ copyBuysOnly: enabled }),
 
       setLlmPremiumModel: (model: string) => {
         set({ llmPremiumModel: model })
@@ -923,14 +889,10 @@ export const useSettingsStore = create<SettingsStore>()(
           // v22→v23: Add LLM confirmation gate for BTC Up/Down strategy
           if (state.btcUseLLMConfirmation === undefined) state.btcUseLLMConfirmation = false
         }
-        if (version < 24) {
-          // v23→v24: Add copy-trading settings
-          if (state.copyTradeSize === undefined) state.copyTradeSize = 5
-          if (state.copyMaxConcurrent === undefined) state.copyMaxConcurrent = 5
-          if (state.copyPollIntervalMs === undefined) state.copyPollIntervalMs = 15_000
-          if (state.copyStopLossPercent === undefined) state.copyStopLossPercent = 0.30
-          if (state.copyTakeProfitPercent === undefined) state.copyTakeProfitPercent = 0.50
-          if (state.copyBuysOnly === undefined) state.copyBuysOnly = true
+        // v23→v24 added copy-trading settings; Copy Trading was retired with the
+        // Polymarket US migration (no public wallets to mirror), so stale keys are dropped.
+        for (const key of ['followedAddress', 'copyTradeSize', 'copyMaxConcurrent', 'copyPollIntervalMs', 'copyStopLossPercent', 'copyTakeProfitPercent', 'copyBuysOnly']) {
+          delete state[key]
         }
         if (version < 25) {
           // v24→v25: LLM premium model tiering + crypto LLM mode
@@ -1034,13 +996,6 @@ export const useSettingsStore = create<SettingsStore>()(
         microTradeSize: state.microTradeSize,
         microStopLossPercent: state.microStopLossPercent,
         microTakeProfitPercent: state.microTakeProfitPercent,
-        followedAddress: state.followedAddress,
-        copyTradeSize: state.copyTradeSize,
-        copyMaxConcurrent: state.copyMaxConcurrent,
-        copyPollIntervalMs: state.copyPollIntervalMs,
-        copyStopLossPercent: state.copyStopLossPercent,
-        copyTakeProfitPercent: state.copyTakeProfitPercent,
-        copyBuysOnly: state.copyBuysOnly,
         llmPremiumModel: state.llmPremiumModel,
         llmPremiumThreshold: state.llmPremiumThreshold,
         llmPremiumBudgetUSD: state.llmPremiumBudgetUSD,

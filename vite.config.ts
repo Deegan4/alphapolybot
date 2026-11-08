@@ -158,12 +158,6 @@ export default defineConfig(({ mode }) => {
           rewrite: path => path.replace(/^\/api\/polybacktest/, ''),
           secure: true,
         },
-        '/api/gamma': {
-          target: 'https://gamma-api.polymarket.com',
-          changeOrigin: true,
-          rewrite: path => path.replace(/^\/api\/gamma/, ''),
-          secure: true,
-        },
         '/api/binance': {
           target: 'https://api.binance.us',
           changeOrigin: true,

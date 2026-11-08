@@ -8,12 +8,12 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-557_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-459_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
 
-*A browser-based trading bot running eight independent strategies on [Polymarket](https://polymarket.com) prediction markets — from AI-powered LLM analysis to microstructure momentum, Frank-Wolfe optimized arbitrage, dual-side maker hedging, and whale copy trading.*
+*A browser-based trading bot for [Polymarket US](https://polymarket.us) prediction markets running four live strategies — AI-powered LLM analysis, a 5-factor BTC Up/Down signal with dual-side maker hedging, microstructure momentum, and spot-crypto mean reversion — with two arbitrage strategies shelved pending their Polymarket US port.*
 
 <br/>
 
@@ -21,16 +21,15 @@
  ╔══════════════════════════════════════════════════════════════╗
  ║  ░▒▓ ALPHA POLY BOT ▓▒░                                    ║
  ║                                                              ║
- ║  strategies: 8 ■■■■■■■■  positions: 3    P&L: +$12.47      ║
+ ║  strategies: 4 live · 2 shelved  positions: 3  P&L: +$12.47 ║
  ║  uptime: 4h 23m          risk: NOMINAL   mode: LIVE         ║
  ║                                                              ║
  ║  [LLM] scanning 847 markets...  confidence: 0.72  ████░     ║
- ║  [DIP] watching 12 tokens       last dip: -6.2%   ███░░     ║
- ║  [F-W] 3 arb candidates         spread: 1.8%      ██░░░     ║
+ ║  [DIP] shelved — pending Polymarket US port                 ║
+ ║  [F-W] shelved — pending Polymarket US port                 ║
  ║  [BTC] 5-factor signal          score: 0.46       ████░     ║
  ║  [MIC] flow toxicity: 0.23      imbalance: +0.31  ███░░     ║
  ║  [MRV] BTC Z-score: -2.14      entry: SHORT       ████░     ║
- ║  [CPY] 3 whales tracked         last copy: 2m ago  ██░░░     ║
  ║  [DSH] YES@0.52 NO@0.51        maker spread: 0.03 ███░░     ║
  ╚══════════════════════════════════════════════════════════════╝
 ```
@@ -93,7 +92,7 @@ A standalone project landing page lives at [`public/landing/index.html`](public/
 npm run dev        # then open http://localhost:4000/landing/
 ```
 
-It covers the eight strategies, the layered architecture, the risk stack, the test suite breakdown, and quick start — with an animated Matrix rain hero, a live boot-log terminal, and a screenshot lightbox. Content stays fully visible without JavaScript, and all motion respects `prefers-reduced-motion`.
+It covers the strategies, the layered architecture, the risk stack, the test suite breakdown, and quick start — with an animated Matrix rain hero, a live boot-log terminal, and a screenshot lightbox. Content stays fully visible without JavaScript, and all motion respects `prefers-reduced-motion`.
 
 ## Architecture
 
@@ -109,39 +108,37 @@ It covers the eight strategies, the layered architecture, the risk stack, the te
 │        settings (v32) · wallet · notifications · backtest       │
 ├─────────────────────────────────────────────────────────────────┤
 │                     Strategy Manager                            │
-│ ┌──────┐ ┌─────┐ ┌──────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐│
-│ │ LLM  │ │ Dip │ │Frank-│ │ BTC │ │Micro│ │Mean │ │Copy │ │Dual ││
-│ │Predct│ │ Arb │ │Wolfe │ │Up/Dn│ │Struc│ │Revrt│ │Trade│ │Side ││
-│ └──┬───┘ └──┬──┘ └──┬───┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘│
-├─────┴─────────┴────────┴────────┴────────┴────────┴────────┴────┤
+│ Live:    LLM · BTC Up/Down (+Dual-Side) · Micro · Mean Rev      │
+│ Shelved: Dip Arb · Frank-Wolfe Arb (pending PM US port)         │
+├─────────────────────────────────────────────────────────────────┤
 │                      Trading Service                           │
 │ Kelly Sizer · Gas Oracle · Order Book Depth · Trade Logger     │
 │ Edge Tracker · Calibration · Rejection Tracker · Market Scanner│
 ├─────────────────────────────────────────────────────────────────┤
 │                      Risk Manager                               │
 │ Circuit Breaker · Position Lifecycle · SL/TP · Crash Recovery  │
-├───────────┬───────────┬────────────┬───────────────────────────┤
-│CLOB Client│Gamma/Data │  Realtime  │     Coinbase Client       │
-│(order sign│(markets)  │ Market/User│     (spot crypto)         │
-│ + US SDK) │           │ WS + RTDS  │                           │
-├───────────┴───────────┴────────────┴───────────────────────────┤
-│               Polygon Network (Ethers.js v6)                   │
-│        USDC.e · CTF Exchange · NegRisk Adapter                 │
+├─────────────────────────────────────────────────────────────────┤
+│ PolymarketUSClient (polymarket-us SDK: REST + Ed25519 auth)     │
+│ Realtime: markets WS (prices/books) · private WS (fills)        │
+│ Coinbase Client (spot crypto) · PolyBacktest (BTC history)      │
+├─────────────────────────────────────────────────────────────────┤
+│   Polymarket US — api.polymarket.us / gateway.polymarket.us     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Strategies
 
-| # | Strategy | Signal Source | Edge | Frequency |
-|:-:|:---------|:-------------|:-----|:----------|
-| 1 | **LLM Prediction** | OpenRouter multi-model analysis with Brier-score calibration tracking | AI identifies mispriced markets | Adaptive (accelerates near close) |
-| 2 | **Dip Arbitrage** | WebSocket price monitoring + order book spread scan, GTD orders with ask premium | Buys temporary dips on binary outcomes | 60s market / 30s spread |
-| 3 | **Frank-Wolfe Arb** | Bregman projection optimizer on CLOB books with cross-market mutex validation | Exploits ask-sum < $1.00 across outcomes | 15s full scan |
-| 4 | **BTC Up/Down** | 5-factor vol-normalized signal (momentum, velocity, time decay, value, flow) with regime detection + RSI filter | Trades crypto direction markets at resolution | Per 15-min window |
-| 5 | **Microstructure Momentum** | Bid/ask imbalance, spread volatility, trade flow toxicity via MicrostructureAnalyzer | Exploits informed flow signals | Continuous |
-| 6 | **Mean Reversion** | Z-score mean reversion on Coinbase spot crypto (BTC/ETH/SOL) via BinanceWS live feed | Fades extreme Z-score deviations | Continuous |
-| 7 | **Copy Trading** | Mirrors trades from tracked Polymarket whale wallets with configurable position sizing | Piggybacks on whale alpha | Event-driven |
-| 8 | **Dual-Side Hedge** | Maker-only YES+NO orders with 70/30 directional bias, driven by BTC signal engine + DynamicFeeService EV gate | Captures spread on both sides while maintaining directional exposure | Event-driven (signal-gated) |
+| # | Strategy | Status | Signal Source | Edge | Frequency |
+|:-:|:---------|:-------|:-------------|:-----|:----------|
+| 1 | **LLM Prediction** | Live | OpenRouter multi-model analysis with Brier-score calibration tracking | AI identifies mispriced markets | Adaptive (accelerates near close) |
+| 2 | **BTC Up/Down** | Live | 5-factor vol-normalized signal (momentum, velocity, time decay, value, flow) with regime detection + RSI filter | Trades crypto direction markets at resolution | Per 15-min window |
+| 3 | **Dual-Side Hedge** | Live (inside BTC Up/Down) | Maker-only YES+NO orders with 70/30 directional bias, driven by BTC signal engine + DynamicFeeService EV gate | Captures spread on both sides while maintaining directional exposure | Event-driven (signal-gated) |
+| 4 | **Microstructure Momentum** | Live | Bid/ask imbalance, spread volatility, trade flow toxicity via MicrostructureAnalyzer on per-outcome order books | Exploits informed flow signals | Continuous |
+| 5 | **Mean Reversion** | Live | Z-score mean reversion on Coinbase spot crypto (BTC/ETH/SOL) via BinanceWS live feed | Fades extreme Z-score deviations | Continuous |
+| 6 | **Dip Arbitrage** | Shelved | Buys both outcomes when YES+NO < $1 | Guaranteed spread at resolution | — |
+| 7 | **Frank-Wolfe Arb** | Shelved | Bregman projection optimizer with cross-market mutex validation | Exploits ask-sum < $1.00 across outcomes | — |
+
+**Polymarket US migration status.** The engine targets Polymarket US (slug-based REST + WebSocket via the official `polymarket-us` SDK; no wallets, no on-chain settlement). Dip Arbitrage and Frank-Wolfe Arb were written against the international CLOB (token IDs, Gamma/Data APIs, on-chain merge) and are **shelved**: their settings are preserved and they appear in Settings, but they are hidden from the dashboard toggles and refuse to start until ported (`ShelvedStrategy`; legacy code at `git show 9eb00b9:src/services/strategies/`). The former Copy Trading strategy mirrored public Polygon wallets, which do not exist on Polymarket US, and was removed.
 
 ## Risk Infrastructure
 
@@ -188,44 +185,42 @@ npm run dev        # Dev server on :4000
 npm run dev            # Vite dev server on :4000
 npm run dev:strict-csp # Dev with strict CSP (no Fast Refresh)
 npm run build          # Production build (Vite 7 + esbuild)
-npm test               # 511 tests (Vitest)
+npm test               # 459 tests (Vitest)
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
+npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
 npm run preview        # Preview production build
 ```
 
 ## Testing
 
-557 tests across 23 suites covering all critical paths:
+459 tests across 20 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
-| RiskManager | 32 | Circuit breaker, emergency stop, daily limits |
-| PositionLifecycleManager | 25 | SL/TP enforcement, partial exits, crash recovery |
-| KellySizer | 33 | Fractional Kelly, drawdown adjustment, edge cases |
-| FrankWolfeOptimizer | 31 | Bregman projection, convergence, fee handling |
-| ProjectFWStrategy | 17 | Scan lifecycle, trade execution, merge retry |
-| DipArbStrategy | 21 | Dip detection, spread scan, GTD orders |
+| MeanReversion | 53 | Z-score computation, Coinbase integration, position tracking, RiskManager gate |
+| signalEngine | 51 | Stateless 5-factor signal extraction, 5m profile, volatility/RSI helpers |
 | BtcUpDownStrategy | 34 | 5-factor signal, regime detection, RSI filter |
-| MeanReversion | 53 | Z-score computation, Coinbase integration, position tracking |
-| CopyTrading | 21 | Whale tracking, position mirroring, risk limits |
+| KellySizer | 33 | Fractional Kelly, drawdown adjustment, edge cases |
+| RiskManager | 32 | Circuit breaker, emergency stop, daily limits |
+| FrankWolfeOptimizer | 31 | Bregman projection, convergence, fee handling |
+| PositionLifecycleManager | 25 | SL/TP enforcement, partial exits, crash recovery |
+| EdgeTracker | 24 | Realized vs. predicted edge, decay tracking |
 | CrossMarket | 23 | Event analysis, dependency classification, mutex |
 | OpenRouterService | 21 | Budget tracking, model selection, signal fusion |
-| EdgeTracker | 24 | Realized vs. predicted edge, decay tracking |
-| signalEngine | 57 | Stateless 5-factor signal extraction, 5m profile |
-| BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
+| secureStorage | 19 | Encryption, key derivation, migration |
+| settingsStore | 18 | Persistence, version migration, setter isolation |
+| encryptedStorage | 15 | AES-GCM device key, legacy plaintext migration |
 | PolyBacktestClient | 15 | API pagination, auth, data transforms |
-| ArbitrageProfitFormula | 30 | Profit calculation, fee deduction, edge cases |
-| DynamicFeeService | 26 | Quadratic fee curve, trade EV, dual-side EV, Kelly |
-| DualSideHedgeStrategy | 14 | Maker YES+NO, bias logic, signal-gated entry |
-| secureStorage | 17 | Encryption, key derivation, migration |
-| settingsStore | 18 | Persistence, version migration (v32), setter isolation |
+| ShelvedStrategies | 13 | Dip Arb / FW Arb shells: refuse to start, preserve settings surface |
+| BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
+| MicrostructureMomentum | 9 | Polymarket US market selection, signal slug, config |
 | MCP Tools | 12 | Tool execution, parameter validation |
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
 | MCP Auth | 8 | API key handling, HMAC signing |
 
 ```bash
-npm test    # Runs all 557 tests in ~3s
+npm test    # Runs all 459 tests in ~5s
 ```
 
 ## MCP Server
@@ -261,21 +256,21 @@ npm run build
 src/
 ├── components/
 │   ├── charts/         # MatrixLineChart, AreaChart, BarChart, PieChart, Gauge, Sparkline
-│   ├── dashboard/      # 22 components: BacktestView, ActivePositions, PerformancePanel,
-│   │                   # FollowTraderPanel, SpotCryptoView, DiagnosticsBanner, etc.
+│   ├── dashboard/      # BacktestView, ActivePositions, PerformancePanel, StrategyDropdown,
+│   │                   # SpotCryptoView, DiagnosticsBanner, AssetCards, etc.
 │   ├── layout/         # AppLayout, DashboardLayout, SettingsLayout, Header, Sidebar, MatrixRain
 │   └── ui/             # 18 Matrix-themed components (Button, Card, Modal, Toast, etc.)
 ├── hooks/              # useWallet, useBalanceHistory, useCryptoPrices, usePolymarketPrices
 ├── services/
-│   ├── api/            # CLOBClient, GammaClient, DataClient, CoinbaseClient,
-│   │                   # PolyBacktestClient, PolymarketUSClient, PriceOracleService
+│   ├── api/            # PolymarketUSClient (official SDK wrapper), CoinbaseClient,
+│   │                   # PolyBacktestClient, PriceOracleService
 │   ├── llm/            # OpenRouterService (multi-model, budget-bucketed)
 │   ├── notifications/  # Toast + Browser + Web Audio
 │   ├── realtime/       # RealtimeService, RTDSService, UserChannelService, BinanceWSService
 │   ├── storage/        # IndexedDB v4 (6 object stores)
-│   ├── strategies/     # 8 strategies + optimizers + cross-market + signal engine
+│   ├── strategies/     # 4 live + 2 shelved strategies, ShelvedStrategy base, signal engine
 │   │   ├── btcupdown/  # signalEngine, BacktestRunner, HistoricalEnrichment
-│   │   └── projectfw/  # FrankWolfeOptimizer, ArbitrageScanner
+│   │   └── projectfw/  # FrankWolfeOptimizer, crossmarket/ (exchange-agnostic, kept for the port)
 │   ├── trading/        # TradingService, RiskManager, PLM, KellySizer, GasOracle,
 │   │                   # OrderBookDepth, TradeLogger, EdgeTracker, CalibrationTracker,
 │   │                   # MicrostructureAnalyzer, ReadinessChecker, RejectionTracker

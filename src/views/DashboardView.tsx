@@ -15,7 +15,6 @@ import { positionLifecycleManager, activityLogger } from '@/services/trading'
 // Keeps initial bundle smaller by deferring chart-heavy and feature-specific panels.
 const HistoryView = React.lazy(() => import('@/components/dashboard/HistoryView').then(m => ({ default: m.HistoryView })))
 const SpotCryptoView = React.lazy(() => import('@/components/dashboard/SpotCryptoView').then(m => ({ default: m.SpotCryptoView })))
-const FollowTraderPanel = React.lazy(() => import('@/components/dashboard/FollowTraderPanel').then(m => ({ default: m.FollowTraderPanel })))
 const PerformancePanel = React.lazy(() => import('@/components/dashboard/PerformancePanel').then(m => ({ default: m.PerformancePanel })))
 const BacktestView = React.lazy(() => import('@/components/dashboard/BacktestView').then(m => ({ default: m.BacktestView })))
 const AnalyticsView = React.lazy(() => import('@/components/dashboard/AnalyticsView').then(m => ({ default: m.AnalyticsView })))
@@ -112,9 +111,8 @@ const DashboardView: React.FC = () => {
 
           {/* Main content — Left col (portfolio+follow) + Center col (assets+positions) */}
           <div className="flex-1 flex flex-col lg:flex-row gap-3 min-h-0 min-w-0">
-            {/* Left column — Follow Trader + Portfolio + Performance */}
+            {/* Left column — Portfolio + Performance */}
             <div className="lg:w-[280px] shrink-0 flex flex-col gap-3 min-h-0 lg:overflow-y-auto">
-              <Suspense fallback={<LazyFallback />}><FollowTraderPanel /></Suspense>
               <PortfolioPanel />
               <Suspense fallback={<LazyFallback />}><PerformancePanel /></Suspense>
             </div>

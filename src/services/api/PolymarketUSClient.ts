@@ -159,20 +159,21 @@ export class PolymarketUSClient {
   private _keyId: string | null = null
   private _secretKey: string | null = null
 
-  // Default base URLs — proxy in dev, direct in prod
-  // SDK uses `new URL('/v1/...', base)` which only keeps the origin from base.
-  // In dev, Vite proxies /v1/* to gamma-api.polymarket.com directly.
+  // Default base URLs — same-origin in dev (Vite proxies /v1/*, see vite.config.ts),
+  // direct to Polymarket US in prod. The SDK uses `new URL('/v1/...', base)`, which
+  // only keeps the origin from base.
+  //   gateway (public market data): https://gateway.polymarket.us
+  //   api (authenticated: orders, portfolio, WebSocket): https://api.polymarket.us
   private gatewayBaseUrl = import.meta.env.VITE_GATEWAY_URL
     || (import.meta.env.DEV ? `${location.protocol}//${location.host}` : 'https://gateway.polymarket.us')
-  private apiBaseUrl = import.meta.env.DEV
-    ? `${location.protocol}//${location.host}`
-    : 'https://gamma-api.polymarket.com';
+  private apiBaseUrl = import.meta.env.VITE_API_URL
+    || (import.meta.env.DEV ? `${location.protocol}//${location.host}` : 'https://api.polymarket.us')
 
   // Defensive guard for malformed/empty URLs
   private getValidApiBaseUrl(): string {
     const fallback = import.meta.env.DEV
       ? `${location.protocol}//${location.host}`
-      : 'https://gamma-api.polymarket.com';
+      : 'https://api.polymarket.us'
     const url = this.apiBaseUrl;
     if (!url || typeof url !== 'string' || url.trim() === '') {
       console.error('[PolymarketUSClient] Invalid or missing API base URL. Using fallback.');
