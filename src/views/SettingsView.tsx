@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixInput, MatrixButton, MatrixToggle, MatrixSelect, MatrixBadge, MatrixNumberInput, AnimatedCounter, MatrixSlider } from '@/components/ui'
 import { useWalletStore, useSettingsStore } from '@/stores'
+import { makerFillTracker, type MakerFillStats } from '@/services/trading/MakerFillTracker'
 import { strategyManager } from '@/services/strategies'
 import { tradingService, riskManager } from '@/services/trading'
 import { openRouterService } from '@/services/llm'
@@ -699,6 +700,38 @@ const WalletRegistryPanel: React.FC = () => {
 }
 
 /**
+ * Maker-first fill statistics — shows whether fee savings outweigh missed fills
+ */
+const MakerFillStatsPanel: React.FC = () => {
+  const [stats, setStats] = useState<MakerFillStats>(() => makerFillTracker.getStats())
+  useEffect(() => makerFillTracker.onChange(setStats), [])
+
+  const resolved = stats.filled + stats.expired + stats.cancelled
+  if (stats.placed === 0 && stats.rejected === 0) {
+    return (
+      <p className="text-agent-text-muted text-xs font-sans">
+        No maker-first orders yet. Fill rate and fees saved will appear here.
+      </p>
+    )
+  }
+  const pct = (x: number | null) => (x === null ? '—' : `${Math.round(x * 100)}%`)
+  const secs = (ms: number | null) => (ms === null ? '—' : ms < 120_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`)
+
+  return (
+    <div className="bg-agent-green/5 border border-agent-green/20 rounded-lg p-3 text-xs font-mono space-y-1">
+      <div className="flex justify-between"><span className="text-agent-text-muted">Fill rate</span><span>{pct(stats.fillRate)} ({stats.filled}/{resolved})</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Expired · cancelled · rejected</span><span>{stats.expired} · {stats.cancelled} · {stats.rejected}</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Avg time to fill</span><span>{secs(stats.avgTimeToFillMs)}</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Taker fees avoided</span><span>${stats.feesSavedUSD.toFixed(2)} on ${stats.filledNotionalUSD.toFixed(2)}</span></div>
+      <div className="flex justify-between items-center pt-1">
+        <span className="text-agent-text-muted">Since {new Date(stats.since).toLocaleDateString()}</span>
+        <button type="button" className="text-agent-orange hover:underline" onClick={() => makerFillTracker.reset()}>Reset</button>
+      </div>
+    </div>
+  )
+}
+
+/**
  * GTD Fallback Settings — write-through to settingsStore (no Save button needed)
  */
 const GtdFallbackSettings: React.FC = () => {
@@ -720,6 +753,7 @@ const GtdFallbackSettings: React.FC = () => {
           enabled={makerFirstEntries}
           onChange={setMakerFirstEntries}
         />
+        <MakerFillStatsPanel />
         {(gtcFallbackEnabled || makerFirstEntries) && (
           <MatrixSlider
             label="GTD Expiry"

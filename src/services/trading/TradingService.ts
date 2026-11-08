@@ -200,10 +200,11 @@ export class TradingService {
     const result = await this.executeOrder(request, undefined, { countFailure: false })
     if (!result.success) {
       console.log(`[TradingService] Maker entry not placed (${result.error}) — falling back to taker`)
+      import('./MakerFillTracker').then(m => m.makerFillTracker.recordRejected()).catch(() => {})
       return null
     }
     if (result.orderId && !result.filledSize && !this.config.dryRun) {
-      this.trackRestingOrder(result.orderId, request, gtdMeta, expiresAtMs)
+      this.trackRestingOrder(result.orderId, request, gtdMeta, expiresAtMs, { entryKind: 'maker', feeCoefficient: market.feeCoefficient })
       return { ...result, pending: true }
     }
     return result
@@ -215,6 +216,7 @@ export class TradingService {
     request: OrderRequest,
     meta: NonNullable<Parameters<TradingService['executeOrder']>[1]>,
     expiresAtMs: number,
+    extra: Pick<PendingGtcOrder, 'entryKind' | 'feeCoefficient'> = {},
   ): void {
     import('./GtcOrderManager').then(({ gtcOrderManager }) => {
       gtcOrderManager.trackOrder({
@@ -232,6 +234,7 @@ export class TradingService {
         placedAt: Date.now(),
         expiresAt: expiresAtMs,
         status: 'pending',
+        ...extra,
       })
     }).catch(err => console.warn('[TradingService] Failed to track resting order:', err))
   }

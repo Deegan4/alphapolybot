@@ -142,6 +142,10 @@ export interface PendingGtcOrder {
   placedAt: number            // Date.now() at placement
   expiresAt: number           // Unix timestamp (ms) — matches goodTillTime
   status: 'pending' | 'filled' | 'cancelled' | 'expired'
+  /** 'maker' = maker-first post-only entry; absent = FOK→GTD fallback */
+  entryKind?: 'maker'
+  /** Market taker coefficient Θ, for fee-savings accounting */
+  feeCoefficient?: number
 }
 
 export interface Trade {

@@ -2,6 +2,7 @@ import type { PendingGtcOrder } from '@/types'
 import { polymarketUSClient } from '@/services/api'
 import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
+import { makerFillTracker } from './MakerFillTracker'
 
 type OrderChangeCallback = (orders: PendingGtcOrder[]) => void
 
@@ -123,6 +124,7 @@ export class GtcOrderManager {
    */
   trackOrder(order: PendingGtcOrder): void {
     this.orders.set(order.orderId, order)
+    if (order.entryKind === 'maker') makerFillTracker.recordPlaced()
 
     activityLogger.logInfo(
       `GTD order pending: ${order.question.substring(0, 40)}...`,
@@ -323,6 +325,11 @@ export class GtcOrderManager {
   // ==========================================
 
   private removeOrder(orderId: string): void {
+    // Every terminal path (fill / expiry / cancel / reject) passes through here
+    const order = this.orders.get(orderId)
+    if (order?.entryKind === 'maker' && order.status !== 'pending') {
+      makerFillTracker.recordResolved(order.status, order)
+    }
     this.orders.delete(orderId)
 
     import('@/services/storage').then(({ indexedDBService }) => {
