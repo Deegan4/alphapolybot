@@ -8,12 +8,12 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-467_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-482_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
 
-*A browser-based trading bot for [Polymarket US](https://polymarket.us) prediction markets running four live strategies — AI-powered LLM analysis, a 5-factor BTC Up/Down signal with dual-side maker hedging, microstructure momentum, and spot-crypto mean reversion — with two arbitrage strategies shelved pending their Polymarket US port.*
+*A browser-based trading bot for [Polymarket US](https://polymarket.us) prediction markets running five live strategies — AI-powered LLM analysis, a 5-factor BTC Up/Down signal with dual-side maker hedging, microstructure momentum, spot-crypto mean reversion, and two-leg event arbitrage — with Frank-Wolfe arbitrage shelved pending its Polymarket US port.*
 
 <br/>
 
@@ -21,11 +21,11 @@
  ╔══════════════════════════════════════════════════════════════╗
  ║  ░▒▓ ALPHA POLY BOT ▓▒░                                    ║
  ║                                                              ║
- ║  strategies: 4 live · 2 shelved  positions: 3  P&L: +$12.47 ║
+ ║  strategies: 5 live · 1 shelved  positions: 3  P&L: +$12.47 ║
  ║  uptime: 4h 23m          risk: NOMINAL   mode: LIVE         ║
  ║                                                              ║
  ║  [LLM] scanning 847 markets...  confidence: 0.72  ████░     ║
- ║  [DIP] shelved — pending Polymarket US port                 ║
+ ║  [DIP] 2-leg arb scan           best sum: 97.4¢   ██░░░     ║
  ║  [F-W] shelved — pending Polymarket US port                 ║
  ║  [BTC] 5-factor signal          score: 0.46       ████░     ║
  ║  [MIC] flow toxicity: 0.23      imbalance: +0.31  ███░░     ║
@@ -108,8 +108,8 @@ It covers the strategies, the layered architecture, the risk stack, the test sui
 │        settings (v32) · wallet · notifications · backtest       │
 ├─────────────────────────────────────────────────────────────────┤
 │                     Strategy Manager                            │
-│ Live:    LLM · BTC Up/Down (+Dual-Side) · Micro · Mean Rev      │
-│ Shelved: Dip Arb · Frank-Wolfe Arb (pending PM US port)         │
+│ Live: LLM · BTC Up/Down (+Dual) · Micro · Mean Rev · Dip Arb    │
+│ Shelved: Frank-Wolfe Arb (pending PM US port)                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                      Trading Service                           │
 │ Kelly Sizer · Gas Oracle · Order Book Depth · Trade Logger     │
@@ -135,10 +135,10 @@ It covers the strategies, the layered architecture, the risk stack, the test sui
 | 3 | **Dual-Side Hedge** | Live (inside BTC Up/Down) | Maker-only YES+NO orders with 70/30 directional bias, driven by BTC signal engine + DynamicFeeService EV gate | Captures spread on both sides while maintaining directional exposure | Event-driven (signal-gated) |
 | 4 | **Microstructure Momentum** | Live | Bid/ask imbalance, spread volatility, trade flow toxicity via MicrostructureAnalyzer on per-outcome order books | Exploits informed flow signals | Continuous |
 | 5 | **Mean Reversion** | Live | Z-score mean reversion on Coinbase spot crypto (BTC/ETH/SOL) via BinanceWS live feed | Fades extreme Z-score deviations | Continuous |
-| 6 | **Dip Arbitrage** | Shelved | Buys both outcomes when YES+NO < $1 | Guaranteed spread at resolution | — |
+| 6 | **Dip Arbitrage** | Live | Two-outcome events: WebSocket books on both outcome markets + periodic spread scan | Buys both outcomes when asks sum < $0.96 → $1 locked in at resolution | Every tick / 15s scan |
 | 7 | **Frank-Wolfe Arb** | Shelved | Bregman projection optimizer with cross-market mutex validation | Exploits ask-sum < $1.00 across outcomes | — |
 
-**Polymarket US migration status.** The engine targets Polymarket US (slug-based REST + WebSocket via the official `polymarket-us` SDK; no wallets, no on-chain settlement). Dip Arbitrage and Frank-Wolfe Arb were written against the international CLOB (token IDs, Gamma/Data APIs, on-chain merge) and are **shelved**: their settings are preserved and they appear in Settings, but they are hidden from the dashboard toggles and refuse to start until ported (`ShelvedStrategy`; legacy code at `git show 9eb00b9:src/services/strategies/`). The former Copy Trading strategy mirrored public Polygon wallets, which do not exist on Polymarket US, and was removed.
+**Polymarket US migration status.** The engine targets Polymarket US (slug-based REST + WebSocket via the official `polymarket-us` SDK; no wallets, no on-chain settlement). Dip Arbitrage was re-implemented for the US model (each outcome of an event is its own market; buy one share of each when the asks sum below target and hold to resolution — no on-chain merge). Frank-Wolfe Arb was written against the international CLOB and is **shelved**: its settings are preserved and it appears in Settings, but it is hidden from the dashboard toggles and refuses to start until ported (`ShelvedStrategy`; legacy code at `git show 9eb00b9:src/services/strategies/`). The former Copy Trading strategy mirrored public Polygon wallets, which do not exist on Polymarket US, and was removed.
 
 ## Risk Infrastructure
 
@@ -185,7 +185,7 @@ npm run dev        # Dev server on :4000
 npm run dev            # Vite dev server on :4000
 npm run dev:strict-csp # Dev with strict CSP (no Fast Refresh)
 npm run build          # Production build (Vite 7 + esbuild)
-npm test               # 467 tests (Vitest)
+npm test               # 482 tests (Vitest)
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
 npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
@@ -194,7 +194,7 @@ npm run preview        # Preview production build
 
 ## Testing
 
-467 tests across 20 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
+482 tests across 22 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
@@ -212,15 +212,17 @@ npm run preview        # Preview production build
 | settingsStore | 18 | Persistence, version migration, setter isolation |
 | encryptedStorage | 15 | AES-GCM device key, legacy plaintext migration |
 | PolyBacktestClient | 15 | API pagination, auth, data transforms |
-| ShelvedStrategies | 13 | Dip Arb / FW Arb shells: refuse to start, preserve settings surface |
+| DipArbStrategy | 12 | Two-leg arb math (asks + premium vs target), equal-share sizing, candidate selection |
+| ShelvedStrategies | 7 | FW Arb shell: refuses to start, preserves settings surface |
 | BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
 | MicrostructureMomentum | 9 | Polymarket US market selection, signal slug, config |
 | MCP Orders | 16 | Intent/price mapping (NO → YES-side), order params, book summary, event flattening |
+| MCP PriceHistory | 9 | Interval/fidelity profiles, custom-range validation, normalization |
 | MCP Tools | 12 | Kelly sizing, opportunity scoring |
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
 
 ```bash
-npm test    # Runs all 467 tests in ~5s
+npm test    # Runs all 482 tests in ~5s
 ```
 
 ## MCP Server
@@ -231,6 +233,7 @@ The `mcp-server/` directory contains a standalone [Model Context Protocol](https
 |:-----|:----:|:-------------|
 | `get_markets` | – | Browse/search markets: one row per tradeable slug with event, outcome, liquidity, volume, best bid/ask |
 | `get_market_detail` | – | Order book summary for a market slug, or every market in an event |
+| `get_price_history` | – | YES/NO display-price history (fixed 1H…ALL/LIVE profiles or a ≤24h custom range), summarized + down-sampled |
 | `get_crypto_prices` | – | BTC/ETH/SOL/XRP spot with 24h change (Binance → CoinGecko) |
 | `compute_kelly`, `score_opportunities` | – | Pure analysis helpers |
 | `get_balance`, `get_positions`, `get_open_orders` | key | Account state |
@@ -240,7 +243,7 @@ The `mcp-server/` directory contains a standalone [Model Context Protocol](https
 ```bash
 cd mcp-server
 npm install
-npm test       # 39 tests
+npm test       # 48 tests
 npm run build
 # credentials (optional — read-only without them), in the repo-root .env:
 #   POLYMARKET_KEY_ID=...  POLYMARKET_SECRET_KEY=...
