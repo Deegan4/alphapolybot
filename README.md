@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-459_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-467_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
@@ -185,7 +185,7 @@ npm run dev        # Dev server on :4000
 npm run dev            # Vite dev server on :4000
 npm run dev:strict-csp # Dev with strict CSP (no Fast Refresh)
 npm run build          # Production build (Vite 7 + esbuild)
-npm test               # 459 tests (Vitest)
+npm test               # 467 tests (Vitest)
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
 npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
@@ -194,7 +194,7 @@ npm run preview        # Preview production build
 
 ## Testing
 
-459 tests across 20 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
+467 tests across 20 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
@@ -215,24 +215,38 @@ npm run preview        # Preview production build
 | ShelvedStrategies | 13 | Dip Arb / FW Arb shells: refuse to start, preserve settings surface |
 | BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
 | MicrostructureMomentum | 9 | Polymarket US market selection, signal slug, config |
-| MCP Tools | 12 | Tool execution, parameter validation |
+| MCP Orders | 16 | Intent/price mapping (NO → YES-side), order params, book summary, event flattening |
+| MCP Tools | 12 | Kelly sizing, opportunity scoring |
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
-| MCP Auth | 8 | API key handling, HMAC signing |
 
 ```bash
-npm test    # Runs all 459 tests in ~5s
+npm test    # Runs all 467 tests in ~5s
 ```
 
 ## MCP Server
 
-The `mcp-server/` directory contains a standalone [Model Context Protocol](https://modelcontextprotocol.io) server for AI-assisted trading operations. It exposes tools for market analysis, position management, and trade execution to LLM agents.
+The `mcp-server/` directory contains a standalone [Model Context Protocol](https://modelcontextprotocol.io) server that exposes Polymarket US to LLM agents (Claude Code, Claude Desktop) over stdio. It uses the official `polymarket-us` SDK — API key + Ed25519 signing, slug-based markets — with no wallet or on-chain code.
+
+| Tool | Auth | What it does |
+|:-----|:----:|:-------------|
+| `get_markets` | – | Browse/search markets: one row per tradeable slug with event, outcome, liquidity, volume, best bid/ask |
+| `get_market_detail` | – | Order book summary for a market slug, or every market in an event |
+| `get_crypto_prices` | – | BTC/ETH/SOL/XRP spot with 24h change (Binance → CoinGecko) |
+| `compute_kelly`, `score_opportunities` | – | Pure analysis helpers |
+| `get_balance`, `get_positions`, `get_open_orders` | key | Account state |
+| `place_order` | key | Limit orders; **dry-run by default** (local validation + exchange preview). NO prices are converted to YES-side for you |
+| `cancel_order`, `cancel_all_orders`, `close_position` | key | Writes that require `confirm: true` |
 
 ```bash
 cd mcp-server
 npm install
-npm test       # 31 tests
+npm test       # 39 tests
 npm run build
+# credentials (optional — read-only without them), in the repo-root .env:
+#   POLYMARKET_KEY_ID=...  POLYMARKET_SECRET_KEY=...
 ```
+
+Register with Claude Code: `claude mcp add polymarket-us -- node /path/to/alphapolybot/mcp-server/bootstrap.js`.
 
 ## Tech Stack
 

@@ -1,236 +1,145 @@
 /**
- * Market data tools — read-only, no auth required.
+ * Market data tools — public Polymarket US gateway, no credentials required.
  */
 
 import { z } from 'zod';
-import { gammaClient, type Market } from '../clients/gamma.js';
-import { HttpClient } from '../clients/http.js';
-import { appConfig } from '../config.js';
-import { ROUNDING_CONFIG } from '../utils/rounding.js';
-import { formatCompact, formatPrice, truncate } from '../utils/format.js';
-
-// CLOB client for order book queries (public, no auth)
-const clobHttp = new HttpClient({
-  baseUrl: appConfig.clobBaseUrl,
-  maxRequestsPerMinute: 50,
-  timeout: 15000,
-  maxRetries: 2,
-});
+import type { MarketBBO } from 'polymarket-us';
+import { getPublicSdk, mapLimit, errorMessage } from '../clients/polymarket-us.js';
+import {
+  flattenEvents,
+  sortRows,
+  summarizeBook,
+  amountToNumber,
+  type MarketRow,
+  type MarketSort,
+  type BookSummary,
+} from '../utils/orders.js';
 
 // ─── Tool Schemas ────────────────────────────────────────────
 
 export const getMarketsSchema = {
-  active: z.boolean().optional().default(true).describe('Filter for active markets'),
-  limit: z.number().optional().default(50).describe('Max markets to return (max 100)'),
-  sort: z.enum(['volume24hr', 'liquidity', 'createdAt']).optional().default('volume24hr').describe('Sort field'),
-  search: z.string().optional().describe('Search query to filter markets by question text'),
+  search: z.string().optional().describe('Keyword search across event titles (omit to browse)'),
+  status: z.enum(['active', 'closed', 'upcoming']).optional().default('active').describe('Market status filter'),
+  limit: z.number().int().min(1).max(100).optional().default(25).describe('Max markets to return (1-100)'),
+  sort: z.enum(['volume', 'liquidity', 'end_time']).optional().default('volume').describe('Sort order'),
+  include_prices: z.boolean().optional().default(true).describe(
+    'Fetch best bid/ask per market (one request each — set false for large lists)',
+  ),
 };
 
 export const getMarketDetailSchema = {
-  market_id: z.string().optional().describe('Gamma market ID'),
-  token_id: z.string().optional().describe('CLOB token ID (alternative to market_id)'),
+  market_slug: z.string().optional().describe('Market slug (the tradeable unit, e.g. "chiefs-super-bowl")'),
+  event_slug: z.string().optional().describe('Event slug — returns every market in the event with prices'),
 };
 
-// ─── Tool Handlers ───────────────────────────────────────────
+// ─── Handlers ────────────────────────────────────────────────
 
 export async function handleGetMarkets(args: {
-  active?: boolean;
-  limit?: number;
-  sort?: string;
   search?: string;
-}): Promise<{ markets: MarketRow[]; count: number }> {
-  let markets: Market[];
+  status?: 'active' | 'closed' | 'upcoming';
+  limit?: number;
+  sort?: MarketSort;
+  include_prices?: boolean;
+}): Promise<{ markets: MarketRow[]; count: number } | { error: string }> {
+  const sdk = getPublicSdk();
+  const limit = Math.min(args.limit ?? 25, 100);
+  const status = args.status ?? 'active';
 
-  if (args.search) {
-    markets = await gammaClient.searchMarkets(args.search, args.limit ?? 50);
-  } else {
-    markets = await gammaClient.getActiveMarkets();
+  try {
+    let events;
+    if (args.search) {
+      const res = await sdk.search.query({ query: args.search, limit: 100, status });
+      events = res.events;
+    } else {
+      const res = await sdk.events.list({
+        active: status === 'active' || status === 'upcoming',
+        closed: status === 'closed',
+        limit: 100,
+      });
+      events = res.events;
+    }
+
+    let rows = flattenEvents(events);
+    if (status === 'active') rows = rows.filter(r => r.active && !r.closed);
+    rows = sortRows(rows, args.sort ?? 'volume').slice(0, limit);
+
+    if (args.include_prices !== false && rows.length > 0) {
+      const bbos = await mapLimit(rows, 8, r => sdk.markets.bbo(r.market_slug));
+      rows = rows.map((r, i) => withBbo(r, bbos[i]));
+    }
+
+    return { markets: rows, count: rows.length };
+  } catch (error) {
+    return { error: `Failed to fetch markets: ${errorMessage(error)}` };
   }
+}
 
-  // Sort
-  if (args.sort === 'volume24hr') {
-    markets.sort((a, b) => (b.volume24hr ?? 0) - (a.volume24hr ?? 0));
-  } else if (args.sort === 'liquidity') {
-    markets.sort((a, b) => b.liquidity - a.liquidity);
-  } else if (args.sort === 'createdAt') {
-    markets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }
-
-  // Limit
-  const limited = markets.slice(0, Math.min(args.limit ?? 50, 100));
-
-  return {
-    markets: limited.map(marketToRow),
-    count: limited.length,
-  };
+export interface MarketDetail {
+  market_slug: string;
+  title: string;
+  outcome: string;
+  description?: string;
+  event_slug?: string;
+  active: boolean;
+  closed: boolean;
+  liquidity: number;
+  volume: number;
+  /** Price is YES-terms; NO price = 1 - YES */
+  book: BookSummary | null;
+  price_tick: number;
+  note: string;
 }
 
 export async function handleGetMarketDetail(args: {
-  market_id?: string;
-  token_id?: string;
-}): Promise<MarketDetail | { error: string }> {
-  if (!args.market_id && !args.token_id) {
-    return { error: 'Provide either market_id or token_id' };
+  market_slug?: string;
+  event_slug?: string;
+}): Promise<MarketDetail | { event_slug: string; title: string; markets: MarketRow[] } | { error: string }> {
+  const sdk = getPublicSdk();
+
+  if (!args.market_slug && !args.event_slug) {
+    return { error: 'Provide market_slug or event_slug' };
   }
 
-  let market: Market | null = null;
+  try {
+    if (args.event_slug && !args.market_slug) {
+      const { event } = await sdk.events.retrieveBySlug(args.event_slug);
+      let rows = flattenEvents([event]);
+      const bbos = await mapLimit(rows, 8, r => sdk.markets.bbo(r.market_slug));
+      rows = rows.map((r, i) => withBbo(r, bbos[i]));
+      return { event_slug: event.slug, title: event.title, markets: rows };
+    }
 
-  if (args.market_id) {
-    market = await gammaClient.getMarket(args.market_id);
-  }
-
-  if (!market && args.token_id) {
-    // Search by token ID in active markets
-    const all = await gammaClient.getActiveMarkets();
-    market = all.find(m => m.clobTokenIds?.includes(args.token_id!)) ?? null;
-  }
-
-  if (!market) {
-    return { error: `Market not found for ${args.market_id || args.token_id}` };
-  }
-
-  // Fetch order book for the first token
-  let orderBook: OrderBookData | null = null;
-  let tickSize = '0.01';
-  let feeRateBps = 0;
-  let negRisk = market.negRisk ?? false;
-
-  if (market.clobTokenIds?.[0]) {
-    const tokenId = market.clobTokenIds[0];
-
-    // Fetch order book, tick size, neg risk, fee rate in parallel
-    const [bookRes, tickRes, negRes, feeRes] = await Promise.allSettled([
-      clobHttp.get<{ bids: Array<{price: string; size: string}>; asks: Array<{price: string; size: string}> }>(`/book?token_id=${tokenId}`),
-      clobHttp.get<string | { minimum_tick_size?: string }>(`/tick-size?token_id=${tokenId}`),
-      clobHttp.get<boolean | { neg_risk?: boolean }>(`/neg-risk?token_id=${tokenId}`),
-      clobHttp.get<number | { base_fee?: number; fee_rate_bps?: number }>(`/fee-rate?token_id=${tokenId}`),
+    const slug = args.market_slug!;
+    const [{ market }, bookRes] = await Promise.all([
+      sdk.markets.retrieveBySlug(slug),
+      sdk.markets.book(slug).then(b => b, () => null),
     ]);
 
-    // Parse order book
-    if (bookRes.status === 'fulfilled' && bookRes.value) {
-      const book = bookRes.value;
-      const bids = (book.bids || []).map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) }));
-      const asks = (book.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) }));
-      const bestBid = bids[0]?.price ?? 0;
-      const bestAsk = asks[0]?.price ?? 1;
-
-      orderBook = {
-        bestBid,
-        bestAsk,
-        spread: bestAsk - bestBid,
-        spreadPercent: bestBid > 0 ? (bestAsk - bestBid) / bestBid : 0,
-        bidDepth: bids.slice(0, 5).reduce((sum, b) => sum + b.price * b.size, 0),
-        askDepth: asks.slice(0, 5).reduce((sum, a) => sum + a.price * a.size, 0),
-        bidLevels: bids.length,
-        askLevels: asks.length,
-      };
-    }
-
-    // Parse tick size
-    if (tickRes.status === 'fulfilled') {
-      const val = tickRes.value;
-      if (typeof val === 'string') {
-        const cleaned = val.trim().replace(/^"|"$/g, '');
-        if (ROUNDING_CONFIG[cleaned]) tickSize = cleaned;
-      } else if (val && typeof val === 'object' && 'minimum_tick_size' in val) {
-        const ts = String((val as { minimum_tick_size: string }).minimum_tick_size);
-        if (ROUNDING_CONFIG[ts]) tickSize = ts;
-      }
-    }
-
-    // Parse neg risk
-    if (negRes.status === 'fulfilled') {
-      const val = negRes.value;
-      if (typeof val === 'boolean') negRisk = val;
-      else if (val && typeof val === 'object' && 'neg_risk' in val) negRisk = Boolean((val as { neg_risk: boolean }).neg_risk);
-    }
-
-    // Parse fee rate
-    if (feeRes.status === 'fulfilled') {
-      const val = feeRes.value;
-      if (typeof val === 'number') feeRateBps = val;
-      else if (val && typeof val === 'object') {
-        feeRateBps = (val as any).base_fee ?? (val as any).fee_rate_bps ?? 0;
-      }
-    }
+    return {
+      market_slug: market.slug,
+      title: market.title,
+      outcome: market.outcome,
+      description: market.description,
+      event_slug: market.eventSlug,
+      active: market.active,
+      closed: market.closed,
+      liquidity: market.liquidity ?? 0,
+      volume: market.volume ?? 0,
+      book: bookRes ? summarizeBook(bookRes) : null,
+      price_tick: 0.01,
+      note: 'Prices are YES-side. To trade NO, use outcome="no" in place_order and quote the NO price; the server converts it.',
+    };
+  } catch (error) {
+    return { error: `Market lookup failed for ${args.market_slug ?? args.event_slug}: ${errorMessage(error)}` };
   }
-
-  return {
-    id: market.id,
-    question: market.question,
-    description: market.description,
-    outcomes: market.outcomes,
-    clobTokenIds: market.clobTokenIds,
-    conditionId: market.conditionId,
-    prices: market.outcomePrices,
-    volume: market.volume,
-    volume24hr: market.volume24hr,
-    liquidity: market.liquidity,
-    category: market.category,
-    endDate: market.endDate,
-    negRisk,
-    tickSize,
-    feeRateBps,
-    orderBook,
-  };
 }
 
-// ─── Types ───────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────
 
-interface MarketRow {
-  id: string;
-  question: string;
-  outcomes: string[];
-  prices: number[];
-  volume24hr: number | undefined;
-  liquidity: number;
-  category?: string;
-  endDate: string;
-  clobTokenIds: string[];
-  negRisk: boolean;
-}
-
-interface OrderBookData {
-  bestBid: number;
-  bestAsk: number;
-  spread: number;
-  spreadPercent: number;
-  bidDepth: number;
-  askDepth: number;
-  bidLevels: number;
-  askLevels: number;
-}
-
-interface MarketDetail {
-  id: string;
-  question: string;
-  description?: string;
-  outcomes: string[];
-  clobTokenIds: string[];
-  conditionId: string;
-  prices: number[];
-  volume: number;
-  volume24hr?: number;
-  liquidity: number;
-  category?: string;
-  endDate: string;
-  negRisk: boolean;
-  tickSize: string;
-  feeRateBps: number;
-  orderBook: OrderBookData | null;
-}
-
-function marketToRow(m: Market): MarketRow {
-  return {
-    id: m.id,
-    question: m.question,
-    outcomes: m.outcomes,
-    prices: m.outcomePrices,
-    volume24hr: m.volume24hr,
-    liquidity: m.liquidity,
-    category: m.category,
-    endDate: m.endDate,
-    clobTokenIds: m.clobTokenIds,
-    negRisk: m.negRisk ?? false,
-  };
+function withBbo(row: MarketRow, bbo: MarketBBO | null): MarketRow {
+  if (!bbo) return { ...row, best_bid: null, best_ask: null, mid: null };
+  const bid = bbo.bestBid ? amountToNumber(bbo.bestBid) : null;
+  const ask = bbo.bestAsk ? amountToNumber(bbo.bestAsk) : null;
+  const mid = bid !== null && ask !== null ? Math.round(((bid + ask) / 2) * 10000) / 10000 : null;
+  return { ...row, best_bid: bid, best_ask: ask, mid };
 }
