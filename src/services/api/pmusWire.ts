@@ -391,3 +391,20 @@ export function isTransientLatencyReject(message?: string | null): boolean {
   const m = message.toLowerCase()
   return m.includes('order processing max delay exceeded') || m.includes('global rate limit exceeded')
 }
+
+/**
+ * Limit price for a maker-only (post-only) buy, in the outcome's terms.
+ * Improves the best bid by one tick when the spread allows it, otherwise
+ * joins the bid; always strictly below the best ask so the order rests.
+ * Returns null when the book is not two-sided or has no room to rest.
+ */
+export function makerEntryPrice(bid: number, ask: number, tick = 0.01): number | null {
+  if (!(bid > 0) || !(ask > 0) || ask <= bid || ask > 1) return null
+  const t = tick > 0 ? tick : 0.01
+  const decimals = Math.max(0, Math.ceil(-Math.log10(t) - 1e-9))
+  const round = (x: number) => Number(x.toFixed(decimals))
+  const improved = round(Math.floor((bid + t) / t + 1e-9) * t)
+  const price = improved < ask - 1e-9 ? improved : round(Math.floor(bid / t + 1e-9) * t)
+  if (price <= 0 || price >= ask - 1e-9 || price >= 1) return null
+  return price
+}

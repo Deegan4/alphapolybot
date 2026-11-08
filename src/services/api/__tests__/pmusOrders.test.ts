@@ -62,3 +62,27 @@ describe('chunkSlugs', () => {
     expect(chunkSlugs([])).toEqual([])
   })
 })
+
+describe('makerEntryPrice', () => {
+  it('improves the bid by one tick when the spread is wider than a tick', async () => {
+    const { makerEntryPrice } = await import('../pmusWire')
+    expect(makerEntryPrice(0.27, 0.34)).toBe(0.28)
+    expect(makerEntryPrice(0.12, 0.14)).toBe(0.13)
+  })
+
+  it('joins the bid when the spread is one tick, and never reaches the ask', async () => {
+    const { makerEntryPrice } = await import('../pmusWire')
+    expect(makerEntryPrice(0.12, 0.13)).toBe(0.12)
+    // sub-cent bid on a 0.001-tick market, sent on the 1¢ grid
+    expect(makerEntryPrice(0.274, 0.34)).toBe(0.28)
+    expect(makerEntryPrice(0.274, 0.28)).toBe(0.27)
+  })
+
+  it('refuses one-sided or crossed books', async () => {
+    const { makerEntryPrice } = await import('../pmusWire')
+    expect(makerEntryPrice(0, 0.5)).toBeNull()
+    expect(makerEntryPrice(0.5, 0)).toBeNull()
+    expect(makerEntryPrice(0.5, 0.5)).toBeNull()
+    expect(makerEntryPrice(0.6, 0.5)).toBeNull()
+  })
+})

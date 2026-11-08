@@ -1,5 +1,5 @@
 import type { Market, Order, OrderRequest, OrderResult, PendingGtcOrder } from '@/types'
-import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject } from '@/services/api'
+import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject, makerEntryPrice } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { riskManager } from './RiskManager'
@@ -16,6 +16,13 @@ export interface TradingConfig {
   dryRun: boolean
   gtcFallbackEnabled: boolean  // When FOK is killed, resubmit as GTD limit order
   gtcExpiryMs: number          // GTD server-side expiry (default: 5 minutes)
+  /**
+   * Maker-first entries: buys rest as post-only GTD orders one tick inside the
+   * spread (no taker fee at tier 1, vs Θ·p·(1−p) as taker) and fall back to the
+   * normal taker path if the post-only order is rejected or the book is one-sided.
+   * Applies only where the GTD fallback could (gtdMeta present, no explicit orderType).
+   */
+  makerFirst: boolean
 }
 
 const DEFAULT_CONFIG: TradingConfig = {
@@ -26,6 +33,7 @@ const DEFAULT_CONFIG: TradingConfig = {
   dryRun: true, // SAFE DEFAULT: Always start in dry run mode
   gtcFallbackEnabled: true,  // ON by default — saves wasted analysis on illiquid markets
   gtcExpiryMs: 5 * 60 * 1000, // 5 minutes
+  makerFirst: false,           // opt-in (Settings → Trading → Order Execution)
 }
 
 /**
@@ -149,7 +157,83 @@ export class TradingService {
       strategy: options?.strategy ?? 'llm',
     } : undefined
 
+    // Maker-first: try a resting post-only order before crossing the spread
+    if (this.config.makerFirst && gtdMeta && !options?.orderType) {
+      const maker = await this.tryMakerEntry(market, outcome, amount, gtdMeta)
+      if (maker) return maker
+    }
+
     return this.executeOrder(orderRequest, gtdMeta)
+  }
+
+  /**
+   * Place a post-only GTD buy one tick inside the spread and hand it to
+   * GtcOrderManager. Returns null (caller falls back to taker) when the book
+   * is not two-sided, the size rounds to zero, or the exchange rejects it.
+   */
+  private async tryMakerEntry(
+    market: Market,
+    outcome: 'yes' | 'no',
+    amount: number,
+    gtdMeta: NonNullable<Parameters<TradingService['executeOrder']>[1]>,
+  ): Promise<OrderResult | null> {
+    const live = realtimeService.getPrice(market.slug) ?? await polymarketUSClient.getBestPrices(market.slug)
+    if (!live) return null
+    const book = priceForOutcome(live, outcome)
+    // Orders are sent on the 1¢ grid (adjustForTickSize), valid on every market
+    const price = makerEntryPrice(book.bid, book.ask, 0.01)
+    if (price === null) return null
+    const size = roundOrderQuantity(amount / price, market.orderMinSize)
+    if (size <= 0) return null
+
+    const expiresAtMs = Date.now() + this.config.gtcExpiryMs
+    const request: OrderRequest = {
+      marketSlug: market.slug,
+      outcome,
+      side: 'BUY',
+      price,
+      size,
+      type: 'GTD',
+      expiration: new Date(expiresAtMs).toISOString(),
+      postOnly: true,
+    }
+    const result = await this.executeOrder(request, undefined, { countFailure: false })
+    if (!result.success) {
+      console.log(`[TradingService] Maker entry not placed (${result.error}) — falling back to taker`)
+      return null
+    }
+    if (result.orderId && !result.filledSize && !this.config.dryRun) {
+      this.trackRestingOrder(result.orderId, request, gtdMeta, expiresAtMs)
+      return { ...result, pending: true }
+    }
+    return result
+  }
+
+  /** Hand a resting GTD buy to GtcOrderManager for fill / expiry tracking */
+  private trackRestingOrder(
+    orderId: string,
+    request: OrderRequest,
+    meta: NonNullable<Parameters<TradingService['executeOrder']>[1]>,
+    expiresAtMs: number,
+  ): void {
+    import('./GtcOrderManager').then(({ gtcOrderManager }) => {
+      gtcOrderManager.trackOrder({
+        orderId,
+        marketSlug: request.marketSlug,
+        outcome: meta.outcome,
+        question: meta.question,
+        side: request.side,
+        price: request.price,
+        size: request.size,
+        costBasis: meta.costBasis,
+        strategy: meta.strategy as PendingGtcOrder['strategy'],
+        stopLossPercent: meta.stopLossPercent,
+        takeProfitPercent: meta.takeProfitPercent,
+        placedAt: Date.now(),
+        expiresAt: expiresAtMs,
+        status: 'pending',
+      })
+    }).catch(err => console.warn('[TradingService] Failed to track resting order:', err))
   }
 
   /**
@@ -242,6 +326,9 @@ export class TradingService {
       takeProfitPercent: number
       strategy?: string
     },
+    /** countFailure=false: a failed attempt that the caller will retry another way
+     *  (maker-first → taker) must not count toward the circuit breaker */
+    opts: { countFailure?: boolean } = {},
   ): Promise<OrderResult> {
     // Pre-flight: PM US requires $1 minimum for marketable orders.
     const orderDollarValue = request.price * request.size
@@ -472,24 +559,7 @@ export class TradingService {
           this.inFlightTrades.delete(tradeId)
 
           // Hand off to GtcOrderManager for fill tracking (dynamic import avoids circular dep)
-          import('./GtcOrderManager').then(({ gtcOrderManager }) => {
-            gtcOrderManager.trackOrder({
-              orderId: gtdResult.orderId!,
-              marketSlug: request.marketSlug,
-              outcome: gtdMeta.outcome,
-              question: gtdMeta.question,
-              side: request.side,
-              price: request.price,
-              size: request.size,
-              costBasis: gtdMeta.costBasis,
-              strategy: gtdMeta.strategy as PendingGtcOrder['strategy'],
-              stopLossPercent: gtdMeta.stopLossPercent,
-              takeProfitPercent: gtdMeta.takeProfitPercent,
-              placedAt: Date.now(),
-              expiresAt: expiresAtMs,
-              status: 'pending',
-            })
-          }).catch(err => console.warn('[TradingService] Failed to track GTD order:', err))
+          this.trackRestingOrder(gtdResult.orderId, request, gtdMeta, expiresAtMs)
 
           return {
             success: true,
@@ -505,7 +575,9 @@ export class TradingService {
     }
 
     this.inFlightTrades.delete(tradeId)
-    riskManager.recordTradeResult(false, 0, failureReason)
+    if (opts.countFailure !== false) {
+      riskManager.recordTradeResult(false, 0, failureReason)
+    }
 
     return {
       success: false,

@@ -702,7 +702,7 @@ const WalletRegistryPanel: React.FC = () => {
  * GTD Fallback Settings — write-through to settingsStore (no Save button needed)
  */
 const GtdFallbackSettings: React.FC = () => {
-  const { gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes } = useSettingsStore()
+  const { gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes, makerFirstEntries, setMakerFirstEntries } = useSettingsStore()
 
   return (
     <div>
@@ -714,7 +714,13 @@ const GtdFallbackSettings: React.FC = () => {
           enabled={gtcFallbackEnabled}
           onChange={setGtcFallbackEnabled}
         />
-        {gtcFallbackEnabled && (
+        <MatrixToggle
+          label="Maker-First Entries"
+          description="Rest buys as post-only orders one cent inside the spread (no taker fee, about 4.75% of the stake at 50¢). Falls back to a normal order if the book is one-sided or the exchange rejects it. Fills are slower and may not happen."
+          enabled={makerFirstEntries}
+          onChange={setMakerFirstEntries}
+        />
+        {(gtcFallbackEnabled || makerFirstEntries) && (
           <MatrixSlider
             label="GTD Expiry"
             min={1}

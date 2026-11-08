@@ -65,6 +65,7 @@ Turn dry run off, set Penny Mode on, and keep the risk limits at their minimum. 
 
 - [ ] **BUY YES (FOK).** It fills. The tracked position's entry price matches the fill price shown on Polymarket US.
 - [ ] **BUY NO.** It fills **on the NO side**, and the entry price is the NO price, around 1 − YES. If the app shows the YES price, the fill-price conversion is wrong. If the exchange shows a YES position, the intent mapping is wrong. Stop and report either case.
+- [ ] **Maker-first (optional).** With Maker-First Entries on, a buy appears on the book as a resting limit order one cent above the best bid, marked post-only. A post-only rejection should log `Maker entry not placed` and then fill as a normal order.
 - [ ] **GTD fallback.** Make an FOK miss on a thin market and confirm the fallback GTD order rests on the book with the expected expiry. A rejection that mentions `goodTillTime` means the format is wrong.
 - [ ] **Fill detection.** The fill shows up in the Activity log within a few seconds. Detection should come from the private WebSocket, not the 60-second order poll.
 - [ ] **Exit.** A stop-loss or take-profit, or a manual close from the Portfolio view, sells the right side and the position disappears.

@@ -30,6 +30,7 @@ export interface AppSettingsState {
   // GTD Fallback
   gtcFallbackEnabled: boolean
   gtcExpiryMinutes: number
+  makerFirstEntries: boolean    // Post-only entries inside the spread before taking
 
   // Kelly Criterion position sizing
   kellyFraction: number // 0.0–1.0 (default 0.25 = quarter Kelly)
@@ -135,6 +136,7 @@ interface SettingsStore extends AppSettingsState {
   setRiskManagementEnabled: (enabled: boolean) => void
   setGtcFallbackEnabled: (enabled: boolean) => void
   setGtcExpiryMinutes: (minutes: number) => void
+  setMakerFirstEntries: (enabled: boolean) => void
   setKellyFraction: (fraction: number) => void
   setFwTradeSize: (size: number) => void
   setFwMinProfitBps: (bps: number) => void
@@ -219,6 +221,7 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   riskManagementEnabled: true,
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
+  makerFirstEntries: false,
   kellyFraction: 0.15,
   fwTradeSize: 5,
   fwMinProfitBps: 30,
@@ -346,6 +349,11 @@ export const useSettingsStore = create<SettingsStore>()(
       setGtcFallbackEnabled: (enabled: boolean) => {
         set({ gtcFallbackEnabled: enabled })
         import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ gtcFallbackEnabled: enabled }))
+      },
+
+      setMakerFirstEntries: (enabled: boolean) => {
+        set({ makerFirstEntries: enabled })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerFirst: enabled }))
       },
 
       setGtcExpiryMinutes: (minutes: number) => {
@@ -960,6 +968,7 @@ export const useSettingsStore = create<SettingsStore>()(
         riskManagementEnabled: state.riskManagementEnabled,
         gtcFallbackEnabled: state.gtcFallbackEnabled,
         gtcExpiryMinutes: state.gtcExpiryMinutes,
+        makerFirstEntries: state.makerFirstEntries,
         kellyFraction: state.kellyFraction,
         fwTradeSize: state.fwTradeSize,
         fwMinProfitBps: state.fwMinProfitBps,
