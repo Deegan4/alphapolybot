@@ -21,6 +21,9 @@ export interface MakerFillStats {
   cancelled: number
   /** Post-only attempts the exchange refused (fell back to taker immediately) */
   rejected: number
+  /** Expired maker entries completed as taker orders (filled / attempted) */
+  takerFallbackFilled: number
+  takerFallbackAttempted: number
   /** filled / (filled + expired + cancelled); null until an order resolves */
   fillRate: number | null
   /** Mean placement-to-fill time for filled orders (ms); null if none */
@@ -38,6 +41,8 @@ interface State {
   expired: number
   cancelled: number
   rejected: number
+  takerFallbackFilled: number
+  takerFallbackAttempted: number
   totalFillMs: number
   feesSavedUSD: number
   filledNotionalUSD: number
@@ -48,6 +53,7 @@ const STORAGE_KEY = 'alphapolybot:maker-fill-stats:v1'
 
 const empty = (now: number): State => ({
   placed: 0, filled: 0, expired: 0, cancelled: 0, rejected: 0,
+  takerFallbackFilled: 0, takerFallbackAttempted: 0,
   totalFillMs: 0, feesSavedUSD: 0, filledNotionalUSD: 0, since: now,
 })
 
@@ -87,6 +93,13 @@ export class MakerFillTracker {
     this.commit()
   }
 
+  /** An expired maker entry was retried as a taker order */
+  recordTakerFallback(success: boolean): void {
+    this.state.takerFallbackAttempted++
+    if (success) this.state.takerFallbackFilled++
+    this.commit()
+  }
+
   /** A resting maker order reached a terminal state */
   recordResolved(
     outcome: Exclude<MakerOutcome, 'rejected'>,
@@ -114,6 +127,8 @@ export class MakerFillTracker {
       expired: s.expired,
       cancelled: s.cancelled,
       rejected: s.rejected,
+      takerFallbackFilled: s.takerFallbackFilled,
+      takerFallbackAttempted: s.takerFallbackAttempted,
       fillRate: resolved > 0 ? s.filled / resolved : null,
       avgTimeToFillMs: s.filled > 0 ? s.totalFillMs / s.filled : null,
       feesSavedUSD: Math.round(s.feesSavedUSD * 100) / 100,

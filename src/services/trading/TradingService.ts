@@ -1,5 +1,5 @@
 import type { Market, Order, OrderRequest, OrderResult, PendingGtcOrder } from '@/types'
-import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject, makerEntryPrice } from '@/services/api'
+import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject, makerEntryPrice, takerAfterExpiryPlan } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { riskManager } from './RiskManager'
@@ -23,6 +23,11 @@ export interface TradingConfig {
    * Applies only where the GTD fallback could (gtdMeta present, no explicit orderType).
    */
   makerFirst: boolean
+  /** When a maker-first order expires unfilled, take the remainder if the ask
+   *  is within `makerMaxChase` of the maker price */
+  makerExpiryTakerFallback: boolean
+  /** Max price (outcome terms, dollars) the taker fallback may pay above the maker limit */
+  makerMaxChase: number
 }
 
 const DEFAULT_CONFIG: TradingConfig = {
@@ -34,6 +39,8 @@ const DEFAULT_CONFIG: TradingConfig = {
   gtcFallbackEnabled: true,  // ON by default — saves wasted analysis on illiquid markets
   gtcExpiryMs: 5 * 60 * 1000, // 5 minutes
   makerFirst: false,           // opt-in (Settings → Trading → Order Execution)
+  makerExpiryTakerFallback: true,
+  makerMaxChase: 0.02,
 }
 
 /**
@@ -204,8 +211,106 @@ export class TradingService {
       return null
     }
     if (result.orderId && !result.filledSize && !this.config.dryRun) {
-      this.trackRestingOrder(result.orderId, request, gtdMeta, expiresAtMs, { entryKind: 'maker', feeCoefficient: market.feeCoefficient })
+      this.trackRestingOrder(result.orderId, request, gtdMeta, expiresAtMs, {
+        entryKind: 'maker', feeCoefficient: market.feeCoefficient, orderMinSize: market.orderMinSize,
+      })
       return { ...result, pending: true }
+    }
+    return result
+  }
+
+  /**
+   * A maker-first order expired. Track any partial fill as a position, then —
+   * if enabled and the ask hasn't run more than `makerMaxChase` above the
+   * maker price — buy the unfilled remainder as an FOK taker order through
+   * placeBet (risk gate, depth check, dry run all apply) and track that fill.
+   */
+  async completeExpiredMakerEntry(order: PendingGtcOrder): Promise<OrderResult | null> {
+    let filled = order.filledSize ?? 0
+    if (!this.config.dryRun) {
+      try {
+        const details = await polymarketUSClient.getOrder(order.orderId)
+        if (details?.filledSize !== undefined) filled = Math.max(filled, details.filledSize)
+      } catch {
+        // fall back to what the user channel reported
+      }
+    }
+
+    const { positionLifecycleManager } = await import('./PositionLifecycleManager')
+    if (filled > 0) {
+      // GTD expired after a partial fill: those shares are a real position
+      positionLifecycleManager.trackPosition({
+        marketSlug: order.marketSlug,
+        outcome: order.outcome,
+        question: order.question,
+        entryPrice: order.price,
+        size: filled,
+        costBasis: filled * order.price,
+        entryTime: Date.now(),
+        stopLossPercent: order.stopLossPercent,
+        takeProfitPercent: order.takeProfitPercent,
+        strategy: order.strategy,
+      })
+    }
+
+    if (!this.config.makerFirst || !this.config.makerExpiryTakerFallback) return null
+
+    const live = realtimeService.getPrice(order.marketSlug) ?? await polymarketUSClient.getBestPrices(order.marketSlug)
+    const ask = live ? priceForOutcome(live, order.outcome).ask : null
+    const plan = takerAfterExpiryPlan({
+      makerPrice: order.price,
+      size: order.size,
+      filled,
+      ask,
+      maxChase: this.config.makerMaxChase,
+      minimumTradeQty: order.orderMinSize,
+    })
+    if ('skip' in plan) {
+      console.log(`[TradingService] Maker entry expired — no taker fallback: ${plan.skip}`)
+      return null
+    }
+
+    const market: Market = {
+      id: order.marketSlug,
+      slug: order.marketSlug,
+      question: order.question,
+      outcomes: ['Yes', 'No'],
+      outcomeSlugs: [order.marketSlug, order.marketSlug],
+      outcomePrices: order.outcome === 'yes' ? [plan.price, 1 - plan.price] : [1 - plan.price, plan.price],
+      active: true,
+      closed: false,
+      endDate: '',
+      createdAt: '',
+      volume: 0,
+      liquidity: 0,
+      orderMinSize: order.orderMinSize,
+      feeCoefficient: order.feeCoefficient,
+    }
+    console.log(`[TradingService] Maker entry expired — taking ${plan.take} at ${plan.price.toFixed(3)}`)
+    // Exact quantity: amount sized so placeBet's shares round back to plan.take
+    const amount = plan.take * plan.price * 1.000001
+    const result = await this.placeBet(market, order.outcome, amount, {
+      orderType: 'FOK',
+      skipGtcFallback: true,
+      strategy: order.strategy,
+      stopLossPercent: order.stopLossPercent,
+      takeProfitPercent: order.takeProfitPercent,
+    })
+    import('./MakerFillTracker').then(m => m.makerFillTracker.recordTakerFallback(result.success)).catch(() => {})
+
+    if (result.success && (result.filledSize ?? 0) > 0) {
+      positionLifecycleManager.trackPosition({
+        marketSlug: order.marketSlug,
+        outcome: order.outcome,
+        question: order.question,
+        entryPrice: result.avgPrice ?? plan.price,
+        size: result.filledSize!,
+        costBasis: result.filledSize! * (result.avgPrice ?? plan.price),
+        entryTime: Date.now(),
+        stopLossPercent: order.stopLossPercent,
+        takeProfitPercent: order.takeProfitPercent,
+        strategy: order.strategy,
+      })
     }
     return result
   }
@@ -216,7 +321,7 @@ export class TradingService {
     request: OrderRequest,
     meta: NonNullable<Parameters<TradingService['executeOrder']>[1]>,
     expiresAtMs: number,
-    extra: Pick<PendingGtcOrder, 'entryKind' | 'feeCoefficient'> = {},
+    extra: Pick<PendingGtcOrder, 'entryKind' | 'feeCoefficient' | 'orderMinSize'> = {},
   ): void {
     import('./GtcOrderManager').then(({ gtcOrderManager }) => {
       gtcOrderManager.trackOrder({

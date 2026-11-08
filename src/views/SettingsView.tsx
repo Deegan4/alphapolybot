@@ -721,6 +721,7 @@ const MakerFillStatsPanel: React.FC = () => {
     <div className="bg-agent-green/5 border border-agent-green/20 rounded-lg p-3 text-xs font-mono space-y-1">
       <div className="flex justify-between"><span className="text-agent-text-muted">Fill rate</span><span>{pct(stats.fillRate)} ({stats.filled}/{resolved})</span></div>
       <div className="flex justify-between"><span className="text-agent-text-muted">Expired · cancelled · rejected</span><span>{stats.expired} · {stats.cancelled} · {stats.rejected}</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Expired → taker fills</span><span>{stats.takerFallbackFilled}/{stats.takerFallbackAttempted}</span></div>
       <div className="flex justify-between"><span className="text-agent-text-muted">Avg time to fill</span><span>{secs(stats.avgTimeToFillMs)}</span></div>
       <div className="flex justify-between"><span className="text-agent-text-muted">Taker fees avoided</span><span>${stats.feesSavedUSD.toFixed(2)} on ${stats.filledNotionalUSD.toFixed(2)}</span></div>
       <div className="flex justify-between items-center pt-1">
@@ -735,7 +736,11 @@ const MakerFillStatsPanel: React.FC = () => {
  * GTD Fallback Settings — write-through to settingsStore (no Save button needed)
  */
 const GtdFallbackSettings: React.FC = () => {
-  const { gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes, makerFirstEntries, setMakerFirstEntries } = useSettingsStore()
+  const {
+    gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes,
+    makerFirstEntries, setMakerFirstEntries,
+    makerExpiryTakerFallback, setMakerExpiryTakerFallback, makerMaxChaseCents, setMakerMaxChaseCents,
+  } = useSettingsStore()
 
   return (
     <div>
@@ -753,6 +758,27 @@ const GtdFallbackSettings: React.FC = () => {
           enabled={makerFirstEntries}
           onChange={setMakerFirstEntries}
         />
+        {makerFirstEntries && (
+          <>
+            <MatrixToggle
+              label="Taker Fallback on Expiry"
+              description="If a maker entry expires unfilled, buy the rest with a normal order, but only if the price has not run away. Any partial fill is kept as a position either way."
+              enabled={makerExpiryTakerFallback}
+              onChange={setMakerExpiryTakerFallback}
+            />
+            {makerExpiryTakerFallback && (
+              <MatrixSlider
+                label="Max Chase Above Maker Price"
+                min={0}
+                max={5}
+                step={1}
+                value={makerMaxChaseCents}
+                onChange={setMakerMaxChaseCents}
+                valueFormat={(v) => `${v}¢`}
+              />
+            )}
+          </>
+        )}
         <MakerFillStatsPanel />
         {(gtcFallbackEnabled || makerFirstEntries) && (
           <MatrixSlider

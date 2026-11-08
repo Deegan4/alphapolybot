@@ -408,3 +408,27 @@ export function makerEntryPrice(bid: number, ask: number, tick = 0.01): number |
   if (price <= 0 || price >= ask - 1e-9 || price >= 1) return null
   return price
 }
+
+/**
+ * Should an expired maker entry be completed as a taker order? Only when some
+ * quantity is still unfilled and the current ask (outcome terms) has not run
+ * more than `maxChase` above the maker limit — a price-based proxy for "the
+ * entry still makes sense". Returns the quantity to take, or a reason to skip.
+ */
+export function takerAfterExpiryPlan(input: {
+  makerPrice: number
+  size: number
+  filled: number
+  ask: number | null | undefined
+  maxChase: number
+  minimumTradeQty?: number
+}): { take: number; price: number } | { skip: string } {
+  const remaining = roundOrderQuantity(input.size - Math.max(0, input.filled), input.minimumTradeQty)
+  if (remaining <= 0) return { skip: 'nothing left unfilled' }
+  const ask = input.ask ?? 0
+  if (!(ask > 0) || ask >= 1) return { skip: 'no ask on the book' }
+  if (ask > input.makerPrice + input.maxChase + 1e-9) {
+    return { skip: `ask ${ask.toFixed(3)} ran more than ${(input.maxChase * 100).toFixed(0)}¢ above the maker price ${input.makerPrice.toFixed(2)}` }
+  }
+  return { take: remaining, price: ask }
+}

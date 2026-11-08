@@ -146,6 +146,10 @@ export interface PendingGtcOrder {
   entryKind?: 'maker'
   /** Market taker coefficient Θ, for fee-savings accounting */
   feeCoefficient?: number
+  /** Cumulative filled shares seen so far (partial fills) */
+  filledSize?: number
+  /** Market's minimum trade quantity step (1 = whole contracts) */
+  orderMinSize?: number
 }
 
 export interface Trade {

@@ -86,3 +86,19 @@ describe('makerEntryPrice', () => {
     expect(makerEntryPrice(0.6, 0.5)).toBeNull()
   })
 })
+
+describe('takerAfterExpiryPlan', () => {
+  it('takes the unfilled remainder when the ask is within the chase limit', async () => {
+    const { takerAfterExpiryPlan } = await import('../pmusWire')
+    expect(takerAfterExpiryPlan({ makerPrice: 0.28, size: 17, filled: 5, ask: 0.30, maxChase: 0.02 })).toEqual({ take: 12, price: 0.30 })
+    expect(takerAfterExpiryPlan({ makerPrice: 0.28, size: 3.5, filled: 1.25, ask: 0.29, maxChase: 0.02, minimumTradeQty: 0.01 })).toEqual({ take: 2.25, price: 0.29 })
+  })
+
+  it('skips when the price ran away, the book is empty, or nothing is left', async () => {
+    const { takerAfterExpiryPlan } = await import('../pmusWire')
+    expect(takerAfterExpiryPlan({ makerPrice: 0.28, size: 17, filled: 0, ask: 0.31, maxChase: 0.02 })).toHaveProperty('skip')
+    expect(takerAfterExpiryPlan({ makerPrice: 0.28, size: 17, filled: 0, ask: null, maxChase: 0.02 })).toHaveProperty('skip')
+    expect(takerAfterExpiryPlan({ makerPrice: 0.28, size: 17, filled: 17, ask: 0.28, maxChase: 0.02 })).toHaveProperty('skip')
+    expect(takerAfterExpiryPlan({ makerPrice: 0.28, size: 17, filled: 16.5, ask: 0.28, maxChase: 0.02 })).toHaveProperty('skip')
+  })
+})

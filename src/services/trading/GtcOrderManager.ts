@@ -84,6 +84,7 @@ export class GtcOrderManager {
           console.log(`[GtcOrderManager] Order ${msg.orderId} filled via user channel`)
           void this.handleFill(pending)
         } else {
+          if (msg.cumQuantity !== undefined) pending.filledSize = msg.cumQuantity
           console.log(`[GtcOrderManager] Order ${msg.orderId} partial fill (${msg.lastShares ?? '?'} shares) — waiting for completion`)
         }
       })
@@ -231,6 +232,13 @@ export class GtcOrderManager {
    */
   private handleExpiry(order: PendingGtcOrder): void {
     order.status = 'expired'
+
+    // Maker-first: keep any partial fill and optionally take the remainder
+    if (order.entryKind === 'maker') {
+      import('./TradingService')
+        .then(({ tradingService }) => tradingService.completeExpiredMakerEntry(order))
+        .catch(err => console.warn('[GtcOrderManager] Maker expiry follow-up failed:', err))
+    }
 
     activityLogger.logInfo(
       `GTD expired: ${order.question.substring(0, 40)}...`,

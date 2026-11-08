@@ -38,6 +38,8 @@ const App: React.FC = () => {
   const openRouterApiKey = useSettingsStore((s) => s.openRouterApiKey)
   const gtcFallbackEnabled = useSettingsStore((s) => s.gtcFallbackEnabled)
   const makerFirstEntries = useSettingsStore((s) => s.makerFirstEntries)
+  const makerExpiryTakerFallback = useSettingsStore((s) => s.makerExpiryTakerFallback)
+  const makerMaxChaseCents = useSettingsStore((s) => s.makerMaxChaseCents)
   const gtcExpiryMinutes = useSettingsStore((s) => s.gtcExpiryMinutes)
   const initialized = useRef(false)
 
@@ -207,9 +209,11 @@ const App: React.FC = () => {
       gtcFallbackEnabled,
       gtcExpiryMs: gtcExpiryMinutes * 60 * 1000,
       makerFirst: makerFirstEntries,
+      makerExpiryTakerFallback,
+      makerMaxChase: makerMaxChaseCents / 100,
     })
     console.log(`[App] Trading mode: ${dryRun ? 'DRY RUN' : 'LIVE'}, GTD fallback: ${gtcFallbackEnabled ? 'ON' : 'OFF'}, maker-first: ${makerFirstEntries ? 'ON' : 'OFF'}`)
-  }, [dryRun, gtcFallbackEnabled, gtcExpiryMinutes, makerFirstEntries])
+  }, [dryRun, gtcFallbackEnabled, gtcExpiryMinutes, makerFirstEntries, makerExpiryTakerFallback, makerMaxChaseCents])
 
   // Sync OpenRouter API key when changed in settings
   useEffect(() => {

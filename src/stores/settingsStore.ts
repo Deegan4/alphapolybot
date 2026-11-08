@@ -31,6 +31,8 @@ export interface AppSettingsState {
   gtcFallbackEnabled: boolean
   gtcExpiryMinutes: number
   makerFirstEntries: boolean    // Post-only entries inside the spread before taking
+  makerExpiryTakerFallback: boolean // Take the remainder when a maker entry expires
+  makerMaxChaseCents: number    // Max cents above the maker price the fallback may pay
 
   // Kelly Criterion position sizing
   kellyFraction: number // 0.0–1.0 (default 0.25 = quarter Kelly)
@@ -137,6 +139,8 @@ interface SettingsStore extends AppSettingsState {
   setGtcFallbackEnabled: (enabled: boolean) => void
   setGtcExpiryMinutes: (minutes: number) => void
   setMakerFirstEntries: (enabled: boolean) => void
+  setMakerExpiryTakerFallback: (enabled: boolean) => void
+  setMakerMaxChaseCents: (cents: number) => void
   setKellyFraction: (fraction: number) => void
   setFwTradeSize: (size: number) => void
   setFwMinProfitBps: (bps: number) => void
@@ -222,6 +226,8 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
   makerFirstEntries: false,
+  makerExpiryTakerFallback: true,
+  makerMaxChaseCents: 2,
   kellyFraction: 0.15,
   fwTradeSize: 5,
   fwMinProfitBps: 30,
@@ -354,6 +360,16 @@ export const useSettingsStore = create<SettingsStore>()(
       setMakerFirstEntries: (enabled: boolean) => {
         set({ makerFirstEntries: enabled })
         import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerFirst: enabled }))
+      },
+
+      setMakerExpiryTakerFallback: (enabled: boolean) => {
+        set({ makerExpiryTakerFallback: enabled })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerExpiryTakerFallback: enabled }))
+      },
+
+      setMakerMaxChaseCents: (cents: number) => {
+        set({ makerMaxChaseCents: cents })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerMaxChase: cents / 100 }))
       },
 
       setGtcExpiryMinutes: (minutes: number) => {
@@ -969,6 +985,8 @@ export const useSettingsStore = create<SettingsStore>()(
         gtcFallbackEnabled: state.gtcFallbackEnabled,
         gtcExpiryMinutes: state.gtcExpiryMinutes,
         makerFirstEntries: state.makerFirstEntries,
+        makerExpiryTakerFallback: state.makerExpiryTakerFallback,
+        makerMaxChaseCents: state.makerMaxChaseCents,
         kellyFraction: state.kellyFraction,
         fwTradeSize: state.fwTradeSize,
         fwMinProfitBps: state.fwMinProfitBps,
