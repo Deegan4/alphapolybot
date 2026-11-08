@@ -10,7 +10,8 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 65",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "deploy:cf": "wrangler pages deploy dist --project-name=alphapolybot --commit-dirty=true"
   },
   "dependencies": {
     "axios": "^1.19.0",
@@ -44,6 +45,7 @@
     "typescript": "^5.2.0",
     "vite": "^7.3.1",
     "vitest": "^4.0.18",
+    "wrangler": "^4.152.0",
     "zod": "^3.25.76"
   },
   "overrides": {
