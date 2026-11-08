@@ -20,13 +20,12 @@ const tabContentVariants = {
  * Banner shown on settings panels of strategies that are not yet runnable on
  * Polymarket US (see ShelvedStrategy). Settings are kept so they survive the port.
  */
-const ShelvedStrategyNotice: React.FC = () => (
+const ShelvedStrategyNotice: React.FC<{ reason?: string }> = ({ reason }) => (
   <div className="bg-agent-orange/10 border border-agent-orange/40 rounded-lg p-4">
-    <h4 className="text-agent-orange text-sm font-bold mb-1 font-mono">Not yet available on Polymarket US</h4>
+    <h4 className="text-agent-orange text-sm font-bold mb-1 font-mono">Not available on Polymarket US</h4>
     <p className="text-agent-text-muted text-xs font-sans">
-      This strategy's implementation targeted the international Polymarket CLOB and has not been ported
-      to Polymarket US yet. It is hidden from the dashboard toggles and will not trade. Your settings
-      are saved and will apply once the port lands.
+      {reason ?? "This strategy's implementation targeted the international Polymarket CLOB and has not been ported to Polymarket US yet."}{' '}
+      It is hidden from the dashboard toggles and will not trade. Your settings are saved.
     </p>
   </div>
 )
@@ -1389,16 +1388,9 @@ const DipSettings: React.FC = () => {
   }
 
   return (
-    <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Two-leg arbitrage on binary events" variant="glass">
+    <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Two-leg arbitrage below $1" variant="glass">
       <div className="space-y-6">
-        <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
-          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">How it trades on Polymarket US</h4>
-          <p className="text-agent-text-muted text-xs font-sans">
-            Watches events with two outcome markets. When the best asks (plus the fill premium) sum to less than the
-            target, it buys the same number of shares of both outcomes with FOK orders and holds to resolution, where
-            one share of each pays exactly $1. Dip-trigger fields are kept for compatibility but unused.
-          </p>
-        </div>
+        <ShelvedStrategyNotice reason="Each Polymarket US market is one YES-quoted book, so YES + NO never costs less than $1. Buying YES across an event's markets is only riskless when those markets are a complete, mutually exclusive set, and the exchange does not mark which events are (live events include nested and partial lists)." />
 
         {/* Core Settings */}
         <div>

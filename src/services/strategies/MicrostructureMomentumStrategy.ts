@@ -185,7 +185,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     if (!this._enabled || this._status !== 'running') return
 
     try {
-      const markets = await polymarketUSClient.getMarkets({ active: true, closed: false })
+      const markets = await polymarketUSClient.getMarkets({ active: true, closed: false, limit: 100, withStats: true })
       const eligible = selectEligibleMarkets(markets, this.microConfig.marketBatchSize)
 
       // Subscribe new markets to WebSocket feeds
@@ -306,6 +306,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           market.slug, // same slug TradingService.placeBet orders against
           this.microConfig.tradeSize,
           0.03, // 3% max slippage
+          outcome, // YES-quoted book: a NO buy walks the YES bids
         )
         if (!depth.sufficient) depthOk = false
       } catch {
@@ -314,9 +315,9 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       if (!depthOk) continue
 
       // === POSITION SIZING ===
-      // Convert compositeSignal to probability estimate
-      // compositeSignal of 0.6 → ~59% probability edge
-      const modelProb = 0.5 + signal.compositeSignal * 0.15
+      // Convert compositeSignal to a probability for the CHOSEN outcome
+      // |compositeSignal| of 0.6 → ~59% (bearish signals back NO the same way)
+      const modelProb = 0.5 + Math.abs(signal.compositeSignal) * 0.15
       const positionSize = this.calculatePositionSize(modelProb, currentPrice)
       if (positionSize <= 0) continue
 

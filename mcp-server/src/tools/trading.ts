@@ -4,11 +4,13 @@
  */
 
 import { z } from 'zod';
+import type { MarketBBO } from 'polymarket-us';
 import { getAuthSdk, AUTH_HELP, errorMessage } from '../clients/polymarket-us.js';
 import {
   buildCreateOrderParams,
   formatOrder,
   amountToNumber,
+  unwrapMarketData,
   type FormattedOrder,
   type BuiltOrder,
 } from '../utils/orders.js';
@@ -261,7 +263,7 @@ export async function handleClosePosition(args: {
   try {
     let slippageTolerance;
     if (args.slippage_bips !== undefined) {
-      const bbo = await sdk.markets.bbo(args.market_slug);
+      const bbo = unwrapMarketData<MarketBBO>(await sdk.markets.bbo(args.market_slug));
       const ref = bbo.bestBid ?? bbo.lastTradePx;
       if (ref) slippageTolerance = { currentPrice: ref, bips: args.slippage_bips };
     }

@@ -261,6 +261,43 @@ describe('PositionLifecycleManager', () => {
     })
   })
 
+  describe('NO positions (feed is YES-quoted)', () => {
+    it('stops out a NO position when the YES price rises', async () => {
+      mockPlaceSell.mockResolvedValue({ success: true, orderId: 'sell-no-1' })
+      mockGetPrice.mockReturnValue({ mid: 0.60, timestamp: new Date() })
+
+      plm.initialize()
+      plm.trackPosition(makePosition({ outcome: 'no', entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
+
+      // YES 0.50 → 0.60 means NO 0.50 → 0.40 = -20%
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.60, timestamp: new Date() })
+
+      await vi.waitFor(() => {
+        expect(mockPlaceSell).toHaveBeenCalledWith('will-btc-exceed-100k', 'no', 10, undefined, 'GTC')
+      })
+    })
+
+    it('does NOT stop out a NO position when the YES price falls', () => {
+      plm.initialize()
+      plm.trackPosition(makePosition({ outcome: 'no', entryPrice: 0.50, stopLossPercent: 0.15, takeProfitPercent: 0.30 }))
+
+      // YES 0.50 → 0.40 means NO is up 20% — inside both thresholds
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
+
+      expect(mockPlaceSell).not.toHaveBeenCalled()
+    })
+
+    it('reports NO P&L from 1 - YES mid', () => {
+      mockGetPrice.mockReturnValue({ mid: 0.30, timestamp: new Date() })
+      plm.trackPosition(makePosition({ outcome: 'no', entryPrice: 0.50, size: 10 }))
+      const [pos] = plm.getPositions()
+      expect(pos.currentPrice).toBeCloseTo(0.70, 10)
+      expect(pos.pnlUsd).toBeCloseTo(2.0, 10)
+    })
+  })
+
   describe('take-profit trigger', () => {
     it('triggers sell when price rises above take-profit threshold', async () => {
       mockPlaceSell.mockResolvedValue({ success: true, orderId: 'sell-2' })

@@ -7,7 +7,7 @@ export interface Market {
   slug: string           // primary identifier for US API (e.g. "btc-100k-2025")
   question: string       // mapped from title
   description?: string
-  outcomes: string[]     // derived from event's markets (e.g. ['Yes', 'No'])
+  outcomes: string[]     // ['Yes', 'No'] (or ['Up', 'Down']) — both trade on `slug`
   active: boolean
   closed: boolean
   endDate: string
@@ -23,12 +23,20 @@ export interface Market {
   tags?: string[]
   // US-specific
   eventSlug?: string
-  outcomeSlugs?: string[]   // per-outcome SDK market slugs (for BBO lookups)
+  /** Slug per outcome for price feeds. On PM US both outcomes share `slug`
+   *  (one YES-quoted book); kept as an array for consumer compatibility. */
+  outcomeSlugs?: string[]
   bestBid?: number
   bestAsk?: number
   spread?: number
   orderPriceMinTickSize?: number
   orderMinSize?: number
+  /** Exchange fee coefficient (from the market listing) */
+  feeCoefficient?: number
+  /** Crypto Up/Down: trading window and reference price from assetPriceTerms */
+  windowStart?: string
+  windowEnd?: string
+  priceToBeat?: number
 }
 
 export interface OrderBook {

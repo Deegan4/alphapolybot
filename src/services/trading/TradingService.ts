@@ -1,5 +1,5 @@
 import type { Market, Order, OrderRequest, OrderResult, PendingGtcOrder } from '@/types'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { riskManager } from './RiskManager'
@@ -98,7 +98,7 @@ export class TradingService {
 
     // Order book depth check — cap order size to available liquidity
     try {
-      const depthCheck = await orderBookDepth.checkBuyDepth(market.slug, amount, this.config.maxSlippage)
+      const depthCheck = await orderBookDepth.checkBuyDepth(market.slug, amount, this.config.maxSlippage, outcome)
       if (!depthCheck.sufficient && depthCheck.maxFillableUSD > 0) {
         const capped = Math.min(amount, depthCheck.maxFillableUSD * 0.9) // 10% safety margin
         if (capped < 1.00) {
@@ -161,14 +161,17 @@ export class TradingService {
     // Apply execution cooldown
     await this.waitForCooldown()
 
-    // Get current price if not provided — use best bid
+    // Get current price if not provided — best bid in the outcome's terms
+    // (the book is YES-quoted: the NO bid is 1 - YES ask)
     let sellPrice = price
     if (!sellPrice) {
-      const priceData = realtimeService.getPrice(slug)
+      const live = realtimeService.getPrice(slug)
+      const priceData = live ? priceForOutcome(live, outcome) : null
       if (priceData?.bid && priceData.bid > 0.01) {
         sellPrice = priceData.bid
       } else {
-        const bestPrices = await polymarketUSClient.getBestPrices(slug)
+        const best = await polymarketUSClient.getBestPrices(slug)
+        const bestPrices = best ? priceForOutcome(best, outcome) : null
         if (bestPrices?.bid && bestPrices.bid > 0.01) {
           sellPrice = bestPrices.bid
         } else {
@@ -352,7 +355,9 @@ export class TradingService {
               const orderDetails = await polymarketUSClient.getOrder(result.orderId)
               if (orderDetails) {
                 result.filledSize = orderDetails.filledSize ?? result.filledSize
-                result.avgPrice = orderDetails.price ?? result.avgPrice
+                result.avgPrice = orderDetails.price
+                  ? reportedPriceForOutcome(orderDetails.price, request.outcome, request.price)
+                  : result.avgPrice
               }
             } catch {
               // Best-effort

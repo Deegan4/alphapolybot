@@ -56,7 +56,7 @@ export class MarketScanner {
   async scan(): Promise<ScanResult[]> {
     try {
       // Fetch all active markets from US API
-      const markets = await polymarketUSClient.getMarkets({ active: true })
+      const markets = await polymarketUSClient.getMarkets({ active: true, closed: false, limit: 100, withStats: true })
 
       this.scanResults = markets.map(market => this.evaluateMarket(market))
       this.lastScanTime = new Date()

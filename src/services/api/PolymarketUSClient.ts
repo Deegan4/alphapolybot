@@ -17,8 +17,6 @@ import {
   type CreateOrderParams,
   type CreateOrderResponse,
   type ClosePositionResponse,
-  type MarketBook,
-  type MarketBBO,
   type GetEventsResponse,
   type GetOpenOrdersResponse,
   type GetUserPositionsResponse,
@@ -26,7 +24,6 @@ import {
   type GetAccountBalancesResponse,
   type CancelAllOrdersResponse,
   type SearchResponse,
-  type Event as SDKEvent,
   type Order as SDKOrder,
   type Amount,
 } from 'polymarket-us'
@@ -47,6 +44,21 @@ import type {
 } from '@/types/api'
 
 import { resolveIntent, toApiPrice } from '@/types/api'
+import {
+  normalizeEventToMarkets,
+  normalizeWireMarket,
+  unwrapMarketData,
+  statsFromBbo,
+  rankForStats,
+  priceDataFromBbo,
+  orderBookFromWire,
+  reportedPriceForOutcome,
+  type WireEvent,
+  type WireMarket,
+  type WireBBO,
+  type WireBook,
+} from './pmusWire'
+import { throttleSdk, sharedBuckets } from './requestThrottle'
 
 // ==========================================
 // HELPERS
@@ -120,35 +132,8 @@ function normalizeOrder(o: SDKOrder): Order {
   }
 }
 
-/** Convert SDK Event + its markets into our Market[] */
-export function normalizeEventToMarkets(event: SDKEvent): Market[] {
-  if (!event.markets || event.markets.length === 0) return []
-
-  // US API has one Market per outcome. Group by event to build our unified Market.
-  // For binary events, there are typically 2 SDK markets: one for "Yes", one for "No".
-  // We combine them into a single Market with outcomes array.
-  const outcomeNames = event.markets.map(m => m.outcome || m.title)
-  const outcomeSlugs = event.markets.map(m => m.slug)
-  const outcomePrices: number[] = event.markets.map(() => 0) // populated by getMarkets() via BBO
-
-  return [{
-    id: String(event.id),
-    slug: event.slug,
-    question: event.title,
-    description: event.description,
-    outcomes: outcomeNames,
-    active: event.active,
-    closed: event.closed,
-    endDate: event.endTime || '',
-    createdAt: event.startTime || '',
-    volume: event.volume || 0,
-    liquidity: event.liquidity || 0,
-    outcomePrices,
-    outcomeSlugs,
-    eventSlug: event.slug,
-    tags: event.tags?.map(t => t.label),
-  }]
-}
+// Event → Market normalization lives in ./pmusWire (pure, tested against live fixtures)
+export { normalizeEventToMarkets }
 
 // ==========================================
 // CLIENT
@@ -195,12 +180,12 @@ export class PolymarketUSClient {
   setCredentials(keyId: string, secretKey: string): void {
     this._keyId = keyId
     this._secretKey = secretKey
-    this.sdk = new PolymarketUS({
+    this.sdk = throttleSdk(new PolymarketUS({
       keyId,
       secretKey,
       gatewayBaseUrl: this.gatewayBaseUrl,
       apiBaseUrl: this.getValidApiBaseUrl(),
-    })
+    }))
   }
 
   hasCredentials(): boolean {
@@ -227,10 +212,10 @@ export class PolymarketUSClient {
   private getSDK(): PolymarketUS {
     if (!this.sdk) {
       // Allow unauthenticated reads (market data)
-      this.sdk = new PolymarketUS({
+      this.sdk = throttleSdk(new PolymarketUS({
         gatewayBaseUrl: this.gatewayBaseUrl,
         apiBaseUrl: this.getValidApiBaseUrl(),
-      })
+      }))
     }
     return this.sdk
   }
@@ -273,8 +258,12 @@ export class PolymarketUSClient {
     }
   }
 
-  /** Get markets from events, normalized to our Market type.
-   *  Fetches BBO prices in parallel to populate outcomePrices. */
+  /**
+   * Markets from events, one binary Market per tradeable slug. Prices come
+   * from the quotes inline in the event listing. With `withStats`, volume /
+   * liquidity proxies are filled from BBOs (rate-limit aware, see attachStats)
+   * — the gateway exposes them nowhere else.
+   */
   async getMarkets(params?: {
     active?: boolean
     closed?: boolean
@@ -283,65 +272,95 @@ export class PolymarketUSClient {
     volumeMin?: number
     limit?: number
     offset?: number
+    withStats?: boolean
   }): Promise<Market[]> {
-    const events = await this.getEvents(params)
-    const markets = events.flatMap(e => normalizeEventToMarkets(e as unknown as SDKEvent))
-
-    // Fetch BBO prices for all outcome slugs in parallel (batch of concurrent requests).
-    // Each market has outcomeSlugs[] matching its outcomes[]. BBO gives us mid-price per outcome.
-    const sdk = this.getSDK()
-    const bboPromises: Array<{ marketIdx: number; outcomeIdx: number; promise: Promise<MarketBBO> }> = []
-
-    for (let mi = 0; mi < markets.length; mi++) {
-      const m = markets[mi]
-      if (!m.outcomeSlugs) continue
-      for (let oi = 0; oi < m.outcomeSlugs.length; oi++) {
-        bboPromises.push({
-          marketIdx: mi,
-          outcomeIdx: oi,
-          promise: sdk.markets.bbo(m.outcomeSlugs[oi]),
-        })
-      }
-    }
-
-    // Settle all — failures just leave price at 0 (scanner will reject those markets gracefully)
-    const settled = await Promise.allSettled(bboPromises.map(b => b.promise))
-    for (let i = 0; i < settled.length; i++) {
-      const result = settled[i]
-      if (result.status === 'fulfilled') {
-        const bbo = result.value
-        const { marketIdx, outcomeIdx } = bboPromises[i]
-        const bid = amountToNumber(bbo.bestBid)
-        const ask = amountToNumber(bbo.bestAsk)
-        const mid = (bid + ask) / 2
-        // Use mid-price as the outcome price (consistent with old Gamma behavior)
-        markets[marketIdx].outcomePrices[outcomeIdx] = mid || amountToNumber(bbo.lastTradePx)
-      }
-    }
-
+    const { withStats, ...query } = params ?? {}
+    const events = await this.getEvents(query)
+    const markets = events.flatMap(e => normalizeEventToMarkets(e as unknown as WireEvent))
+    if (withStats) await this.attachStats(markets)
     return markets
   }
 
-  /** Get a single market detail by slug */
+  private statsCache = new Map<string, { volume: number; liquidity: number; at: number }>()
+  private statsBackoffUntil = 0
+  private static readonly STATS_TTL_MS = 15 * 60 * 1000
+  private static readonly STATS_BACKOFF_MS = 5 * 60 * 1000
+
+  /**
+   * Fill volume / liquidity from market BBOs. The gateway is behind a
+   * Cloudflare rate limit (HTTP 429 / error 1015 bans the IP for minutes).
+   * All SDK calls already pass through the shared throttle (requestThrottle),
+   * and stats are the lowest-priority traffic, so this is frugal too: cached
+   * values first, then at most `budget` uncached markets per call — tightest
+   * spreads first (rankForStats). Coverage grows across refreshes. A 429
+   * pauses stats lookups for 5 minutes. Failures leave 0.
+   */
+  async attachStats(markets: Market[], budget = 25, concurrency = 2): Promise<void> {
+    const now = Date.now()
+    const uncached: Market[] = []
+    for (const m of markets) {
+      const cached = this.statsCache.get(m.slug)
+      if (cached && now - cached.at < PolymarketUSClient.STATS_TTL_MS) {
+        m.volume = cached.volume
+        m.liquidity = cached.liquidity
+      } else {
+        uncached.push(m)
+      }
+    }
+    if (now < this.statsBackoffUntil || now < sharedBuckets.gateway.pausedUntil) return
+
+    const todo = rankForStats(uncached).slice(0, budget)
+    const sdk = this.getSDK()
+    let next = 0
+    const worker = async () => {
+      while (next < todo.length && Date.now() >= this.statsBackoffUntil && Date.now() >= sharedBuckets.gateway.pausedUntil) {
+        const m = todo[next++]
+        try {
+          const stats = statsFromBbo(unwrapMarketData<WireBBO>(await sdk.markets.bbo(m.slug)))
+          m.volume = stats.volume
+          m.liquidity = stats.liquidity
+          this.statsCache.set(m.slug, { ...stats, at: Date.now() })
+        } catch (err) {
+          if ((err as { status?: number })?.status === 429) {
+            this.statsBackoffUntil = Date.now() + PolymarketUSClient.STATS_BACKOFF_MS
+            console.warn('[PolymarketUSClient] Gateway rate limit hit — pausing market stats lookups for 5 min')
+          }
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, todo.length) }, worker))
+  }
+
+  /**
+   * Single market by slug. Expired markets are no longer served by the
+   * market endpoint, so fall back to the settlement endpoint and report the
+   * market closed with outcomePrices [yesSettle, noSettle].
+   */
   async getMarketBySlug(slug: string): Promise<Market | null> {
+    const sdk = this.getSDK()
     try {
-      const sdk = this.getSDK()
       const resp = await sdk.markets.retrieveBySlug(slug)
-      const m = resp.market
+      return normalizeWireMarket(resp.market as unknown as WireMarket)
+    } catch {
+      // fall through to settlement
+    }
+    try {
+      const st = (await sdk.markets.settlement(slug)) as unknown as { settlement?: number | string }
+      const yes = Number(st.settlement)
+      if (!Number.isFinite(yes)) return null
       return {
-        id: String(m.id),
-        slug: m.slug,
-        question: m.title,
-        description: m.description,
-        outcomes: [m.outcome],
-        active: m.active,
-        closed: m.closed,
+        id: slug,
+        slug,
+        question: slug,
+        outcomes: ['Yes', 'No'],
+        outcomeSlugs: [slug, slug],
+        outcomePrices: [yes, 1 - yes],
+        active: false,
+        closed: true,
         endDate: '',
         createdAt: '',
-        volume: m.volume || 0,
-        liquidity: m.liquidity || 0,
-        outcomePrices: [],
-        eventSlug: m.eventSlug,
+        volume: 0,
+        liquidity: 0,
       }
     } catch {
       return null
@@ -352,56 +371,25 @@ export class PolymarketUSClient {
   async searchMarkets(query: string, limit = 20): Promise<Market[]> {
     const sdk = this.getSDK()
     const resp: SearchResponse = await sdk.search.query({ query, limit })
-    return resp.events.flatMap(normalizeEventToMarkets)
+    return resp.events.flatMap(e => normalizeEventToMarkets(e as unknown as WireEvent))
   }
 
-  /** Get full order book for a market */
+  /** Full YES-side order book (use bookForOutcome for NO terms) */
   async getOrderBook(slug: string): Promise<OrderBook | null> {
     try {
       const sdk = this.getSDK()
-      const book: MarketBook = await sdk.markets.book(slug)
-      return {
-        marketSlug: book.marketSlug,
-        bids: book.bids.map(l => ({
-          price: amountToNumber(l.px),
-          size: parseFloat(l.qty) || 0,
-        })),
-        asks: book.offers.map(l => ({
-          price: amountToNumber(l.px),
-          size: parseFloat(l.qty) || 0,
-        })),
-        lastUpdate: book.transactTime ? new Date(book.transactTime).getTime() : Date.now(),
-        state: book.state,
-        stats: book.stats ? {
-          lastTradePx: amountToNumber(book.stats.lastTradePx),
-          sharesTraded: parseFloat(book.stats.sharesTraded || '0'),
-          openInterest: parseFloat(book.stats.openInterest || '0'),
-          highPx: amountToNumber(book.stats.highPx),
-          lowPx: amountToNumber(book.stats.lowPx),
-        } : undefined,
-      }
+      return orderBookFromWire(unwrapMarketData<WireBook>(await sdk.markets.book(slug)))
     } catch {
       return null
     }
   }
 
-  /** Get best bid/ask for a market */
+  /** YES-side best bid/ask (use priceForOutcome for NO terms) */
   async getBestPrices(slug: string): Promise<PriceData | null> {
     try {
       const sdk = this.getSDK()
-      const bbo: MarketBBO = await sdk.markets.bbo(slug)
-      const bid = amountToNumber(bbo.bestBid)
-      const ask = amountToNumber(bbo.bestAsk)
-      const last = amountToNumber(bbo.lastTradePx)
-      const mid = (bid + ask) / 2
-      return {
-        bid,
-        ask,
-        last: last || mid,
-        mid,
-        spread: ask - bid,
-        timestamp: new Date(),
-      }
+      const pd = priceDataFromBbo(unwrapMarketData<WireBBO>(await sdk.markets.bbo(slug)))
+      return pd.bid > 0 || pd.ask > 0 || pd.last > 0 ? pd : null
     } catch {
       return null
     }
@@ -469,7 +457,10 @@ export class PolymarketUSClient {
         totalValue += shares * px
       }
 
-      const avgPrice = filledSize > 0 ? totalValue / filledSize : 0
+      // Fills are reported YES-side; callers work in the order's outcome terms
+      const avgPrice = filledSize > 0
+        ? reportedPriceForOutcome(totalValue / filledSize, request.outcome, request.price)
+        : 0
       const pending = request.type === 'GTC' || request.type === 'GTD'
 
       return {

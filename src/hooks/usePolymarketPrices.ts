@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
-import { polymarketUSClient } from '@/services/api'
+import { polymarketUSClient, normalizeEventToMarkets } from '@/services/api'
 import { realtimeService } from '@/services/realtime/RealtimeService'
 import {
   parseReferencePrice,
-  ASSET_SLUG_PATTERNS,
+  upDownSlugsFor,
   WINDOW_DURATIONS,
   type WindowDuration,
 } from '@/services/strategies/BtcUpDownStrategy'
@@ -54,44 +54,14 @@ const emptyState: PolymarketAssetState = {
 
 interface SlugMapping {
   asset: AssetKey
-  isUp: boolean
 }
 
 interface DiscoveredMarket {
   market: Market
-  upSlug: string      // slug for Up outcome's individual market
-  downSlug: string    // slug for Down outcome's individual market
-  upIndex: number
+  /** The one YES-quoted book: Up = YES mid, Down = 1 - YES mid */
+  slug: string
   windowEnd: number
   duration: WindowDuration
-}
-
-/**
- * Compute the slug for the current (or next) window.
- * Aligns to interval boundaries: floor(now / interval) * interval
- */
-function computeSlugs(asset: AssetKey, duration: WindowDuration): string[] {
-  const prefix = ASSET_SLUG_PATTERNS[asset]?.[duration]
-  if (!prefix) return []
-
-  const intervalSec = duration === '5m' ? 300 : 900
-  const nowSec = Math.floor(Date.now() / 1000)
-  const currentWindowStart = Math.floor(nowSec / intervalSec) * intervalSec
-  const nextWindowStart = currentWindowStart + intervalSec
-
-  return [`${prefix}${currentWindowStart}`, `${prefix}${nextWindowStart}`]
-}
-
-/**
- * Parse outcome index for "Up" from a market's outcomes array.
- * Handles both "Up"/"Down" and "Yes"/"No" naming conventions.
- * Returns the index of the "Up"/"Yes" outcome, or 0 if ambiguous.
- */
-function findUpIndex(outcomes: string[]): number {
-  const upIdx = outcomes.findIndex(
-    (o) => o.toLowerCase() === 'up' || o.toLowerCase() === 'yes'
-  )
-  return upIdx >= 0 ? upIdx : 0
 }
 
 // ==========================================
@@ -146,7 +116,7 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
   const discoverMarket = useCallback(
     async (asset: AssetKey): Promise<DiscoveredMarket | null> => {
       for (const duration of durationPreference) {
-        const eventSlugs = computeSlugs(asset, duration)
+        const eventSlugs = upDownSlugsFor(asset, duration)
 
         for (const eventSlug of eventSlugs) {
           // Check cache
@@ -159,53 +129,16 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
             const event = await polymarketUSClient.getEventBySlug(eventSlug)
             if (!event || !event.markets?.length) continue
 
-            // US API: each market in the event is a single outcome.
-            // Need at least 2 outcomes (Up + Down) for binary markets.
-            const activeMarkets = event.markets.filter(m => m.active && !m.closed)
-            if (activeMarkets.length < 2) continue
+            // PM US Up/Down events hold ONE binary market: YES = Up, NO = Down
+            const market = normalizeEventToMarkets(event as any).find(m => m.active && !m.closed)
+            if (!market) continue
 
-            // Build outcome names from individual markets
-            const outcomeNames = activeMarkets.map(m => m.outcome || m.title)
-            const upIndex = findUpIndex(outcomeNames)
-            const downIndex = upIndex === 0 ? 1 : 0
-
-            // Each outcome market has its own slug
-            const upSlug = activeMarkets[upIndex].slug
-            const downSlug = activeMarkets[downIndex].slug
-
-            // Parse window end from endDate
-            const windowEnd = event.endTime
-              ? new Date(event.endTime).getTime()
+            const windowEnd = market.windowEnd
+              ? new Date(market.windowEnd).getTime()
               : Date.now() + WINDOW_DURATIONS[duration]
-
-            // Skip if already expired
             if (windowEnd < Date.now()) continue
 
-            // Build unified Market for display
-            const market: Market = {
-              id: String(event.id),
-              slug: event.slug,
-              question: event.title,
-              description: event.description,
-              outcomes: outcomeNames,
-              active: event.active,
-              closed: event.closed,
-              endDate: event.endTime || '',
-              createdAt: event.startTime || '',
-              volume: event.volume || 0,
-              liquidity: event.liquidity || 0,
-              outcomePrices: activeMarkets.map(() => 0), // prices come from WS
-              eventSlug: event.slug,
-            }
-
-            const discovered: DiscoveredMarket = {
-              market,
-              upSlug,
-              downSlug,
-              upIndex,
-              windowEnd,
-              duration,
-            }
+            const discovered: DiscoveredMarket = { market, slug: market.slug, windowEnd, duration }
 
             discoveryCache.current.set(eventSlug, { market: discovered, ts: Date.now() })
             return discovered
@@ -240,14 +173,11 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
           continue
         }
 
-        const { market, upSlug, downSlug, windowEnd, duration } = discovered
+        const { market, slug, windowEnd, duration } = discovered
 
-        // Register slug → asset mapping
-        slugMap.current.set(upSlug, { asset, isUp: true })
-        slugMap.current.set(downSlug, { asset, isUp: false })
-
-        // Subscribe to both outcome slugs (additive, idempotent)
-        realtimeService.subscribeMarket([upSlug, downSlug])
+        // Register slug → asset mapping and subscribe (additive, idempotent)
+        slugMap.current.set(slug, { asset })
+        realtimeService.subscribeMarket([slug])
 
         // Store window end for rotation check
         windowEnds.current.set(asset, windowEnd)
@@ -255,7 +185,7 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
         // Seed initial state — prices start at 0, will come from WS
         const upPrice = 0
         const downPrice = 0
-        const refPrice = parseReferencePrice(market.question) || 0
+        const refPrice = market.priceToBeat ?? (parseReferencePrice(market.question) || 0)
 
         // Seed sparkline
         const buf = sparklineBuffers.current.get(asset) || []
@@ -348,28 +278,25 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
         const mapping = slugMap.current.get(slug)
         if (!mapping) return
 
-        const { asset, isUp } = mapping
+        const { asset } = mapping
         const mid = priceData.mid > 0 ? priceData.mid : priceData.last
         if (mid <= 0) return
 
         const pending = pendingUpdates.current.get(asset) || {}
 
-        if (isUp) {
-          // Update sparkline buffer (mutate in place — ref, not state)
-          const buf = sparklineBuffers.current.get(asset) || []
-          buf.push(mid)
-          if (buf.length > MAX_SPARKLINE) buf.shift()
-          sparklineBuffers.current.set(asset, buf)
+        // Update sparkline buffer (mutate in place — ref, not state)
+        const buf = sparklineBuffers.current.get(asset) || []
+        buf.push(mid)
+        if (buf.length > MAX_SPARKLINE) buf.shift()
+        sparklineBuffers.current.set(asset, buf)
 
-          if (!initialUpPrices.current.has(asset)) {
-            initialUpPrices.current.set(asset, mid)
-          }
-          const initialUp = initialUpPrices.current.get(asset) || mid
-          pending.upPrice = mid
-          pending.pctChange = initialUp > 0 ? ((mid - initialUp) / initialUp) * 100 : 0
-        } else {
-          pending.downPrice = mid
+        if (!initialUpPrices.current.has(asset)) {
+          initialUpPrices.current.set(asset, mid)
         }
+        const initialUp = initialUpPrices.current.get(asset) || mid
+        pending.upPrice = mid
+        pending.downPrice = Math.round((1 - mid) * 10000) / 10000
+        pending.pctChange = initialUp > 0 ? ((mid - initialUp) / initialUp) * 100 : 0
 
         pendingUpdates.current.set(asset, pending)
         scheduleFlush()

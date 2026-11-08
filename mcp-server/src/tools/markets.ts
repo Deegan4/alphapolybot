@@ -3,13 +3,16 @@
  */
 
 import { z } from 'zod';
-import type { MarketBBO } from 'polymarket-us';
+import type { MarketBBO, MarketBook } from 'polymarket-us';
 import { getPublicSdk, mapLimit, errorMessage } from '../clients/polymarket-us.js';
 import {
   flattenEvents,
   sortRows,
   summarizeBook,
   amountToNumber,
+  unwrapMarketData,
+  statsFromBbo,
+  type WireMarketExtras,
   type MarketRow,
   type MarketSort,
   type BookSummary,
@@ -32,7 +35,7 @@ export const getMarketsSchema = {
   limit: z.number().int().min(1).max(100).optional().default(25).describe('Max markets to return (1-100)'),
   sort: z.enum(['volume', 'liquidity', 'end_time']).optional().default('volume').describe('Sort order'),
   include_prices: z.boolean().optional().default(true).describe(
-    'Fetch best bid/ask per market (one request each — set false for large lists)',
+    'Fetch BBOs (up to 30 tightest-spread markets) for volume / liquidity — needed to sort by them. Quotes from the listing are always included.',
   ),
 };
 
@@ -52,6 +55,17 @@ export const getPriceHistorySchema = {
 };
 
 // ─── Handlers ────────────────────────────────────────────────
+
+/**
+ * Upper bound on per-market BBO lookups in one get_markets call. The gateway
+ * is behind a Cloudflare rate limit (429 / error 1015 bans the IP for
+ * minutes), so keep this small; tightest-spread markets are looked up first.
+ */
+const MAX_STATS_LOOKUPS = 30;
+const LOOKUP_CONCURRENCY = 4;
+
+const relSpread = (r: MarketRow) =>
+  r.best_bid != null && r.best_ask != null && r.mid ? (r.best_ask - r.best_bid) / r.mid : Infinity;
 
 export async function handleGetMarkets(args: {
   search?: string;
@@ -80,10 +94,24 @@ export async function handleGetMarkets(args: {
 
     let rows = flattenEvents(events);
     if (status === 'active') rows = rows.filter(r => r.active && !r.closed);
+
+    // Volume / liquidity exist only on BBOs, so fetch them before sorting by
+    // those (two-sided markets first, capped) — otherwise every row is 0.
+    const needStats = args.include_prices !== false && (args.sort ?? 'volume') !== 'end_time';
+    if (needStats) {
+      const candidates = rows
+        .filter(r => relSpread(r) < Infinity)
+        .sort((a, b) => relSpread(a) - relSpread(b))
+        .slice(0, MAX_STATS_LOOKUPS);
+      const bbos = await mapLimit(candidates, LOOKUP_CONCURRENCY, r => sdk.markets.bbo(r.market_slug));
+      const bySlug = new Map(candidates.map((r, i) => [r.market_slug, bbos[i]]));
+      rows = rows.map(r => (bySlug.has(r.market_slug) ? withBbo(r, bySlug.get(r.market_slug) ?? null) : r));
+    }
+
     rows = sortRows(rows, args.sort ?? 'volume').slice(0, limit);
 
-    if (args.include_prices !== false && rows.length > 0) {
-      const bbos = await mapLimit(rows, 8, r => sdk.markets.bbo(r.market_slug));
+    if (args.include_prices !== false && !needStats && rows.length > 0) {
+      const bbos = await mapLimit(rows, LOOKUP_CONCURRENCY, r => sdk.markets.bbo(r.market_slug));
       rows = rows.map((r, i) => withBbo(r, bbos[i]));
     }
 
@@ -106,13 +134,15 @@ export interface MarketDetail {
   /** Price is YES-terms; NO price = 1 - YES */
   book: BookSummary | null;
   price_tick: number;
+  min_quantity?: number;
+  fee_coefficient?: number;
   note: string;
 }
 
 export async function handleGetMarketDetail(args: {
   market_slug?: string;
   event_slug?: string;
-}): Promise<MarketDetail | { event_slug: string; title: string; markets: MarketRow[] } | { error: string }> {
+}): Promise<MarketDetail | { event_slug: string; title: string; markets: MarketRow[]; note: string } | { error: string }> {
   const sdk = getPublicSdk();
 
   if (!args.market_slug && !args.event_slug) {
@@ -122,31 +152,45 @@ export async function handleGetMarketDetail(args: {
   try {
     if (args.event_slug && !args.market_slug) {
       const { event } = await sdk.events.retrieveBySlug(args.event_slug);
+      // Quotes are inline; BBO stats only for the tightest markets (rate limit)
       let rows = flattenEvents([event]);
-      const bbos = await mapLimit(rows, 8, r => sdk.markets.bbo(r.market_slug));
-      rows = rows.map((r, i) => withBbo(r, bbos[i]));
-      return { event_slug: event.slug, title: event.title, markets: rows };
+      const top = new Set(rows.filter(r => relSpread(r) < Infinity).sort((a, b) => relSpread(a) - relSpread(b)).slice(0, MAX_STATS_LOOKUPS).map(r => r.market_slug));
+      const picked = rows.filter(r => top.has(r.market_slug));
+      const bbos = await mapLimit(picked, LOOKUP_CONCURRENCY, r => sdk.markets.bbo(r.market_slug));
+      const bySlug = new Map(picked.map((r, i) => [r.market_slug, bbos[i]]));
+      rows = rows.map(r => (bySlug.has(r.market_slug) ? withBbo(r, bySlug.get(r.market_slug) ?? null) : r));
+      return {
+        event_slug: event.slug,
+        title: event.title,
+        markets: rows,
+        note: 'Each market is its own YES/NO book. The markets of an event are NOT guaranteed to be mutually exclusive or exhaustive (some are nested, e.g. "before December" / "before January"), so buying YES on all of them is not a riskless arbitrage.',
+      };
     }
 
     const slug = args.market_slug!;
-    const [{ market }, bookRes] = await Promise.all([
+    const [{ market: base }, bookRes, bboRes] = await Promise.all([
       sdk.markets.retrieveBySlug(slug),
-      sdk.markets.book(slug).then(b => b, () => null),
+      sdk.markets.book(slug).then(b => unwrapMarketData<MarketBook>(b), () => null),
+      sdk.markets.bbo(slug).then(b => unwrapMarketData<MarketBBO>(b), () => null),
     ]);
+    const market = base as typeof base & WireMarketExtras;
+    const stats = bboRes ? statsFromBbo(bboRes) : null;
 
     return {
       market_slug: market.slug,
-      title: market.title,
-      outcome: market.outcome,
+      title: market.title || market.question || market.slug,
+      outcome: market.outcome || market.title || market.slug,
       description: market.description,
       event_slug: market.eventSlug,
       active: market.active,
       closed: market.closed,
-      liquidity: market.liquidity ?? 0,
-      volume: market.volume ?? 0,
+      liquidity: market.liquidity ?? stats?.liquidity ?? 0,
+      volume: market.volume ?? stats?.volume ?? 0,
       book: bookRes ? summarizeBook(bookRes) : null,
-      price_tick: 0.01,
-      note: 'Prices are YES-side. To trade NO, use outcome="no" in place_order and quote the NO price; the server converts it.',
+      price_tick: market.orderPriceMinTickSize ?? 0.01,
+      min_quantity: market.minimumTradeQty,
+      fee_coefficient: market.feeCoefficient,
+      note: 'One binary book: YES is the outcome named above, NO its negation; prices are YES-side. To trade NO, use outcome="no" in place_order and quote the NO price; the server converts it. Liquidity/volume are USD proxies from open interest and shares traded.',
     };
   } catch (error) {
     return { error: `Market lookup failed for ${args.market_slug ?? args.event_slug}: ${errorMessage(error)}` };
@@ -188,10 +232,12 @@ export async function handleGetPriceHistory(args: {
 
 // ─── Helpers ─────────────────────────────────────────────────
 
-function withBbo(row: MarketRow, bbo: MarketBBO | null): MarketRow {
-  if (!bbo) return { ...row, best_bid: null, best_ask: null, mid: null };
+function withBbo(row: MarketRow, raw: MarketBBO | null): MarketRow {
+  if (!raw) return row;
+  const bbo = unwrapMarketData<MarketBBO>(raw);
   const bid = bbo.bestBid ? amountToNumber(bbo.bestBid) : null;
   const ask = bbo.bestAsk ? amountToNumber(bbo.bestAsk) : null;
   const mid = bid !== null && ask !== null ? Math.round(((bid + ask) / 2) * 10000) / 10000 : null;
-  return { ...row, best_bid: bid, best_ask: ask, mid };
+  const { volume, liquidity } = statsFromBbo(bbo);
+  return { ...row, best_bid: bid, best_ask: ask, mid, volume, liquidity };
 }

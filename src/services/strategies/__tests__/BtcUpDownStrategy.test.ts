@@ -52,12 +52,17 @@ vi.mock('@/services/trading/TradingService', () => ({
   },
 }))
 
-vi.mock('@/services/api', () => ({
-  polymarketUSClient: {
-    getEventBySlug: vi.fn().mockResolvedValue(null),
-  },
-  normalizeEventToMarkets: vi.fn().mockReturnValue([]),
-}))
+vi.mock('@/services/api', async () => {
+  const wire = await vi.importActual<typeof import('@/services/api/pmusWire')>('@/services/api/pmusWire')
+  return {
+    polymarketUSClient: {
+      getEventBySlug: vi.fn().mockResolvedValue(null),
+    },
+    normalizeEventToMarkets: vi.fn().mockReturnValue([]),
+    priceForOutcome: wire.priceForOutcome,
+    upDownEventSlugs: wire.upDownEventSlugs,
+  }
+})
 
 vi.mock('@/services/api/PriceOracleService', () => ({
   priceOracle: {
@@ -362,5 +367,16 @@ describe('Volatility and RSI helpers (via strategy internals)', () => {
       const rsi = getPrivate(strategy).computeRSI(mkPrices(values), 14)
       expect(rsi).toBeLessThan(30)
     })
+  })
+})
+
+describe('upDownSlugsFor (Polymarket US slug format)', () => {
+  it('maps strategy durations to PM US horizons', async () => {
+    const { upDownSlugsFor } = await import('../BtcUpDownStrategy')
+    const now = new Date('2026-11-08T01:41:10Z')
+    expect(upDownSlugsFor('BTC', '15m', now)[0]).toBe('btc-updown-15m-2026-11-08-0130z')
+    expect(upDownSlugsFor('ETH', 'hourly', now)[0]).toBe('eth-updown-1h-2026-11-08-0100z')
+    expect(upDownSlugsFor('SOL', 'daily', now)[0]).toBe('sol-updown-1d-2026-11-07-2200z')
+    expect(upDownSlugsFor('XRP', '9pm', now)).toEqual([]) // no 9PM series on PM US
   })
 })

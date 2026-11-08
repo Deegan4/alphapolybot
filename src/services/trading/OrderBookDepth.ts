@@ -8,7 +8,7 @@
  * at the desired price level before committing capital.
  */
 
-import { polymarketUSClient } from '@/services/api'
+import { polymarketUSClient, bookForOutcome } from '@/services/api'
 
 export interface DepthCheck {
   /** Whether sufficient liquidity exists at the target price */
@@ -35,14 +35,17 @@ export class OrderBookDepthAnalyzer {
    * @param slug - The market slug
    * @param orderSizeUSD - Desired order size in USD
    * @param maxSlippage - Maximum acceptable slippage (0.02 = 2%)
+   * @param outcome - Side being bought; the PM US book is YES-quoted, so a NO
+   *   buy walks the YES bids at 1 - price
    * @returns DepthCheck with liquidity analysis
    */
   async checkBuyDepth(
     slug: string,
     orderSizeUSD: number,
     maxSlippage = 0.02,
+    outcome: 'yes' | 'no' = 'yes',
   ): Promise<DepthCheck> {
-    const book = await polymarketUSClient.getOrderBook(slug)
+    const book = await this.getBook(slug, outcome)
     if (!book || book.asks.length === 0) {
       return {
         sufficient: false,
@@ -65,8 +68,9 @@ export class OrderBookDepthAnalyzer {
     slug: string,
     orderSizeShares: number,
     maxSlippage = 0.02,
+    outcome: 'yes' | 'no' = 'yes',
   ): Promise<DepthCheck> {
-    const book = await polymarketUSClient.getOrderBook(slug)
+    const book = await this.getBook(slug, outcome)
     if (!book || book.bids.length === 0) {
       return {
         sufficient: false,
@@ -90,8 +94,9 @@ export class OrderBookDepthAnalyzer {
     slug: string,
     side: 'BUY' | 'SELL',
     maxSlippage = 0.02,
+    outcome: 'yes' | 'no' = 'yes',
   ): Promise<number> {
-    const book = await polymarketUSClient.getOrderBook(slug)
+    const book = await this.getBook(slug, outcome)
     if (!book) return 0
 
     const levels = side === 'BUY' ? book.asks : book.bids
@@ -110,6 +115,12 @@ export class OrderBookDepthAnalyzer {
     }
 
     return totalFillable
+  }
+
+  /** Order book in the outcome's terms (null if unavailable) */
+  private async getBook(slug: string, outcome: 'yes' | 'no') {
+    const book = await polymarketUSClient.getOrderBook(slug)
+    return book ? bookForOutcome(book, outcome) : null
   }
 
   /**

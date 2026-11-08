@@ -5,6 +5,12 @@ import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
 import { tradeLogger } from './TradeLogger'
 
+/** Mid price in the position's outcome terms (PM US feeds are YES-quoted) */
+function outcomeMid(pd: PriceData, outcome: 'yes' | 'no'): number {
+  if (!(pd.mid > 0)) return 0
+  return outcome === 'no' ? 1 - pd.mid : pd.mid
+}
+
 // Default Polymarket US taker fee (flat 10 bps = 0.1%)
 // Used to adjust take-profit threshold so NET profit matches user's configured percentage.
 // SL doesn't need adjustment (a loss is a loss regardless of fee).
@@ -448,7 +454,7 @@ export class PositionLifecycleManager {
 
     return Array.from(this.positions.values()).map(pos => {
       const priceData = realtimeService.getPrice(pos.marketSlug)
-      const currentPrice = priceData?.mid ?? pos.entryPrice
+      const currentPrice = priceData ? outcomeMid(priceData, pos.outcome) : pos.entryPrice
       // Show GROSS unrealized P&L (matches Polymarket display).
       // Fees are only deducted at sell time — pre-subtracting them makes
       // dashboard numbers look wrong compared to Polymarket's portfolio page.
@@ -473,7 +479,7 @@ export class PositionLifecycleManager {
     let totalUsd = 0
     for (const pos of this.positions.values()) {
       const priceData = realtimeService.getPrice(pos.marketSlug)
-      const currentPrice = priceData?.mid ?? pos.entryPrice
+      const currentPrice = priceData ? outcomeMid(priceData, pos.outcome) : pos.entryPrice
       totalUsd += pos.size * (currentPrice - pos.entryPrice)
     }
     return { totalUsd, positionCount: this.positions.size }
@@ -516,7 +522,8 @@ export class PositionLifecycleManager {
       return
     }
 
-    const currentPrice = priceData.mid
+    // The feed is YES-quoted; a NO position is worth 1 - YES mid
+    const currentPrice = outcomeMid(priceData, position.outcome)
     // Guard: ignore zero/near-zero prices from empty order books.
     if (currentPrice <= 0.001) return
 
@@ -710,7 +717,7 @@ export class PositionLifecycleManager {
 
       if (result.success) {
         const priceData = realtimeService.getPrice(marketSlug)
-        const exitPrice = priceData?.mid ?? position.entryPrice
+        const exitPrice = priceData ? outcomeMid(priceData, outcome) : position.entryPrice
         const pnlUsd = (exitPrice - position.entryPrice) * size
 
         activityLogger.logSell(
@@ -810,7 +817,7 @@ export class PositionLifecycleManager {
 
       if (result.success) {
         const priceData = realtimeService.getPrice(marketSlug)
-        const exitPrice = priceData?.mid ?? position.entryPrice
+        const exitPrice = priceData ? outcomeMid(priceData, outcome) : position.entryPrice
         const pnlUsd = (exitPrice - position.entryPrice) * size
 
         activityLogger.logSell(

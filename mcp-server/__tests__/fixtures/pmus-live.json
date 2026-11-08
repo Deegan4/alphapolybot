@@ -1,0 +1,854 @@
+{
+ "_comment": "Trimmed live responses from gateway.polymarket.us captured 2026-11-08. The wire shape differs from polymarket-us@0.1.1 typings: bbo/book are wrapped in marketData, markets have no outcome/volume/liquidity, quotes and tick size are inline.",
+ "eventMultiMarket": {
+  "id": "6442",
+  "ticker": "mls-winner-2026-11-07",
+  "slug": "mls-winner-2026-11-07",
+  "title": "Major League Soccer Champion",
+  "description": "Major League Soccer Champion",
+  "startDate": "2026-02-21T00:00:00Z",
+  "endDate": "2026-11-08T04:59:00Z",
+  "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-images/mls-new.png",
+  "active": true,
+  "closed": false,
+  "archived": false,
+  "category": "sports",
+  "createdAt": "2026-03-19T21:31:54Z",
+  "updatedAt": "2026-11-08T01:27:29Z",
+  "startTime": "2026-02-21T00:00:00Z",
+  "seriesSlug": "mls-2025",
+  "period": "NS",
+  "live": false,
+  "markets": [
+   {
+    "id": "7980",
+    "question": "Major League Soccer Champion",
+    "slug": "tec-mls-winner-2026-11-07-nas",
+    "endDate": "2027-01-01T21:20:09Z",
+    "category": "sports",
+    "startDate": "2026-03-19T21:25:04Z",
+    "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/MLS/Team%3DNashville+SC.png",
+    "description": "Will Nashville SC win the 2026 MLS Cup, scheduled to conclude December 18, 2026? If the event is postponed, delayed, or ",
+    "active": true,
+    "marketType": "futures",
+    "closed": false,
+    "createdAt": "2026-03-19T21:31:54Z",
+    "updatedAt": "2026-11-08T00:43:00Z",
+    "archived": false,
+    "orderPriceMinTickSize": 0.001,
+    "gameStartTime": "2026-02-21T00:00:00Z",
+    "manualActivation": false,
+    "sportsMarketType": "futures",
+    "marketSides": [
+     {
+      "id": "15959",
+      "description": "Yes",
+      "long": true,
+      "identifier": "tec-mls-winner-2026-11-07-nas",
+      "price": "0.2740",
+      "quote": {
+       "value": "0.3400",
+       "currency": "USD"
+      },
+      "tradable": true
+     },
+     {
+      "id": "15960",
+      "description": "No",
+      "long": false,
+      "identifier": "tec-mls-winner-2026-11-07-nas",
+      "price": "0.3400",
+      "quote": {
+       "value": "0.726",
+       "currency": "USD"
+      },
+      "tradable": true
+     }
+    ],
+    "outcomes": "[\"No\",\"Yes\"]",
+    "outcomePrices": "[\"0.2740\",\"0.3400\"]",
+    "ep3Status": "OPEN",
+    "status": "MARKET_STATUS_OPEN",
+    "assetPriceTerms": null,
+    "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_FUTURE",
+    "hidden": false,
+    "tags": [],
+    "title": "Nashville SC",
+    "subtitle": "10-3-1",
+    "color": "#1F1646",
+    "feeCoefficient": 0.095,
+    "bestBidQuote": {
+     "value": "0.2740",
+     "currency": "USD"
+    },
+    "bestAskQuote": {
+     "value": "0.3400",
+     "currency": "USD"
+    },
+    "titleShort": "Nashville SC",
+    "ep3SyncedAt": "2026-10-29T12:04:57Z",
+    "minimumTradeQty": 1,
+    "comboEnabled": false,
+    "politics": null,
+    "eventSubcategory": "SOCCER"
+   },
+   {
+    "id": "7994",
+    "question": "Major League Soccer Champion",
+    "slug": "tec-mls-winner-2026-11-07-mia",
+    "endDate": "2027-01-01T21:20:09Z",
+    "category": "sports",
+    "startDate": "2026-03-19T21:25:04Z",
+    "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/MLS/Team%3DInter+Miami+CF.png",
+    "description": "Will Inter Miami CF win the 2026 MLS Cup, scheduled to conclude December 18, 2026? If the event is postponed, delayed, o",
+    "active": true,
+    "marketType": "futures",
+    "closed": false,
+    "createdAt": "2026-03-19T21:31:54Z",
+    "updatedAt": "2026-11-08T01:13:14Z",
+    "archived": false,
+    "orderPriceMinTickSize": 0.001,
+    "gameStartTime": "2026-02-21T00:00:00Z",
+    "manualActivation": false,
+    "sportsMarketType": "futures",
+    "marketSides": [
+     {
+      "id": "15987",
+      "description": "Yes",
+      "long": true,
+      "identifier": "tec-mls-winner-2026-11-07-mia",
+      "price": "0.1430",
+      "quote": {
+       "value": "0.1800",
+       "currency": "USD"
+      },
+      "tradable": true
+     },
+     {
+      "id": "15988",
+      "description": "No",
+      "long": false,
+      "identifier": "tec-mls-winner-2026-11-07-mia",
+      "price": "0.1800",
+      "quote": {
+       "value": "0.857",
+       "currency": "USD"
+      },
+      "tradable": true
+     }
+    ],
+    "outcomes": "[\"No\",\"Yes\"]",
+    "outcomePrices": "[\"0.1430\",\"0.1800\"]",
+    "ep3Status": "OPEN",
+    "status": "MARKET_STATUS_OPEN",
+    "assetPriceTerms": null,
+    "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_FUTURE",
+    "hidden": false,
+    "tags": [],
+    "title": "Inter Miami CF",
+    "subtitle": "9-4-2",
+    "color": "#EB84A9",
+    "feeCoefficient": 0.095,
+    "bestBidQuote": {
+     "value": "0.1430",
+     "currency": "USD"
+    },
+    "bestAskQuote": {
+     "value": "0.1800",
+     "currency": "USD"
+    },
+    "titleShort": "Inter Miami CF",
+    "ep3SyncedAt": "2026-10-29T12:04:57Z",
+    "minimumTradeQty": 1,
+    "comboEnabled": false,
+    "politics": null,
+    "eventSubcategory": "SOCCER"
+   }
+  ],
+  "participants": [],
+  "hidden": false,
+  "tags": [
+   {
+    "id": "2",
+    "label": "Sports",
+    "slug": "sports"
+   },
+   {
+    "id": "10",
+    "label": "MLS",
+    "slug": "mls"
+   }
+  ],
+  "sortType": "price",
+  "marketGroups": [],
+  "primaryTag": {
+   "id": "10",
+   "label": "MLS",
+   "slug": "mls",
+   "createdAt": "2026-02-21T01:58:16Z",
+   "updatedAt": "2026-11-08T01:28:16Z",
+   "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-images/mls-new.png",
+   "tradable": false,
+   "league": {
+    "id": 8,
+    "name": "MLS",
+    "sportId": 2,
+    "tagId": 10,
+    "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-images/mls-new.png",
+    "resolution": "https://www.mlssoccer.com/",
+    "ordering": "home",
+    "activeSeriesId": 10,
+    "isOperational": true,
+    "automaticResolution": false,
+    "createdAt": "2026-03-05T18:30:42Z",
+    "slug": "mls",
+    "abbreviation": "MLS"
+   },
+   "parentId": 12,
+   "subtags": [],
+   "hub": null,
+   "featuredEventIds": []
+  },
+  "streamProvider": "",
+  "streamRequiresAuth": false,
+  "marketCounts": {
+   "numMarkets": 21,
+   "numSpreadsAndTotalsMarkets": 0
+  },
+  "fixtureId": "",
+  "insiderTradingRules": null,
+  "payoutEstimateMessage": "",
+  "payoutEstimateTime": ""
+ },
+ "eventUpDown": {
+  "id": "241751",
+  "ticker": "btc-updown-15m-2026-11-08-0130z",
+  "slug": "btc-updown-15m-2026-11-08-0130z",
+  "title": "BTC Up or Down 15m",
+  "description": "BTC Up or Down 15m",
+  "startDate": "2026-11-08T01:30:00Z",
+  "endDate": "2026-11-08T01:45:00Z",
+  "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/crypto/btc-8f449c2d62321b959ef864abc8701e411fe174534a01cd7710f7e4fc546f3deb.png",
+  "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO",
+  "active": true,
+  "closed": false,
+  "archived": false,
+  "category": "crypto",
+  "createdAt": "2026-11-07T13:50:41Z",
+  "updatedAt": "2026-11-08T01:30:00Z",
+  "startTime": "2026-11-08T01:30:00Z",
+  "seriesSlug": "btc-updown-15m",
+  "period": "NS",
+  "live": true,
+  "ended": false,
+  "markets": [
+   {
+    "id": "2274902",
+    "question": "BTC Up or Down 15m",
+    "slug": "cpc-btc-updown-15m-2026-11-08-0130z",
+    "endDate": "2026-11-08T02:15:00Z",
+    "category": "crypto",
+    "startDate": "2026-11-07T13:30:17Z",
+    "description": "This market will settle to Up if the Bitcoin price at 8:45PM ET on Nov 7, 2026 is greater than or equal to the price at ",
+    "active": true,
+    "marketType": "",
+    "closed": false,
+    "createdAt": "2026-11-07T13:50:41Z",
+    "updatedAt": "2026-11-08T01:30:00Z",
+    "archived": false,
+    "orderPriceMinTickSize": 0.01,
+    "gameStartTime": "2026-11-08T01:30:00Z",
+    "manualActivation": false,
+    "sportsMarketType": "",
+    "marketSides": [
+     {
+      "id": "4549240",
+      "description": "Yes",
+      "long": true,
+      "identifier": "cpc-btc-updown-15m-2026-11-08-0130z",
+      "price": "0.7000",
+      "quote": {
+       "value": "0.7100",
+       "currency": "USD"
+      },
+      "tradable": true
+     },
+     {
+      "id": "4549241",
+      "description": "No",
+      "long": false,
+      "identifier": "cpc-btc-updown-15m-2026-11-08-0130z",
+      "price": "0.7100",
+      "quote": {
+       "value": "0.3",
+       "currency": "USD"
+      },
+      "tradable": true
+     }
+    ],
+    "outcomes": "[\"Yes\",\"No\"]",
+    "outcomePrices": "[\"0.7000\",\"0.7100\"]",
+    "ep3Status": "OPEN",
+    "status": "MARKET_STATUS_OPEN",
+    "assetPriceTerms": {
+     "marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN",
+     "asset": {
+      "assetClass": "ASSET_CLASS_CRYPTO",
+      "symbol": "btc"
+     },
+     "indexSymbol": "BRTI",
+     "horizon": "15m",
+     "windowStart": "2026-11-08T01:30:00Z",
+     "windowEnd": "2026-11-08T01:45:00Z",
+     "priceToBeat": {
+      "value": "75672.03",
+      "currency": "USD"
+     },
+     "strike": null,
+     "rangeLower": null,
+     "rangeUpper": null,
+     "rangeKind": "ASSET_PRICE_RANGE_KIND_UNSPECIFIED",
+     "direction": "ASSET_PRICE_DIRECTION_UNSPECIFIED",
+     "settlementPrice": null,
+     "chart": {
+      "ranges": [
+       {
+        "kind": "ASSET_PRICE_CHART_KIND_LIVE",
+        "span": "30s",
+        "bucket": "ASSET_PRICE_BUCKET_1S"
+       },
+       {
+        "kind": "ASSET_PRICE_CHART_KIND_WINDOW",
+        "span": "900s",
+        "bucket": "ASSET_PRICE_BUCKET_1S"
+       },
+       {
+        "kind": "ASSET_PRICE_CHART_KIND_LOOKBACK",
+        "span": "3600s",
+        "bucket": "ASSET_PRICE_BUCKET_5S"
+       }
+      ],
+      "resolved": {
+       "kind": "ASSET_PRICE_CHART_KIND_WINDOW",
+       "span": "900s",
+       "bucket": "ASSET_PRICE_BUCKET_1S"
+      },
+      "color": {
+       "light": "#F7931A",
+       "dark": "#F7931A"
+      },
+      "axis": {
+       "headroom": 0.15,
+       "expandRate": 0.22,
+       "contractRate": 0.03,
+       "snap": 0.001,
+       "tickCount": 5,
+       "minSpan": null
+      }
+     },
+     "priceDecimals": 2,
+     "assetName": "",
+     "priceUnit": "",
+     "nextWindowStart": "2026-11-08T01:45:00Z"
+    },
+    "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_UNSPECIFIED",
+    "hidden": false,
+    "tags": [],
+    "title": "BTC Up or Down 15m",
+    "subtitle": "Nov 7, 8:30PM - 8:45PM",
+    "feeCoefficient": 0.095,
+    "bestBidQuote": {
+     "value": "0.7000",
+     "currency": "USD"
+    },
+    "bestAskQuote": {
+     "value": "0.7100",
+     "currency": "USD"
+    },
+    "titleShort": "BTC Up or Down 15m",
+    "ep3SyncedAt": "2026-11-08T01:30:00Z",
+    "minimumTradeQty": 0.01,
+    "comboEnabled": true,
+    "politics": null,
+    "eventSubcategory": "BTC"
+   }
+  ],
+  "participants": [],
+  "hidden": false,
+  "tags": [
+   {
+    "id": "629",
+    "label": "Bitcoin",
+    "slug": "btc"
+   },
+   {
+    "id": "634",
+    "label": "Crypto",
+    "slug": "crypto"
+   }
+  ],
+  "sortType": "manual",
+  "marketGroups": [],
+  "streamProvider": "",
+  "streamRequiresAuth": false,
+  "marketCounts": {
+   "numMarkets": 1,
+   "numSpreadsAndTotalsMarkets": 0
+  },
+  "fixtureId": "",
+  "insiderTradingRules": null,
+  "payoutEstimateMessage": "",
+  "payoutEstimateTime": ""
+ },
+ "eventNested": {
+  "id": "47983",
+  "ticker": "btc-150k",
+  "slug": "btc-150k",
+  "title": "When will Bitcoin hit $150k?",
+  "description": "When will Bitcoin hit $150k?",
+  "startDate": "2026-07-08T19:45:00Z",
+  "endDate": "2027-01-01T05:00:00Z",
+  "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/bitcoin-logo-a133869251.jpg",
+  "active": true,
+  "closed": false,
+  "archived": false,
+  "category": "crypto",
+  "createdAt": "2026-07-10T15:56:07Z",
+  "updatedAt": "2026-11-08T01:15:51Z",
+  "startTime": "2026-07-08T19:45:00Z",
+  "seriesSlug": "btc",
+  "period": "NS",
+  "markets": [
+   {
+    "id": "208965",
+    "question": "When will Bitcoin hit $150k?",
+    "slug": "cpc-btc-150k-11-30-2026",
+    "endDate": "2027-01-15T04:00:00Z",
+    "category": "crypto",
+    "startDate": "2026-07-10T15:56:08Z",
+    "description": "This market will settle to Yes if the price of Bitcoin is above $149,999.99 at any point before 12:00 AM ET on December ",
+    "active": true,
+    "marketType": "futures",
+    "closed": false,
+    "createdAt": "2026-07-10T15:56:08Z",
+    "updatedAt": "2026-11-08T01:12:53Z",
+    "archived": false,
+    "orderPriceMinTickSize": 0.01,
+    "gameStartTime": "2026-07-08T19:45:00Z",
+    "manualActivation": false,
+    "sportsMarketType": "futures",
+    "marketSides": [
+     {
+      "id": "417564",
+      "description": "Yes",
+      "long": true,
+      "identifier": "cpc-btc-150k-11-30-2026",
+      "price": "0.0100",
+      "quote": {
+       "value": "0.0200",
+       "currency": "USD"
+      },
+      "tradable": true
+     },
+     {
+      "id": "417565",
+      "description": "No",
+      "long": false,
+      "identifier": "cpc-btc-150k-11-30-2026",
+      "price": "0.0200",
+      "quote": {
+       "value": "0.99",
+       "currency": "USD"
+      },
+      "tradable": true
+     }
+    ],
+    "outcomes": "[\"Yes\",\"No\"]",
+    "outcomePrices": "[\"0.0100\",\"0.0200\"]",
+    "ep3Status": "OPEN",
+    "status": "MARKET_STATUS_OPEN",
+    "assetPriceTerms": {
+     "marketType": "ASSET_PRICE_MARKET_TYPE_ONE_TOUCH",
+     "asset": {
+      "assetClass": "ASSET_CLASS_CRYPTO",
+      "symbol": "btc"
+     },
+     "indexSymbol": "BRTI",
+     "horizon": "yearly",
+     "windowStart": "2026-07-08T19:45:00Z",
+     "windowEnd": "2026-12-01T05:00:00Z",
+     "priceToBeat": null,
+     "strike": {
+      "value": "150000",
+      "currency": "USD"
+     },
+     "rangeLower": null,
+     "rangeUpper": null,
+     "rangeKind": "ASSET_PRICE_RANGE_KIND_UNSPECIFIED",
+     "direction": "ASSET_PRICE_DIRECTION_UP",
+     "settlementPrice": null,
+     "chart": null,
+     "priceDecimals": 2,
+     "assetName": "",
+     "priceUnit": "",
+     "nextWindowStart": "2026-12-01T05:00:00Z"
+    },
+    "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_FUTURE",
+    "hidden": false,
+    "tags": [],
+    "title": "Before December 2026",
+    "feeCoefficient": 0.095,
+    "bestBidQuote": {
+     "value": "0.0100",
+     "currency": "USD"
+    },
+    "bestAskQuote": {
+     "value": "0.0200",
+     "currency": "USD"
+    },
+    "titleShort": "Before December 2026",
+    "ep3SyncedAt": "2026-10-29T12:04:56Z",
+    "minimumTradeQty": 0.01,
+    "comboEnabled": false,
+    "politics": null,
+    "eventSubcategory": "COIN"
+   },
+   {
+    "id": "208964",
+    "question": "When will Bitcoin hit $150k?",
+    "slug": "cpc-btc-150k-12-31-2026",
+    "endDate": "2027-01-15T04:00:00Z",
+    "category": "crypto",
+    "startDate": "2026-07-10T15:56:07Z",
+    "description": "This market will settle to Yes if the price of Bitcoin is above $149,999.99 at any point before 12:00 AM ET on January 1",
+    "active": true,
+    "marketType": "futures",
+    "closed": false,
+    "createdAt": "2026-07-10T15:56:07Z",
+    "updatedAt": "2026-11-08T01:12:53Z",
+    "archived": false,
+    "orderPriceMinTickSize": 0.01,
+    "gameStartTime": "2026-07-08T19:45:00Z",
+    "manualActivation": false,
+    "sportsMarketType": "futures",
+    "marketSides": [
+     {
+      "id": "417562",
+      "description": "Yes",
+      "long": true,
+      "identifier": "cpc-btc-150k-12-31-2026",
+      "price": "0.0100",
+      "quote": {
+       "value": "0.0200",
+       "currency": "USD"
+      },
+      "tradable": true
+     },
+     {
+      "id": "417563",
+      "description": "No",
+      "long": false,
+      "identifier": "cpc-btc-150k-12-31-2026",
+      "price": "0.0200",
+      "quote": {
+       "value": "0.99",
+       "currency": "USD"
+      },
+      "tradable": true
+     }
+    ],
+    "outcomes": "[\"Yes\",\"No\"]",
+    "outcomePrices": "[\"0.0100\",\"0.0200\"]",
+    "ep3Status": "OPEN",
+    "status": "MARKET_STATUS_OPEN",
+    "assetPriceTerms": {
+     "marketType": "ASSET_PRICE_MARKET_TYPE_ONE_TOUCH",
+     "asset": {
+      "assetClass": "ASSET_CLASS_CRYPTO",
+      "symbol": "btc"
+     },
+     "indexSymbol": "BRTI",
+     "horizon": "yearly",
+     "windowStart": "2026-07-08T19:45:00Z",
+     "windowEnd": "2027-01-01T05:00:00Z",
+     "priceToBeat": null,
+     "strike": {
+      "value": "150000",
+      "currency": "USD"
+     },
+     "rangeLower": null,
+     "rangeUpper": null,
+     "rangeKind": "ASSET_PRICE_RANGE_KIND_UNSPECIFIED",
+     "direction": "ASSET_PRICE_DIRECTION_UP",
+     "settlementPrice": null,
+     "chart": null,
+     "priceDecimals": 2,
+     "assetName": "",
+     "priceUnit": "",
+     "nextWindowStart": "2027-01-01T05:00:00Z"
+    },
+    "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_FUTURE",
+    "hidden": false,
+    "tags": [],
+    "title": "Before January 2027",
+    "feeCoefficient": 0.095,
+    "bestBidQuote": {
+     "value": "0.0100",
+     "currency": "USD"
+    },
+    "bestAskQuote": {
+     "value": "0.0200",
+     "currency": "USD"
+    },
+    "titleShort": "Before January 2027",
+    "ep3SyncedAt": "2026-10-29T12:04:56Z",
+    "minimumTradeQty": 0.01,
+    "comboEnabled": false,
+    "politics": null,
+    "eventSubcategory": "COIN"
+   }
+  ],
+  "participants": [],
+  "hidden": false,
+  "tags": [
+   {
+    "id": "629",
+    "label": "Bitcoin",
+    "slug": "btc"
+   },
+   {
+    "id": "634",
+    "label": "Crypto",
+    "slug": "crypto"
+   }
+  ],
+  "sortType": "price",
+  "marketGroups": [],
+  "streamProvider": "",
+  "streamRequiresAuth": false,
+  "marketCounts": {
+   "numMarkets": 2,
+   "numSpreadsAndTotalsMarkets": 0
+  },
+  "fixtureId": "",
+  "insiderTradingRules": null,
+  "payoutEstimateMessage": "",
+  "payoutEstimateTime": ""
+ },
+ "bboOpen": {
+  "marketData": {
+   "marketSlug": "tec-mls-winner-2026-11-07-nas",
+   "currentPx": {
+    "value": "0.3070",
+    "currency": "USD"
+   },
+   "lastTradePx": {
+    "value": "0.2550",
+    "currency": "USD"
+   },
+   "settlementPx": {
+    "value": "0.1620",
+    "currency": "USD"
+   },
+   "sharesTraded": "1719969.0000",
+   "openInterest": "36241.0000",
+   "bestAsk": {
+    "value": "0.3400",
+    "currency": "USD"
+   },
+   "bestBid": {
+    "value": "0.2740",
+    "currency": "USD"
+   },
+   "askDepth": 12,
+   "bidDepth": 12,
+   "lastPriceSample": {
+    "longPx": {
+     "value": "0.2550",
+     "currency": "USD"
+    },
+    "shortPx": {
+     "value": "0.745",
+     "currency": "USD"
+    },
+    "ts": "2026-11-08T01:40:04.496947477Z"
+   },
+   "longQuote": {
+    "value": "0.3400",
+    "currency": "USD"
+   },
+   "shortQuote": {
+    "value": "0.726",
+    "currency": "USD"
+   },
+   "state": "MARKET_STATE_OPEN",
+   "bidShares": "270000",
+   "askShares": "270000"
+  }
+ },
+ "bboExpired": {
+  "marketData": {
+   "marketSlug": "cpc-btc-updown-5m-2026-11-08-0000z",
+   "currentPx": {
+    "value": "0.0100",
+    "currency": "USD"
+   },
+   "lastTradePx": {
+    "value": "0.0100",
+    "currency": "USD"
+   },
+   "settlementPx": {
+    "value": "0.0000",
+    "currency": "USD"
+   },
+   "sharesTraded": "108756.3100",
+   "openInterest": "0.0000",
+   "bestAsk": null,
+   "bestBid": null,
+   "askDepth": 0,
+   "bidDepth": 0,
+   "lastPriceSample": {
+    "longPx": {
+     "value": "0.0100",
+     "currency": "USD"
+    },
+    "shortPx": {
+     "value": "0.99",
+     "currency": "USD"
+    },
+    "ts": "2026-11-08T00:05:15.544642387Z"
+   },
+   "state": "MARKET_STATE_EXPIRED",
+   "bidShares": "0",
+   "askShares": "0"
+  }
+ },
+ "book": {
+  "marketData": {
+   "marketSlug": "tec-mls-winner-2026-11-07-nas",
+   "bids": [
+    {
+     "px": {
+      "value": "0.2740",
+      "currency": "USD"
+     },
+     "qty": "6.0000"
+    },
+    {
+     "px": {
+      "value": "0.2730",
+      "currency": "USD"
+     },
+     "qty": "36.0000"
+    },
+    {
+     "px": {
+      "value": "0.2560",
+      "currency": "USD"
+     },
+     "qty": "16.0000"
+    },
+    {
+     "px": {
+      "value": "0.2550",
+      "currency": "USD"
+     },
+     "qty": "46.0000"
+    }
+   ],
+   "offers": [
+    {
+     "px": {
+      "value": "0.3400",
+      "currency": "USD"
+     },
+     "qty": "1.0000"
+    },
+    {
+     "px": {
+      "value": "0.3410",
+      "currency": "USD"
+     },
+     "qty": "34.0000"
+    },
+    {
+     "px": {
+      "value": "0.6650",
+      "currency": "USD"
+     },
+     "qty": "8.0000"
+    },
+    {
+     "px": {
+      "value": "0.7600",
+      "currency": "USD"
+     },
+     "qty": "275.0000"
+    }
+   ],
+   "state": "MARKET_STATE_OPEN",
+   "stats": {
+    "openPx": {
+     "value": "0.1610",
+     "currency": "USD"
+    },
+    "closePx": {
+     "value": "0.1620",
+     "currency": "USD"
+    },
+    "lowPx": {
+     "value": "0.0010",
+     "currency": "USD"
+    },
+    "highPx": {
+     "value": "0.3360",
+     "currency": "USD"
+    },
+    "lastTradePx": {
+     "value": "0.2550",
+     "currency": "USD"
+    },
+    "settlementPx": {
+     "value": "0.1620",
+     "currency": "USD"
+    },
+    "sharesTraded": "1719969.0000",
+    "notionalTraded": {
+     "value": "276862.6210",
+     "currency": "USD"
+    },
+    "lastTradeQty": "8.0000",
+    "openInterest": "36241.0000",
+    "openSetTime": "2026-09-12T21:15:49.630259509Z",
+    "closeSetTime": "2026-09-12T21:00:43.961047883Z",
+    "highSetTime": "2026-10-18T02:22:30.149651694Z",
+    "lowSetTime": "2026-11-05T12:54:49.256866753Z",
+    "lastTradeSetTime": "2026-11-08T00:08:34.108365593Z",
+    "settlementSetTime": "2026-09-12T21:00:43.961105658Z",
+    "openInterestSetTime": "2026-11-08T00:06:16.029738507Z",
+    "notionalSetTime": "2026-11-08T00:08:34.108365593Z",
+    "settlementPriceCalculationMethod": "SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2",
+    "currentPx": {
+     "value": "0.3070",
+     "currency": "USD"
+    },
+    "lastPriceSample": {
+     "longPx": {
+      "value": "0.2550",
+      "currency": "USD"
+     },
+     "shortPx": {
+      "value": "0.745",
+      "currency": "USD"
+     },
+     "ts": "2026-11-08T01:40:04.496947477Z"
+    }
+   },
+   "transactTime": "2026-11-08T01:40:04.496947477Z"
+  }
+ },
+ "settlement": {
+  "slug": "cpc-btc-updown-5m-2026-11-08-0000z",
+  "settlement": 0
+ }
+}

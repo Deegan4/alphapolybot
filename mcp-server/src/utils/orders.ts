@@ -13,6 +13,7 @@ import type {
   Amount,
   CreateOrderParams,
   Event as USEvent,
+  MarketBBO,
   MarketBook,
   Order,
   OrderIntent,
@@ -63,6 +64,35 @@ export function toTimeInForce(tif: Tif): TimeInForce {
     case 'IOC': return 'TIME_IN_FORCE_IMMEDIATE_OR_CANCEL';
     case 'FOK': return 'TIME_IN_FORCE_FILL_OR_KILL';
   }
+}
+
+/**
+ * The gateway wraps BBO and book responses as `{ marketData: {...} }`, which
+ * the polymarket-us@0.1.1 typings omit. Bare objects pass through.
+ */
+export function unwrapMarketData<T>(resp: unknown): T {
+  if (resp && typeof resp === 'object' && 'marketData' in resp) {
+    return (resp as { marketData: T }).marketData;
+  }
+  return resp as T;
+}
+
+/** Fields the gateway returns on markets that the SDK typings lack */
+export interface WireMarketExtras {
+  question?: string;
+  subtitle?: string;
+  endDate?: string;
+  bestBidQuote?: Amount | null;
+  bestAskQuote?: Amount | null;
+  orderPriceMinTickSize?: number;
+  minimumTradeQty?: number;
+  feeCoefficient?: number;
+}
+
+/** Fields the gateway returns on BBOs that the SDK typings lack */
+export interface WireBboExtras {
+  currentPx?: Amount | null;
+  state?: string;
 }
 
 export function amountToNumber(a?: Amount | null): number {
@@ -256,7 +286,7 @@ export function summarizeBook(book: MarketBook, depthLevels = 5): BookSummary {
   };
 
   return {
-    state: book.state.replace('MARKET_STATE_', ''),
+    state: (book.state ?? 'UNKNOWN').replace('MARKET_STATE_', ''),
     best_bid: bestBid,
     best_ask: bestAsk,
     mid: mid !== null ? Math.round(mid * 10000) / 10000 : null,
@@ -278,46 +308,72 @@ export function summarizeBook(book: MarketBook, depthLevels = 5): BookSummary {
 
 export interface MarketRow {
   market_slug: string;
+  /** What YES means for this market (team, price range, date…). NO is its negation. */
   outcome: string;
   title: string;
   event_slug: string;
   event_title: string;
   active: boolean;
   closed: boolean;
+  /** USD proxies from the market's BBO (open interest × price, shares traded × price); 0 until fetched */
   liquidity: number;
   volume: number;
   end_time?: string;
   tags?: string[];
-  // Filled in when prices are requested
+  price_tick?: number;
+  /** YES-side quotes, inline in the event listing */
   best_bid?: number | null;
   best_ask?: number | null;
   mid?: number | null;
 }
 
-/** One row per tradeable market (slug), carrying its parent event */
+const round4 = (n: number) => Math.round(n * 10000) / 10000;
+
+/**
+ * One row per tradeable market (slug), carrying its parent event. Each market
+ * is a single binary book quoted YES-side; an event's markets are separate
+ * candidates and are NOT guaranteed to be mutually exclusive or exhaustive.
+ */
 export function flattenEvents(events: USEvent[]): MarketRow[] {
   const rows: MarketRow[] = [];
   const seen = new Set<string>();
   for (const ev of events) {
-    for (const m of ev.markets ?? []) {
+    for (const market of ev.markets ?? []) {
+      const m = market as typeof market & WireMarketExtras;
       if (!m.slug || seen.has(m.slug)) continue;
       seen.add(m.slug);
+      const bid = m.bestBidQuote ? amountToNumber(m.bestBidQuote) || null : null;
+      const ask = m.bestAskQuote ? amountToNumber(m.bestAskQuote) || null : null;
       rows.push({
         market_slug: m.slug,
-        outcome: m.outcome || m.title,
-        title: m.title,
+        outcome: m.outcome || m.title || m.question || m.slug,
+        title: m.title || m.question || m.slug,
         event_slug: ev.slug,
         event_title: ev.title,
         active: m.active,
         closed: m.closed,
-        liquidity: m.liquidity ?? ev.liquidity ?? 0,
-        volume: m.volume ?? ev.volume ?? 0,
-        end_time: ev.endTime,
+        liquidity: m.liquidity ?? 0,
+        volume: m.volume ?? 0,
+        end_time: m.endDate ?? ev.endTime,
         tags: ev.tags?.map(t => t.label),
+        price_tick: m.orderPriceMinTickSize,
+        best_bid: bid,
+        best_ask: ask,
+        mid: bid !== null && ask !== null ? round4((bid + ask) / 2) : null,
       });
     }
   }
   return rows;
+}
+
+/** USD activity proxies from a BBO: volume ≈ shares traded × price, liquidity ≈ OI × price */
+export function statsFromBbo(bbo: MarketBBO & WireBboExtras): { volume: number; liquidity: number } {
+  const bid = amountToNumber(bbo.bestBid);
+  const ask = amountToNumber(bbo.bestAsk);
+  const price = (bid > 0 && ask > 0 ? (bid + ask) / 2 : ask || bid) || amountToNumber(bbo.lastTradePx) || amountToNumber(bbo.currentPx);
+  const shares = parseFloat(bbo.sharesTraded ?? '0') || 0;
+  const oi = parseFloat(bbo.openInterest ?? '0') || 0;
+  return { volume: Math.round(shares * price), liquidity: Math.round(oi * price) };
 }
 
 export type MarketSort = 'volume' | 'liquidity' | 'end_time';

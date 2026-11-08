@@ -5,12 +5,16 @@
  *   - public: market data from the gateway (no credentials needed)
  *   - auth:   orders / portfolio / account (API key ID + Ed25519 secret)
  *
+ * Both share one request throttle (./throttle): the gateway is behind a
+ * Cloudflare rate limit that bans the IP after a burst.
+ *
  * The SDK signs requests itself (X-PM-Access-Key / X-PM-Timestamp /
  * X-PM-Signature), so there is no wallet, seed phrase or HMAC code here.
  */
 
 import { PolymarketUS, APIError } from 'polymarket-us';
 import { appConfig } from '../config.js';
+import { throttleSdk } from './throttle.js';
 
 export const AUTH_HELP =
   'Polymarket US API credentials not configured — set POLYMARKET_KEY_ID and ' +
@@ -22,10 +26,10 @@ let authSdk: PolymarketUS | null = null;
 /** Unauthenticated client for public market data */
 export function getPublicSdk(): PolymarketUS {
   if (!publicSdk) {
-    publicSdk = new PolymarketUS({
+    publicSdk = throttleSdk(new PolymarketUS({
       gatewayBaseUrl: appConfig.gatewayBaseUrl,
       apiBaseUrl: appConfig.apiBaseUrl,
-    });
+    }));
   }
   return publicSdk;
 }
@@ -38,12 +42,12 @@ export function hasCredentials(): boolean {
 export function getAuthSdk(): PolymarketUS | null {
   if (!hasCredentials()) return null;
   if (!authSdk) {
-    authSdk = new PolymarketUS({
+    authSdk = throttleSdk(new PolymarketUS({
       keyId: appConfig.keyId!,
       secretKey: appConfig.secretKey!,
       gatewayBaseUrl: appConfig.gatewayBaseUrl,
       apiBaseUrl: appConfig.apiBaseUrl,
-    });
+    }));
     process.stderr.write(`[polymarket-us] Authenticated as key ${appConfig.keyId!.slice(0, 8)}…\n`);
   }
   return authSdk;

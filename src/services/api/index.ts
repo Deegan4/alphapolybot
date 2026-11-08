@@ -1,5 +1,6 @@
 export { BaseApiClient } from './BaseApiClient'
 export { PolymarketUSClient, polymarketUSClient, normalizeEventToMarkets } from './PolymarketUSClient'
+export { priceForOutcome, bookForOutcome, upDownEventSlugs, reportedPriceForOutcome, type UpDownHorizon } from './pmusWire'
 export { PriceOracleService, priceOracleService, type AssetPrice } from './PriceOracleService'
 export { CoinbaseClient, coinbaseClient, CANDLE_GRANULARITY } from './CoinbaseClient'
 export { PolyBacktestClient, polyBacktestClient } from './PolyBacktestClient'

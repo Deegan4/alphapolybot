@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import type { MarketBook, Order, Event as USEvent } from 'polymarket-us';
+import type { MarketBBO, MarketBook, Order, Event as USEvent } from 'polymarket-us';
+import live from './fixtures/pmus-live.json';
 import {
   resolveIntent,
   outcomeOfIntent,
@@ -12,6 +13,8 @@ import {
   summarizeBook,
   flattenEvents,
   sortRows,
+  unwrapMarketData,
+  statsFromBbo,
 } from '../src/utils/orders.js';
 
 describe('intent mapping', () => {
@@ -214,14 +217,47 @@ describe('flattenEvents / sortRows', () => {
     const rows = flattenEvents(events);
     expect(rows.map(r => r.market_slug)).toEqual(['chiefs-super-bowl', 'eagles-super-bowl', 'btc-100k']);
     expect(rows[0]).toMatchObject({ event_slug: 'super-bowl', event_title: 'Super Bowl winner', outcome: 'Chiefs', liquidity: 600, volume: 30_000, tags: ['NFL'] });
-    // Falls back to event-level liquidity/volume when the market has none
-    expect(rows[2]).toMatchObject({ liquidity: 200, volume: 90_000 });
+    // Event-level totals are NOT attributed to a single market; BBO stats fill these later
+    expect(rows[2]).toMatchObject({ liquidity: 0, volume: 0 });
   });
 
   it('sorts by volume, liquidity and end_time', () => {
     const rows = flattenEvents(events);
-    expect(sortRows(rows, 'volume')[0].market_slug).toBe('btc-100k');
+    expect(sortRows(rows, 'volume')[0].market_slug).toBe('chiefs-super-bowl');
     expect(sortRows(rows, 'liquidity')[0].market_slug).toBe('chiefs-super-bowl');
     expect(sortRows(rows, 'end_time')[0].market_slug).toBe('btc-100k');
+  });
+});
+
+describe('live wire shapes (fixtures captured from gateway.polymarket.us)', () => {
+  it('unwraps { marketData } BBO / book envelopes', () => {
+    const bbo = unwrapMarketData<MarketBBO>(live.bboOpen);
+    expect(bbo.marketSlug).toBe('tec-mls-winner-2026-11-07-nas');
+    const book = summarizeBook(unwrapMarketData<MarketBook>(live.book));
+    expect(book.best_bid).toBe(0.274);
+    expect(book.best_ask).toBe(0.34);
+    expect(book.state).toBe('OPEN');
+  });
+
+  it('flattens markets with no `outcome` using title and inline quotes / tick', () => {
+    const rows = flattenEvents([live.eventMultiMarket as unknown as USEvent]);
+    expect(rows[0]).toMatchObject({
+      market_slug: 'tec-mls-winner-2026-11-07-nas',
+      outcome: 'Nashville SC',
+      event_slug: 'mls-winner-2026-11-07',
+      best_bid: 0.274,
+      best_ask: 0.34,
+      mid: 0.307,
+      price_tick: 0.001,
+      volume: 0,
+    });
+  });
+
+  it('derives USD activity proxies from a BBO', () => {
+    expect(statsFromBbo(unwrapMarketData<MarketBBO>(live.bboOpen))).toEqual({
+      volume: Math.round(1719969 * 0.307),
+      liquidity: Math.round(36241 * 0.307),
+    });
+    expect(statsFromBbo(unwrapMarketData<MarketBBO>(live.bboExpired)).liquidity).toBe(0);
   });
 });

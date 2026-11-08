@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
+    "smoke": "tsc && node dist/smoke.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
