@@ -10,7 +10,7 @@ The public gateway was exercised live on 2026-11-08 (`npm run smoke` in `mcp-ser
 |:-----|:-------|
 | Events, markets, BBO, book, settlement, price history (gateway) | Verified live |
 | Up/Down slug format, window, price to beat | Verified live |
-| Cloudflare rate limit on the gateway | Observed (HTTP 429, error 1015) |
+| Cloudflare rate limit on the gateway | Observed (HTTP 429, error 1015). The exact threshold is unknown. curl sustained 3/s, while a Node client that had been banned once kept drawing 429s at that rate for 10+ minutes. The app's throttle (3/s, escalating pause) is a starting point. Lower `GATEWAY_BUCKET` in `requestThrottle.ts` if the console shows `HTTP 429 rate limit … pausing requests`. |
 | Authenticated REST: balances, positions, orders, activities | **Not verified**. Shapes follow the SDK typings, which were wrong for the gateway |
 | Order placement: price side for NO intents, fill price side, fractional quantity, GTD `goodTillTime` | **Not verified** |
 | WebSockets: markets feed message shape, private fills | **Not verified** |

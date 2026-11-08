@@ -113,7 +113,13 @@ export function throttleSdk<T extends object>(
       bucket.succeed()
       return result
     } catch (err) {
-      if ((err as { status?: number })?.status === 429) bucket.penalize()
+      if ((err as { status?: number })?.status === 429) {
+        const wasPaused = Date.now() < bucket.pausedUntil
+        bucket.penalize()
+        if (!wasPaused) {
+          console.warn(`[polymarket-us] HTTP 429 rate limit on ${options.authenticated ? 'api' : 'gateway'} — pausing requests for ${Math.round((bucket.pausedUntil - Date.now()) / 1000)}s`)
+        }
+      }
       throw err
     }
   }
