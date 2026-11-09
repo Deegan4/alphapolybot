@@ -42,6 +42,8 @@ export class UserChannelService {
   private messageCount = 0
   /** Set by disconnect() so the resulting close does not schedule a reconnect */
   private closingIntentionally = false
+  /** True after max reconnect attempts failed; cleared by a successful open */
+  private gaveUp = false
   /** Latest pushed balance; null until the first snapshot or after the socket closes */
   private latestBalance: { balance: number; buyingPower: number; at: number } | null = null
 
@@ -77,6 +79,7 @@ export class UserChannelService {
         this.ws.on('open', () => {
           console.log('[UserChannel] Private WebSocket connected')
           this.reconnectAttempts = 0
+          this.gaveUp = false
           this.messageCount = 0
           this.notifyConnectionCallbacks('connected')
 
@@ -262,6 +265,18 @@ export class UserChannelService {
     return this.ws?.isConnected ?? false
   }
 
+  /** Whether reconnecting stopped after the maximum attempts (REST fallback only) */
+  hasGivenUp(): boolean {
+    return this.gaveUp && !this.isConnected()
+  }
+
+  /** Manual retry after giving up: start a fresh round of reconnect attempts */
+  async retry(): Promise<boolean> {
+    this.reconnectAttempts = 0
+    this.gaveUp = false
+    return this.connect()
+  }
+
   /**
    * Balance and buying power pushed by the private feed (snapshot on
    * subscribe, then an update on every change). Null when the socket is down
@@ -324,6 +339,7 @@ export class UserChannelService {
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('[UserChannel] Max reconnect attempts reached')
+      this.gaveUp = true
       return
     }
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts)

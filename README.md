@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-562_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-566_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
@@ -142,7 +142,7 @@ It covers the strategies, the layered architecture, the risk stack, the test sui
 
 - **Every market is one binary order book on one slug, quoted YES-side.** NO prices are derived (NO ask = 1 − YES bid). An event's markets are separate candidates (teams, price ranges, dates), each its own Yes/No market.
 - **BBO and book responses are wrapped in `marketData`**, markets carry inline quotes, tick size and fee coefficient, and expose no volume or liquidity. Volume and liquidity are USD proxies from each market's BBO (shares traded and open interest).
-- **Rate limit: 25 requests per second per IP**, shared by every key on that IP. On the public gateway a burst also draws a Cloudflare ban (HTTP 429, error 1015) that lasts minutes. Every SDK call goes through a shared token bucket (`requestThrottle.ts`): 8 requests per second for the gateway and 15 for the authenticated API, with a pause after a 429 that starts at 2 seconds and doubles while the ban lasts. Per-market stats lookups are budgeted and cached on top of that. A request that would wait more than 15s (gateway) or 10s (API) in the queue, as during a long ban, is dropped with `RequestDroppedError` instead of firing late on stale prices; cancels are never dropped. Balance comes from the private WebSocket's balance stream when it is live (also used for the pre-order buying-power check), with REST every 2 minutes as a safety net. Settings → API shows live request rates, 429 counts, dropped requests and any active pause per host. BTC Up/Down fetches the next window shortly before rollover (staggered per asset) instead of every asset at once after it.
+- **Rate limit: 25 requests per second per IP**, shared by every key on that IP. On the public gateway a burst also draws a Cloudflare ban (HTTP 429, error 1015) that lasts minutes. Every SDK call goes through a shared token bucket (`requestThrottle.ts`): 8 requests per second for the gateway and 15 for the authenticated API, with a pause after a 429 that starts at 2 seconds and doubles while the ban lasts. Per-market stats lookups are budgeted and cached on top of that. A request that would wait more than 15s (gateway) or 10s (API) in the queue, as during a long ban, is dropped with `RequestDroppedError` instead of firing late on stale prices; cancels are never dropped. Balance comes from the private WebSocket's balance stream when it is live (also used for the pre-order buying-power check), with REST every 2 minutes as a safety net. Likewise the open-order poll for resting GTD orders only hits REST every 3 minutes while the private feed is live (every 60s otherwise), and if the private feed stops reconnecting the dashboard shows a PRIVATE FEED OFFLINE banner with a Retry button. BTC Up/Down also streams the full order book for the windows it is tracking, so the depth check before an entry reads it from memory (when under 5s old) instead of calling REST. Settings → API shows live request rates, 429 counts, dropped requests and any active pause per host. BTC Up/Down fetches the next window shortly before rollover (staggered per asset) instead of every asset at once after it.
 - **Fees are Θ × contracts × p × (1 − p)** (Θ = 0.095 at tier 1, published per market as `feeCoefficient`): about 4.75% of the stake at 50¢. Kelly sizing and take-profit / time-exit decisions use it (`pmusFees.ts`).
 - **Orders need whole contracts** unless a market's `minimumTradeQty` is below 1, so order sizes are rounded down to that step.
 - **Maker-first entries (opt-in, Settings → Trading → Order Execution).** Makers pay no fee at tier 1, so buys can rest as post-only GTD orders one cent inside the spread instead of paying the taker fee. A one-sided book or a post-only rejection falls back to the normal taker order. The Settings panel shows the maker fill rate, average time to fill and the taker fees avoided (`MakerFillTracker.ts`), so you can judge whether the savings beat the missed fills, overall and per strategy. Maker-first can then be switched off for individual strategies (LLM, BTC Up/Down, Micro) while staying on for the rest. When a maker entry expires, any partial fill is tracked as a position, and the remainder is bought with a normal order if the ask is within the chase limit (default 2¢) of the maker price. In the last 5 minutes of a market window the limit widens linearly to 2.5× (capped at 5¢); after the window closes there is no chase, and maker-first is skipped entirely when a resting order would outlive the window.
@@ -195,7 +195,7 @@ npm run dev        # Dev server on :4000
 npm run dev            # Vite dev server on :4000
 npm run dev:strict-csp # Dev with strict CSP (no Fast Refresh)
 npm run build          # Production build (Vite 7 + esbuild)
-npm test               # 562 tests (Vitest)
+npm test               # 566 tests (Vitest)
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
 npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
@@ -204,7 +204,7 @@ npm run preview        # Preview production build
 
 ## Testing
 
-562 tests across 30 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
+566 tests across 31 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
@@ -226,6 +226,7 @@ npm run preview        # Preview production build
 | ShelvedStrategies | 13 | Dip Arb and FW Arb shells: refuse to start, preserve settings surface |
 | OrderBookDepth | 3 | YES and NO depth walks on a YES-quoted book |
 | requestThrottle | 13 | Token bucket pacing, separate gateway/API buckets, escalating 429 cooldown, request metrics, stale-request dropping (cancels exempt) |
+| LiveFeeds | 4 | Pushed order books for watched markets (freshness, disconnect), slow REST order poll while the feed is live, private-feed give-up and retry |
 | WalletLiveBalance | 3 | Pushed balance applied while connected; REST balance only as a 2-min fallback while the private feed is live |
 | pmusFees | 6 | Documented taker fee Θ·C·p(1−p), round-trip fee, fee-aware Kelly |
 | pmusOrders | 15 | Quantity step rounding, decimal position fields, USD balance, latency-reject detection, 100-market WS chunks, maker entry price |
@@ -240,7 +241,7 @@ npm run preview        # Preview production build
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
 
 ```bash
-npm test    # Runs all 562 tests in ~5s
+npm test    # Runs all 566 tests in ~5s
 ```
 
 ## MCP Server
@@ -332,7 +333,7 @@ Configured for Netlify with GitHub Actions CI:
 # 1. npm ci
 # 2. npm run lint
 # 3. npm run typecheck
-# 4. npm test (562 tests)
+# 4. npm test (566 tests)
 # 5. npm run build
 ```
 

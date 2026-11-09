@@ -3,6 +3,7 @@ import { useSettingsStore, useWalletStore } from '@/stores'
 import { riskManager, rejectionTracker, readinessChecker, positionLifecycleManager } from '@/services/trading'
 import { polymarketUSClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime/RealtimeService'
+import { userChannelService } from '@/services/realtime/UserChannelService'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import type { RejectionSummary } from '@/services/trading/RejectionTracker'
 
@@ -32,6 +33,7 @@ export const DiagnosticsBanner: React.FC = () => {
   const [rejections, setRejections] = useState<RejectionSummary>(rejectionTracker.getSummary())
   const [emergencyStopped, setEmergencyStopped] = useState(false)
   const [wsConnected, setWsConnected] = useState(realtimeService.isConnected())
+  const [userFeedGaveUp, setUserFeedGaveUp] = useState(userChannelService.hasGivenUp())
 
   useEffect(() => {
     return strategyManager.subscribe(setStrategies)
@@ -43,6 +45,7 @@ export const DiagnosticsBanner: React.FC = () => {
       setRejections(rejectionTracker.getSummary())
       setEmergencyStopped(riskManager.getStatus().emergencyStopped)
       setWsConnected(realtimeService.isConnected())
+      setUserFeedGaveUp(userChannelService.hasGivenUp())
     }
     tick()
     const id = setInterval(tick, 3000)
@@ -58,6 +61,7 @@ export const DiagnosticsBanner: React.FC = () => {
     rejections,
     pmCredentials: polymarketUSClient.hasCredentials(),
     wsConnected,
+    userFeedGaveUp,
   })
 
   if (!banner) return null
@@ -106,6 +110,7 @@ function computeBanner(ctx: {
   rejections: RejectionSummary
   pmCredentials: boolean
   wsConnected: boolean
+  userFeedGaveUp?: boolean
 }): BannerState | null {
   // 1. Emergency stop (most critical)
   if (ctx.emergencyStopped) {
@@ -192,6 +197,17 @@ function computeBanner(ctx: {
       severity: 'yellow',
       message: 'PM WS DISCONNECTED',
       detail: 'Polymarket WebSocket offline — showing Binance spot prices as fallback.',
+    }
+  }
+
+  // 5b. Private feed stopped reconnecting — fills, balance and order updates
+  // now arrive only through slower REST polling
+  if (ctx.userFeedGaveUp) {
+    return {
+      severity: 'yellow',
+      message: 'PRIVATE FEED OFFLINE',
+      detail: 'Fill, order and balance updates fell back to REST polling (up to 60s behind).',
+      action: { label: 'Retry', onClick: () => { void userChannelService.retry() } },
     }
   }
 

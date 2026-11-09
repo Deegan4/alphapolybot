@@ -117,9 +117,15 @@ export class OrderBookDepthAnalyzer {
     return totalFillable
   }
 
-  /** Order book in the outcome's terms (null if unavailable) */
+  /**
+   * Order book in the outcome's terms (null if unavailable). Uses the book
+   * pushed by the markets WebSocket when it is fresh (watched markets), else REST.
+   */
   private async getBook(slug: string, outcome: 'yes' | 'no') {
-    const book = await polymarketUSClient.getOrderBook(slug)
+    const live = await import('@/services/realtime')
+      .then(m => m.realtimeService?.getBook?.(slug) ?? null)
+      .catch(() => null)
+    const book = live ?? await polymarketUSClient.getOrderBook(slug)
     return book ? bookForOutcome(book, outcome) : null
   }
 

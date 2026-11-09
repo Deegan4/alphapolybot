@@ -535,6 +535,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
           for (const s of evictedSlugs) {
             this.slugToOutcomeMap.delete(s)
           }
+          // The window is closed: stop keeping its full book in memory
+          this.realtimeServiceRef?.unwatchBooks?.(evictedSlugs)
           this.marketOutcomeSlugs.delete(id)
         }
         this.activeMarkets.delete(id)
@@ -615,6 +617,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
               }
               this.slugToOutcomeMap.set(outcomeSlugs[mUpIdx], { asset, outcomeIndex: mUpIdx })
               this.realtimeServiceRef.subscribeMarket([...new Set(outcomeSlugs)])
+              // Full book too: the entry depth check then reads it from memory, not REST
+              this.realtimeServiceRef.watchBooks?.([...new Set(outcomeSlugs)])
               this.log(`[Discovery] Subscribed outcome slugs for ${asset} ${duration}`)
             }
 

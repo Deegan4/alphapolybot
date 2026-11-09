@@ -16,8 +16,11 @@ import {
   type MarketDataLite,
   type MarketData,
 } from 'polymarket-us'
-import type { PriceData } from '@/types'
-import { polymarketUSClient } from '@/services/api'
+import type { PriceData, OrderBook } from '@/types'
+import { polymarketUSClient, orderBookFromWire, type WireBook } from '@/services/api'
+
+/** A pushed book older than this is not trusted for sizing (ms) */
+export const LIVE_BOOK_MAX_AGE_MS = 5_000
 
 /** Max markets per WebSocket subscription (docs: Markets WebSocket → Subscription Limits) */
 export const WS_MAX_MARKETS_PER_SUBSCRIPTION = 100
@@ -40,6 +43,9 @@ export class RealtimeService {
   private reconnectTimeout: number | null = null
   private cleanupInterval: number | null = null
   private subscriptions = new Set<string>()
+  /** Markets that also get the full order book (MARKET_DATA), not just BBO */
+  private bookSubscriptions = new Set<string>()
+  private books = new Map<string, { book: OrderBook; receivedAt: number }>()
   private prices = new Map<string, PriceData>()
   private lastMessageTime = 0
   private messageCount = 0
@@ -81,6 +87,9 @@ export class RealtimeService {
             const slugs = Array.from(this.subscriptions)
             this.subscribeInChunks(slugs)
             console.log(`[RealtimeService] Subscribed to ${slugs.length} markets`)
+          }
+          if (this.bookSubscriptions.size > 0) {
+            this.subscribeBooksInChunks(Array.from(this.bookSubscriptions))
           }
 
           resolve(true)
@@ -130,6 +139,41 @@ export class RealtimeService {
     }
     this.subscriptions.clear()
     this.prices.clear()
+    this.bookSubscriptions.clear()
+    this.books.clear()
+  }
+
+  /**
+   * Also stream the full order book (top levels, sent whole on every change)
+   * for these markets, so depth checks before an order can skip the REST
+   * book fetch. Keep this to the few markets about to be traded.
+   */
+  watchBooks(slugs: string[]): void {
+    const fresh = [...new Set(slugs)].filter(s => !this.bookSubscriptions.has(s))
+    for (const s of fresh) this.bookSubscriptions.add(s)
+    if (fresh.length > 0 && this.ws?.isConnected) this.subscribeBooksInChunks(fresh)
+  }
+
+  /** Stop using pushed books for these markets (e.g. after their window closed) */
+  unwatchBooks(slugs: string[]): void {
+    for (const s of slugs) {
+      this.bookSubscriptions.delete(s)
+      this.books.delete(s)
+    }
+  }
+
+  /** Latest pushed order book if received within `maxAgeMs`, else null (use REST) */
+  getBook(slug: string, maxAgeMs = LIVE_BOOK_MAX_AGE_MS): OrderBook | null {
+    if (!this.ws?.isConnected) return null
+    const entry = this.books.get(slug)
+    if (!entry || Date.now() - entry.receivedAt > maxAgeMs) return null
+    return entry.book
+  }
+
+  private subscribeBooksInChunks(slugs: string[]): void {
+    for (const chunk of chunkSlugs(slugs)) {
+      this.ws?.subscribeMarketData(this.nextRequestId(), chunk)
+    }
   }
 
   /**
@@ -164,6 +208,7 @@ export class RealtimeService {
       this.subscriptions.delete(slug)
       this.prices.delete(slug)
     }
+    this.unwatchBooks(ids)
     // SDK doesn't have a per-slug unsubscribe — tracked locally
   }
 
@@ -243,6 +288,9 @@ export class RealtimeService {
     const slug = md.marketSlug
     const bids = md.bids || []
     const offers = md.offers || []
+    if (this.bookSubscriptions.has(slug)) {
+      this.books.set(slug, { book: orderBookFromWire(md as WireBook), receivedAt: Date.now() })
+    }
 
     const bestBid = bids.length > 0 ? parseFloat(bids[0].px.value) : 0
     const bestAsk = offers.length > 0 ? parseFloat(offers[0].px.value) : 0

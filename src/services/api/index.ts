@@ -5,3 +5,4 @@ export { priceForOutcome, bookForOutcome, upDownEventSlugs, reportedPriceForOutc
 export { PriceOracleService, priceOracleService, type AssetPrice } from './PriceOracleService'
 export { CoinbaseClient, coinbaseClient, CANDLE_GRANULARITY } from './CoinbaseClient'
 export { PolyBacktestClient, polyBacktestClient } from './PolyBacktestClient'
+export { orderBookFromWire, type WireBook } from './pmusWire'

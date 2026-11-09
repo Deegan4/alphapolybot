@@ -15,6 +15,18 @@ type OrderChangeCallback = (orders: PendingGtcOrder[]) => void
  *
  * Lifecycle: initialize() once from App.tsx, destroy() on teardown.
  */
+/** REST open-order poll interval while the private feed is delivering order events */
+export const ORDER_POLL_FALLBACK_MS = 3 * 60_000
+
+/**
+ * Whether the safety-net poll should hit REST. While the private WebSocket is
+ * live it pushes every fill/cancel/expiry, so REST only needs to catch a
+ * silently stalled feed; when the feed is down, poll on every tick.
+ */
+export function shouldPollOrdersRest(feedLive: boolean, lastPollMs: number, nowMs: number, fallbackMs = ORDER_POLL_FALLBACK_MS): boolean {
+  return !feedLive || nowMs - lastPollMs >= fallbackMs
+}
+
 export class GtcOrderManager {
   private orders = new Map<string, PendingGtcOrder>()
   private pollInterval: number | null = null
@@ -24,6 +36,7 @@ export class GtcOrderManager {
   // Config — poll interval increased to 60s because user channel push handles real-time fills
   private pollIntervalMs = 60_000
   private userChannelUnsubs: (() => void)[] = []
+  private lastRestPollMs = 0
 
   initialize(): void {
     if (this.initialized) return
@@ -149,6 +162,12 @@ export class GtcOrderManager {
    */
   private async pollOrders(): Promise<void> {
     if (this.orders.size === 0) return
+    const feedLive = await import('@/services/realtime')
+      .then(m => m.userChannelService?.isConnected?.() ?? false)
+      .catch(() => false)
+    const now = Date.now()
+    if (!shouldPollOrdersRest(feedLive, this.lastRestPollMs, now)) return
+    this.lastRestPollMs = now
 
     try {
       // Collect slugs for efficient batch query
