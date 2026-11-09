@@ -38,12 +38,27 @@ const realClock: Clock = {
   sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
 }
 
+export interface BucketMetrics {
+  /** Requests sent in the last 10s, per second */
+  perSecond10s: number
+  /** Requests sent in the last 60s */
+  last60s: number
+  /** HTTP 429 responses since start */
+  rateLimited: number
+  /** When requests are paused until (ms), 0 if not paused */
+  pausedUntil: number
+  /** Configured sustained rate */
+  ratePerSec: number
+}
+
 /** Token bucket with a 429 cooldown. Calls to `acquire` resolve in FIFO order. */
 export class TokenBucket {
   private tokens: number
   private last: number
   private blockedUntil = 0
   private strikes = 0
+  private sent: number[] = []
+  private rateLimitedCount = 0
   private queue: Promise<void> = Promise.resolve()
 
   constructor(private readonly config: BucketConfig, private readonly clock: Clock = realClock) {
@@ -58,9 +73,32 @@ export class TokenBucket {
     return turn
   }
 
+  /** Record that a request was actually sent (for metrics) */
+  noteSent(): void {
+    const now = this.clock.now()
+    this.sent.push(now)
+    // keep only the last minute
+    while (this.sent.length > 0 && this.sent[0] < now - 60_000) this.sent.shift()
+  }
+
+  /** Request rate and 429 counts for diagnostics */
+  metrics(): BucketMetrics {
+    const now = this.clock.now()
+    const last60 = this.sent.filter(t => t >= now - 60_000).length
+    const last10 = this.sent.filter(t => t >= now - 10_000).length
+    return {
+      perSecond10s: Math.round((last10 / 10) * 10) / 10,
+      last60s: last60,
+      rateLimited: this.rateLimitedCount,
+      pausedUntil: this.blockedUntil > now ? this.blockedUntil : 0,
+      ratePerSec: this.config.ratePerSec,
+    }
+  }
+
   /** Report a 429: hold every request until the (escalating) cooldown has passed */
   penalize(): void {
     const now = this.clock.now()
+    this.rateLimitedCount++
     this.tokens = 0
     // Requests already in flight when the first 429 landed fail together:
     // count one strike per pause, not one per request
@@ -114,6 +152,7 @@ export function throttleSdk<T extends object>(
   target.request = async (method, path, options = {}) => {
     const bucket = options.authenticated ? buckets.api : buckets.gateway
     await bucket.acquire()
+    bucket.noteSent()
     try {
       const result = await original(method, path, options)
       bucket.succeed()
@@ -137,4 +176,9 @@ export function throttleSdk<T extends object>(
 export const sharedBuckets = {
   gateway: new TokenBucket(GATEWAY_BUCKET),
   api: new TokenBucket(API_BUCKET),
+}
+
+/** Current request metrics for both buckets (shared process-wide) */
+export function getRequestMetrics(): { gateway: BucketMetrics; api: BucketMetrics } {
+  return { gateway: sharedBuckets.gateway.metrics(), api: sharedBuckets.api.metrics() }
 }

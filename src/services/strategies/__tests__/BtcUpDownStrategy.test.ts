@@ -380,3 +380,29 @@ describe('upDownSlugsFor (Polymarket US slug format)', () => {
     expect(upDownSlugsFor('XRP', '9pm', now)).toEqual([]) // no 9PM series on PM US
   })
 })
+
+describe('needsUpDownDiscovery (rollover pre-fetch)', () => {
+  it('runs when nothing is tracked or only an expired window is', async () => {
+    const { needsUpDownDiscovery } = await import('../BtcUpDownStrategy')
+    expect(needsUpDownDiscovery([], 0, 15 * 60_000)).toBe(true)
+    expect(needsUpDownDiscovery([-1], 0, 15 * 60_000)).toBe(true)
+  })
+
+  it('waits while the current window has more than the lead left, then pre-fetches', async () => {
+    const { needsUpDownDiscovery } = await import('../BtcUpDownStrategy')
+    const end = 15 * 60_000
+    // 15m window: lead = min(90s, max(30s, 180s)) = 90s
+    expect(needsUpDownDiscovery([end], end - 120_000, 15 * 60_000)).toBe(false)
+    expect(needsUpDownDiscovery([end], end - 60_000, 15 * 60_000)).toBe(true)
+    // once the next window is tracked, stop again
+    expect(needsUpDownDiscovery([end, end + 15 * 60_000], end - 60_000, 15 * 60_000)).toBe(false)
+  })
+
+  it('staggers assets by 5s', async () => {
+    const { needsUpDownDiscovery } = await import('../BtcUpDownStrategy')
+    const end = 5 * 60_000
+    // 5m window: lead = 60s; asset 0 at 62s left waits, asset 1 (lead 65s) fetches
+    expect(needsUpDownDiscovery([end], end - 62_000, 5 * 60_000, 0)).toBe(false)
+    expect(needsUpDownDiscovery([end], end - 62_000, 5 * 60_000, 1)).toBe(true)
+  })
+})

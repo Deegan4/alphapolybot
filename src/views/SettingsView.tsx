@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixInput, MatrixButton, MatrixToggle, MatrixSelect, MatrixBadge, MatrixNumberInput, AnimatedCounter, MatrixSlider } from '@/components/ui'
 import { useWalletStore, useSettingsStore } from '@/stores'
+import { getRequestMetrics, type BucketMetrics } from '@/services/api'
 import { makerFillTracker, type MakerFillStats } from '@/services/trading/MakerFillTracker'
 import { strategyManager } from '@/services/strategies'
 import { tradingService, riskManager } from '@/services/trading'
@@ -2374,6 +2375,53 @@ const AlertSettings: React.FC = () => {
 /**
  * API Settings
  */
+/**
+ * Live Polymarket US request usage against the client-side throttle and the
+ * documented 25 req/s per-IP limit, with 429 counts and any active pause.
+ */
+const ApiUsagePanel: React.FC = () => {
+  const [m, setM] = useState(() => getRequestMetrics())
+  useEffect(() => {
+    const id = window.setInterval(() => setM(getRequestMetrics()), 2000)
+    return () => window.clearInterval(id)
+  }, [])
+  const row = (label: string, b: BucketMetrics) => {
+    const paused = b.pausedUntil > Date.now()
+    return (
+      <tr key={label}>
+        <td className="py-0.5">{label}</td>
+        <td className="text-right">{b.perSecond10s.toFixed(1)}/s <span className="text-agent-text-muted">of {b.ratePerSec}</span></td>
+        <td className="text-right">{b.last60s}</td>
+        <td className={cn('text-right', b.rateLimited > 0 && 'text-agent-orange')}>{b.rateLimited}</td>
+        <td className="text-right">{paused ? `paused ${Math.ceil((b.pausedUntil - Date.now()) / 1000)}s` : 'ok'}</td>
+      </tr>
+    )
+  }
+  return (
+    <div className="bg-agent-bg/60 rounded-lg p-4">
+      <h4 className="text-agent-green text-sm font-mono mb-2">Polymarket US API usage</h4>
+      <table className="w-full text-xs font-mono">
+        <thead>
+          <tr className="text-agent-text-muted text-left">
+            <th className="font-normal py-1">Host</th>
+            <th className="font-normal text-right">Rate (10s)</th>
+            <th className="font-normal text-right">Last 60s</th>
+            <th className="font-normal text-right">429s</th>
+            <th className="font-normal text-right">State</th>
+          </tr>
+        </thead>
+        <tbody>
+          {row('Gateway', m.gateway)}
+          {row('API', m.api)}
+        </tbody>
+      </table>
+      <p className="text-agent-text-muted text-xs font-sans mt-2">
+        The exchange allows 25 requests per second per IP across both hosts. Any 429 here means the bot hit the limit and paused itself.
+      </p>
+    </div>
+  )
+}
+
 const APISettings: React.FC = () => {
   const {
     openRouterApiKey, setOpenRouterApiKey,
@@ -2427,6 +2475,7 @@ const APISettings: React.FC = () => {
   return (
     <MatrixCard title="API KEYS" subtitle="Configure external service API keys" variant="glass">
       <div className="space-y-6">
+        <ApiUsagePanel />
         <div className="bg-agent-bg/60 rounded-lg p-4">
           <p className="text-agent-text-muted text-sm font-sans">
             API keys are stored locally in your browser. They are never sent to any external server except the respective API providers.

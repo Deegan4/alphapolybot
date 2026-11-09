@@ -79,6 +79,23 @@ export const UPDOWN_HORIZONS: Partial<Record<WindowDuration, UpDownHorizon>> = {
   'daily': '1d',
 }
 
+/**
+ * Whether Up/Down discovery should run for one asset+duration. It runs when
+ * no tracked market lasts beyond the pre-fetch lead, so the next window is
+ * fetched shortly before the current one ends. The lead is 20% of the window
+ * (30s–90s) plus a 5s stagger per asset, which spreads the lookups instead of
+ * every asset hitting the gateway in the same second after rollover.
+ */
+export function needsUpDownDiscovery(
+  trackedWindowEndsMs: number[],
+  nowMs: number,
+  windowDurationMs: number,
+  assetIndex = 0,
+): boolean {
+  const leadMs = Math.min(90_000, Math.max(30_000, windowDurationMs * 0.2)) + Math.max(0, assetIndex) * 5_000
+  return !trackedWindowEndsMs.some(end => end > nowMs + leadMs)
+}
+
 /** Current + next window event slugs for an asset/duration ([] if unsupported) */
 export function upDownSlugsFor(asset: string, duration: WindowDuration, now: Date = new Date()): string[] {
   const horizon = UPDOWN_HORIZONS[duration]
@@ -544,11 +561,13 @@ export class BtcUpDownStrategy extends BaseStrategy {
         try {
           const windowDurationMs = WINDOW_DURATIONS[duration]
 
-          // Skip Gamma API call if we already have an active market for this asset+duration
-          const alreadyTracked = Array.from(this.activeMarkets.values()).some(
-            e => e.asset === asset && e.windowDurationMs === windowDurationMs && e.windowEndMs > now
-          )
-          if (alreadyTracked) continue
+          // Skip the lookup while a tracked market covers this asset+duration
+          // beyond the pre-fetch lead — then the next window is fetched just
+          // BEFORE rollover (staggered by asset) instead of every asset at once after it
+          const trackedEnds = Array.from(this.activeMarkets.values())
+            .filter(e => e.asset === asset && e.windowDurationMs === windowDurationMs)
+            .map(e => e.windowEndMs)
+          if (!needsUpDownDiscovery(trackedEnds, now, windowDurationMs, assets.indexOf(asset))) continue
 
           const markets = await this.discoverBySlug(asset, duration)
 

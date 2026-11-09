@@ -113,3 +113,37 @@ describe('TokenBucket 429 escalation', () => {
     expect(bucket.pausedUntil).toBe(6000 + 1000)
   })
 })
+
+describe('TokenBucket metrics', () => {
+  it('counts sent requests over 10s / 60s windows and 429s', async () => {
+    const clock = fakeClock()
+    const bucket = new TokenBucket({ ratePerSec: 100, burst: 100, cooldownMs: 1000 }, clock)
+    for (let i = 0; i < 20; i++) bucket.noteSent()
+    clock.advance(30_000)
+    for (let i = 0; i < 5; i++) bucket.noteSent()
+    let m = bucket.metrics()
+    expect(m.last60s).toBe(25)
+    expect(m.perSecond10s).toBe(0.5)
+    expect(m.ratePerSec).toBe(100)
+    expect(m.pausedUntil).toBe(0)
+
+    bucket.penalize()
+    m = bucket.metrics()
+    expect(m.rateLimited).toBe(1)
+    expect(m.pausedUntil).toBe(31_000)
+
+    clock.advance(61_000)
+    expect(bucket.metrics().last60s).toBe(0)
+  })
+
+  it('throttleSdk records each sent request', async () => {
+    const clock = fakeClock()
+    const b = { gateway: new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 1000 }, clock), api: new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 1000 }, clock) }
+    const fake: FakeSdk = { request: async () => 1 }
+    const sdk = throttleSdk(fake, b)
+    await sdk.request('GET', '/a', {})
+    await sdk.request('GET', '/b', { authenticated: true })
+    expect(b.gateway.metrics().last60s).toBe(1)
+    expect(b.api.metrics().last60s).toBe(1)
+  })
+})
