@@ -22,6 +22,8 @@ vi.mock('@/services/api', async () => {
     isTransientLatencyReject: wire.isTransientLatencyReject,
     makerEntryPrice: wire.makerEntryPrice,
     takerAfterExpiryPlan: wire.takerAfterExpiryPlan,
+    urgencyAdjustedChase: wire.urgencyAdjustedChase,
+    makerOrderOutlivesWindow: wire.makerOrderOutlivesWindow,
   }
 })
 vi.mock('@/services/realtime', () => ({ realtimeService: { getPrice: (s: string) => getPrice(s) } }))
@@ -135,6 +137,20 @@ describe('TradingService per-strategy maker-first', () => {
   })
 })
 
+describe('TradingService maker-first near the window end', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    getPrice.mockReturnValue({ bid: 0.27, ask: 0.34, mid: 0.305, last: 0.3, spread: 0.07, timestamp: new Date() })
+  })
+
+  it('goes straight to taker when a resting order would outlive the window', async () => {
+    placeOrder.mockResolvedValue({ success: true, orderId: 'z', filledSize: 16, avgPrice: 0.31 })
+    const closingSoon = { ...market, windowEnd: new Date(Date.now() + 60_000).toISOString() }
+    await service(true).placeBet(closingSoon, 'yes', 5, { strategy: 'btc' })
+    expect((placeOrder.mock.calls[0][0] as OrderRequest).postOnly).toBeUndefined()
+  })
+})
+
 describe('TradingService.completeExpiredMakerEntry', () => {
   const expired = {
     orderId: 'mk1', marketSlug: 'mkt', outcome: 'yes' as const, question: 'Q', side: 'BUY' as const,
@@ -172,6 +188,23 @@ describe('TradingService.completeExpiredMakerEntry', () => {
     const s = service(true)
     s.setConfig({ makerExpiryTakerFallback: false })
     expect(await s.completeExpiredMakerEntry(expired)).toBeNull()
+    expect(placeOrder).not.toHaveBeenCalled()
+  })
+
+  it('chases further when the window is about to close, and not at all once closed', async () => {
+    // ask 0.32 is 4¢ above the 0.28 maker price: beyond the 2¢ base limit
+    getPrice.mockReturnValue({ bid: 0.30, ask: 0.32, mid: 0.31, last: 0.31, spread: 0.02, timestamp: new Date() })
+    placeOrder.mockResolvedValue({ success: true, orderId: 'u1', filledSize: 12, avgPrice: 0.32 })
+
+    const relaxed = await service(true).completeExpiredMakerEntry({ ...expired, windowEndMs: Date.now() + 60 * 60_000 })
+    expect(relaxed).toBeNull()
+
+    const urgent = await service(true).completeExpiredMakerEntry({ ...expired, windowEndMs: Date.now() + 10_000 })
+    expect(urgent).toMatchObject({ success: true })
+
+    placeOrder.mockClear()
+    const closed = await service(true).completeExpiredMakerEntry({ ...expired, windowEndMs: Date.now() - 1 })
+    expect(closed).toBeNull()
     expect(placeOrder).not.toHaveBeenCalled()
   })
 })

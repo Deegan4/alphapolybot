@@ -432,3 +432,33 @@ export function takerAfterExpiryPlan(input: {
   }
   return { take: remaining, price: ask }
 }
+
+/**
+ * Chase limit for completing an expired maker entry, widened as the market's
+ * trading window runs out: missing the entry costs more when there is little
+ * time left to get in (BTC 5m/15m windows). Linear from 1× at `urgencyMs`
+ * before the end to `maxMultiplier`× at the end, capped at `cap`.
+ * Unknown end → base. Past the end → 0 (do not chase a closed window).
+ */
+export function urgencyAdjustedChase(
+  base: number,
+  msToEnd: number | null | undefined,
+  opts: { urgencyMs?: number; maxMultiplier?: number; cap?: number } = {},
+): number {
+  const urgencyMs = opts.urgencyMs ?? 5 * 60_000
+  const maxMultiplier = opts.maxMultiplier ?? 2.5
+  const cap = opts.cap ?? 0.05
+  if (msToEnd == null || !Number.isFinite(msToEnd)) return base
+  if (msToEnd <= 0) return 0
+  if (msToEnd >= urgencyMs) return base
+  const urgency = 1 - msToEnd / urgencyMs
+  return Math.min(cap, base * (1 + urgency * (maxMultiplier - 1)))
+}
+
+/**
+ * A resting maker order is pointless when it would still be live after the
+ * market's window closes — it can only expire unfilled or fill too late.
+ */
+export function makerOrderOutlivesWindow(nowMs: number, expiryMs: number, windowEndMs?: number | null): boolean {
+  return windowEndMs != null && Number.isFinite(windowEndMs) && nowMs + expiryMs > windowEndMs
+}

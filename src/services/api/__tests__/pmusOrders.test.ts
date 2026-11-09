@@ -102,3 +102,29 @@ describe('takerAfterExpiryPlan', () => {
     expect(takerAfterExpiryPlan({ makerPrice: 0.28, size: 17, filled: 16.5, ask: 0.28, maxChase: 0.02 })).toHaveProperty('skip')
   })
 })
+
+describe('urgencyAdjustedChase', () => {
+  it('keeps the base limit far from the window end and for unknown ends', async () => {
+    const { urgencyAdjustedChase } = await import('../pmusWire')
+    expect(urgencyAdjustedChase(0.02, 10 * 60_000)).toBe(0.02)
+    expect(urgencyAdjustedChase(0.02, null)).toBe(0.02)
+  })
+
+  it('widens linearly toward the end, capped, and is zero once closed', async () => {
+    const { urgencyAdjustedChase } = await import('../pmusWire')
+    expect(urgencyAdjustedChase(0.02, 2.5 * 60_000)).toBeCloseTo(0.02 * 1.75, 10) // halfway: 1.75×
+    expect(urgencyAdjustedChase(0.02, 1)).toBeCloseTo(0.05, 4)                    // ~2.5× = 0.05
+    expect(urgencyAdjustedChase(0.04, 1)).toBe(0.05)                              // capped
+    expect(urgencyAdjustedChase(0.02, 0)).toBe(0)
+    expect(urgencyAdjustedChase(0.02, -5)).toBe(0)
+  })
+})
+
+describe('makerOrderOutlivesWindow', () => {
+  it('flags a resting order that would still be live after the window closes', async () => {
+    const { makerOrderOutlivesWindow } = await import('../pmusWire')
+    expect(makerOrderOutlivesWindow(0, 5 * 60_000, 4 * 60_000)).toBe(true)
+    expect(makerOrderOutlivesWindow(0, 5 * 60_000, 10 * 60_000)).toBe(false)
+    expect(makerOrderOutlivesWindow(0, 5 * 60_000, undefined)).toBe(false)
+  })
+})

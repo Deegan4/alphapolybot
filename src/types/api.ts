@@ -150,6 +150,8 @@ export interface PendingGtcOrder {
   filledSize?: number
   /** Market's minimum trade quantity step (1 = whole contracts) */
   orderMinSize?: number
+  /** End of the market's trading window (ms), when known (Up/Down windows) */
+  windowEndMs?: number
 }
 
 export interface Trade {

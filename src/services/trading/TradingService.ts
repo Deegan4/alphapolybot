@@ -1,5 +1,5 @@
 import type { Market, Order, OrderRequest, OrderResult, PendingGtcOrder } from '@/types'
-import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject, makerEntryPrice, takerAfterExpiryPlan } from '@/services/api'
+import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject, makerEntryPrice, takerAfterExpiryPlan, urgencyAdjustedChase, makerOrderOutlivesWindow } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { riskManager } from './RiskManager'
@@ -50,6 +50,14 @@ const DEFAULT_CONFIG: TradingConfig = {
  * Trading Service
  * Handles order execution with FOK orders and risk management
  */
+/** End of a market's trading window in ms: Up/Down window end, else market end date */
+function marketWindowEndMs(market: Market): number | undefined {
+  const raw = market.windowEnd || market.endDate
+  if (!raw) return undefined
+  const ms = Date.parse(raw)
+  return Number.isFinite(ms) ? ms : undefined
+}
+
 export class TradingService {
   private config: TradingConfig
   private lastOrderTime = 0
@@ -168,7 +176,10 @@ export class TradingService {
     } : undefined
 
     // Maker-first: try a resting post-only order before crossing the spread
-    if (this.makerFirstAppliesTo(gtdMeta?.strategy) && gtdMeta && !options?.orderType) {
+    if (
+      this.makerFirstAppliesTo(gtdMeta?.strategy) && gtdMeta && !options?.orderType &&
+      !makerOrderOutlivesWindow(Date.now(), this.config.gtcExpiryMs, marketWindowEndMs(market))
+    ) {
       const maker = await this.tryMakerEntry(market, outcome, amount, gtdMeta)
       if (maker) return maker
     }
@@ -222,6 +233,7 @@ export class TradingService {
     if (result.orderId && !result.filledSize && !this.config.dryRun) {
       this.trackRestingOrder(result.orderId, request, gtdMeta, expiresAtMs, {
         entryKind: 'maker', feeCoefficient: market.feeCoefficient, orderMinSize: market.orderMinSize,
+        windowEndMs: marketWindowEndMs(market),
       })
       return { ...result, pending: true }
     }
@@ -266,12 +278,18 @@ export class TradingService {
 
     const live = realtimeService.getPrice(order.marketSlug) ?? await polymarketUSClient.getBestPrices(order.marketSlug)
     const ask = live ? priceForOutcome(live, order.outcome).ask : null
+    const msToEnd = order.windowEndMs != null ? order.windowEndMs - Date.now() : null
+    const maxChase = urgencyAdjustedChase(this.config.makerMaxChase, msToEnd)
+    if (maxChase <= 0) {
+      console.log('[TradingService] Maker entry expired — market window has closed, no taker fallback')
+      return null
+    }
     const plan = takerAfterExpiryPlan({
       makerPrice: order.price,
       size: order.size,
       filled,
       ask,
-      maxChase: this.config.makerMaxChase,
+      maxChase,
       minimumTradeQty: order.orderMinSize,
     })
     if ('skip' in plan) {
@@ -330,7 +348,7 @@ export class TradingService {
     request: OrderRequest,
     meta: NonNullable<Parameters<TradingService['executeOrder']>[1]>,
     expiresAtMs: number,
-    extra: Pick<PendingGtcOrder, 'entryKind' | 'feeCoefficient' | 'orderMinSize'> = {},
+    extra: Pick<PendingGtcOrder, 'entryKind' | 'feeCoefficient' | 'orderMinSize' | 'windowEndMs'> = {},
   ): void {
     import('./GtcOrderManager').then(({ gtcOrderManager }) => {
       gtcOrderManager.trackOrder({
