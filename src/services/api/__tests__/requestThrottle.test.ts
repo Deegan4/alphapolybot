@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { TokenBucket, throttleSdk } from '../requestThrottle'
+import { TokenBucket, throttleSdk, isCancelRequest, RequestDroppedError } from '../requestThrottle'
 
 type FakeSdk = { request: (method: string, path: string, options?: { authenticated?: boolean }) => Promise<unknown> }
 
@@ -145,5 +145,57 @@ describe('TokenBucket metrics', () => {
     await sdk.request('GET', '/b', { authenticated: true })
     expect(b.gateway.metrics().last60s).toBe(1)
     expect(b.api.metrics().last60s).toBe(1)
+  })
+})
+
+describe('dropping stale queued requests', () => {
+  it('drops a request that would wait past maxQueueWaitMs during a pause', async () => {
+    const clock = fakeClock()
+    const bucket = new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 30_000, maxQueueWaitMs: 5_000 }, clock)
+    bucket.penalize()
+    await expect(bucket.acquire()).rejects.toBeInstanceOf(RequestDroppedError)
+    expect(clock.now()).toBe(0) // failed fast, did not sleep through the pause
+    expect(bucket.metrics().dropped).toBe(1)
+    // an explicit Infinity still waits it out
+    await bucket.acquire(Infinity)
+    expect(clock.now()).toBe(30_000)
+  })
+
+  it('waits normally when the pause ends inside the deadline', async () => {
+    const clock = fakeClock()
+    const bucket = new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 2_000, maxQueueWaitMs: 5_000 }, clock)
+    bucket.penalize()
+    await bucket.acquire()
+    expect(clock.now()).toBe(2_000)
+    expect(bucket.metrics().dropped).toBe(0)
+  })
+
+  it('drops when pacing alone would exceed the deadline, and later requests still flow', async () => {
+    const clock = fakeClock()
+    const bucket = new TokenBucket({ ratePerSec: 1, burst: 1, cooldownMs: 1000, maxQueueWaitMs: 500 }, clock)
+    await bucket.acquire()
+    await expect(bucket.acquire()).rejects.toBeInstanceOf(RequestDroppedError)
+    clock.advance(1000)
+    await bucket.acquire()
+  })
+
+  it('never drops cancels', async () => {
+    expect(isCancelRequest('POST', '/v1/order/abc/cancel')).toBe(true)
+    expect(isCancelRequest('POST', '/v1/orders/open/cancel')).toBe(true)
+    expect(isCancelRequest('DELETE', '/v1/anything')).toBe(true)
+    expect(isCancelRequest('POST', '/v1/orders')).toBe(false)
+    expect(isCancelRequest('GET', '/v1/markets/cancel-culture/bbo')).toBe(false)
+
+    const clock = fakeClock()
+    const b = {
+      gateway: new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 1000 }, clock),
+      api: new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 20_000, maxQueueWaitMs: 1_000 }, clock),
+    }
+    const fake: FakeSdk = { request: async (_m, p) => p }
+    const sdk = throttleSdk(fake, b)
+    b.api.penalize()
+    await expect(sdk.request('POST', '/v1/orders', { authenticated: true })).rejects.toBeInstanceOf(RequestDroppedError)
+    await expect(sdk.request('POST', '/v1/order/x/cancel', { authenticated: true })).resolves.toBe('/v1/order/x/cancel')
+    expect(clock.now()).toBe(20_000)
   })
 })

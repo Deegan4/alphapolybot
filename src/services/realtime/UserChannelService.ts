@@ -40,6 +40,10 @@ export class UserChannelService {
   private reconnectTimeout: number | null = null
   private requestIdCounter = 0
   private messageCount = 0
+  /** Set by disconnect() so the resulting close does not schedule a reconnect */
+  private closingIntentionally = false
+  /** Latest pushed balance; null until the first snapshot or after the socket closes */
+  private latestBalance: { balance: number; buyingPower: number; at: number } | null = null
 
   private tradeCallbacks = new Set<TradeCallback>()
   private orderCallbacks = new Set<OrderCallback>()
@@ -54,6 +58,7 @@ export class UserChannelService {
    */
   async connect(): Promise<boolean> {
     if (this.ws?.isConnected) return true
+    this.closingIntentionally = false
 
     const wsOpts = polymarketUSClient.getWebSocketOptions()
     if (!wsOpts) {
@@ -165,7 +170,10 @@ export class UserChannelService {
 
         this.ws.on('close', () => {
           console.log('[UserChannel] WebSocket disconnected')
+          // Balance pushes stop with the socket: callers fall back to REST
+          this.latestBalance = null
           this.notifyConnectionCallbacks('disconnected')
+          if (this.closingIntentionally) return
           this.attemptReconnect()
         })
 
@@ -178,6 +186,8 @@ export class UserChannelService {
   }
 
   disconnect(): void {
+    this.closingIntentionally = true
+    this.latestBalance = null
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
@@ -252,6 +262,15 @@ export class UserChannelService {
     return this.ws?.isConnected ?? false
   }
 
+  /**
+   * Balance and buying power pushed by the private feed (snapshot on
+   * subscribe, then an update on every change). Null when the socket is down
+   * or has not sent a snapshot yet, so callers know to use REST instead.
+   */
+  getLatestBalance(): { balance: number; buyingPower: number; at: number } | null {
+    return this.isConnected() ? this.latestBalance : null
+  }
+
   // ─── Private ────────────────────────────────────────────
 
   private nextRequestId(): string {
@@ -288,6 +307,9 @@ export class UserChannelService {
   }
 
   private notifyBalanceCallbacks(balance: number, buyingPower: number): void {
+    if (Number.isFinite(balance) && Number.isFinite(buyingPower)) {
+      this.latestBalance = { balance, buyingPower, at: Date.now() }
+    }
     for (const cb of this.balanceCallbacks) {
       try { cb(balance, buyingPower) } catch (e) { console.error('[UserChannel] Balance callback error:', e) }
     }

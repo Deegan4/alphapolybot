@@ -2393,6 +2393,7 @@ const ApiUsagePanel: React.FC = () => {
         <td className="text-right">{b.perSecond10s.toFixed(1)}/s <span className="text-agent-text-muted">of {b.ratePerSec}</span></td>
         <td className="text-right">{b.last60s}</td>
         <td className={cn('text-right', b.rateLimited > 0 && 'text-agent-orange')}>{b.rateLimited}</td>
+        <td className={cn('text-right', b.dropped > 0 && 'text-agent-orange')}>{b.dropped}</td>
         <td className="text-right">{paused ? `paused ${Math.ceil((b.pausedUntil - Date.now()) / 1000)}s` : 'ok'}</td>
       </tr>
     )
@@ -2407,6 +2408,7 @@ const ApiUsagePanel: React.FC = () => {
             <th className="font-normal text-right">Rate (10s)</th>
             <th className="font-normal text-right">Last 60s</th>
             <th className="font-normal text-right">429s</th>
+            <th className="font-normal text-right">Dropped</th>
             <th className="font-normal text-right">State</th>
           </tr>
         </thead>
@@ -2416,7 +2418,7 @@ const ApiUsagePanel: React.FC = () => {
         </tbody>
       </table>
       <p className="text-agent-text-muted text-xs font-sans mt-2">
-        The exchange allows 25 requests per second per IP across both hosts. Any 429 here means the bot hit the limit and paused itself.
+        The exchange allows 25 requests per second per IP across both hosts. Any 429 here means the bot hit the limit and paused itself. Requests that would have waited out a long pause are dropped (cancels never are) instead of firing late on stale prices.
       </p>
     </div>
   )

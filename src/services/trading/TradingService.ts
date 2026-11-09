@@ -540,7 +540,12 @@ export class TradingService {
     // Pre-flight: check buying power before submitting
     if (request.side === 'BUY') {
       try {
-        const balances = await polymarketUSClient.getBalances()
+        // Buying power pushed by the private feed when live (saves a REST
+        // round-trip before every order); REST otherwise
+        const live = await import('@/services/realtime')
+          .then(m => m.userChannelService?.getLatestBalance?.() ?? null)
+          .catch(() => null)
+        const balances = live ?? await polymarketUSClient.getBalances()
         const requiredAmount = request.price * request.size
         if (balances.buyingPower < requiredAmount) {
           const msg = `Insufficient buying power: $${balances.buyingPower.toFixed(2)} (need $${requiredAmount.toFixed(2)})`

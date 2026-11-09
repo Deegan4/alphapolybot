@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { WalletState } from '@/types'
 import { walletService } from '@/services/wallet'
+import { shouldPollBalanceRest } from '@/services/wallet/WalletService'
 
 interface WalletStore extends WalletState {
   // Actions
@@ -12,9 +13,13 @@ interface WalletStore extends WalletState {
   stopPolling: () => void
 }
 
-// Module-level polling state (not persisted, not in store)
+// Module-level polling state (not persisted, not in store).
+// The tick runs every 15s but only calls REST when the private WebSocket is not
+// pushing balances, or every 2 min as a safety net while it is.
 const BALANCE_POLL_MS = 15_000
 let pollIntervalId: ReturnType<typeof setInterval> | null = null
+let lastRestSyncMs: number | null = null
+let unsubLiveBalance: (() => void) | null = null
 
 export const useWalletStore = create<WalletStore>()(
   persist(
@@ -46,6 +51,10 @@ export const useWalletStore = create<WalletStore>()(
           // user-channel WebSocket (push-based fill/cancel events for GTD tracking + PLM).
           get().startPolling()
           import('@/services/realtime').then(({ userChannelService }) => {
+            unsubLiveBalance?.()
+            unsubLiveBalance = userChannelService.onBalance((balance, buyingPower) => {
+              walletService.applyLiveBalance(balance, buyingPower)
+            })
             userChannelService.connect().then(connected => {
               if (connected) {
                 console.log('[WalletStore] User channel connected — push-based order updates active')
@@ -59,6 +68,9 @@ export const useWalletStore = create<WalletStore>()(
 
       disconnect: () => {
         get().stopPolling()
+        unsubLiveBalance?.()
+        unsubLiveBalance = null
+        lastRestSyncMs = null
         import('@/services/realtime')
           .then(({ userChannelService }) => userChannelService.disconnect())
           .catch(() => {})
@@ -86,7 +98,13 @@ export const useWalletStore = create<WalletStore>()(
 
       startPolling: () => {
         if (pollIntervalId !== null) return          // idempotent
-        const sync = () => useWalletStore.getState().syncBalances()
+        const sync = async () => {
+          const { userChannelService } = await import('@/services/realtime')
+          const now = Date.now()
+          if (!shouldPollBalanceRest({ wsHasBalance: userChannelService.getLatestBalance() !== null, lastRestSyncMs, nowMs: now })) return
+          lastRestSyncMs = now
+          await useWalletStore.getState().syncBalances()
+        }
         sync()                                        // fire immediately
         pollIntervalId = setInterval(sync, BALANCE_POLL_MS)
       },

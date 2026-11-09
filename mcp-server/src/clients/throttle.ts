@@ -20,6 +20,20 @@ export interface BucketConfig {
    *  `maxCooldownMs`; resets after a successful request. */
   cooldownMs: number
   maxCooldownMs?: number
+  /** Longest a request may wait in the queue before it is dropped instead of
+   *  sent (ms). During a long 429 pause, queued reads go stale and queued
+   *  orders were priced for a market that has moved — failing them fast is
+   *  safer than firing them all when the pause ends. Cancels are never dropped. */
+  maxQueueWaitMs?: number
+}
+
+/** Thrown instead of sending a request that waited longer than `maxQueueWaitMs` */
+export class RequestDroppedError extends Error {
+  readonly dropped = true
+  constructor(waitedFor: string) {
+    super(`Request dropped: rate-limit queue wait exceeded (${waitedFor})`)
+    this.name = 'RequestDroppedError'
+  }
 }
 
 /**
@@ -29,8 +43,8 @@ export interface BucketConfig {
  * requests in under two seconds drew Cloudflare 1015 bans in testing, so the
  * gateway (bulk market data) gets the smaller share.
  */
-export const GATEWAY_BUCKET: BucketConfig = { ratePerSec: 8, burst: 10, cooldownMs: 2_000, maxCooldownMs: 5 * 60_000 }
-export const API_BUCKET: BucketConfig = { ratePerSec: 15, burst: 15, cooldownMs: 2_000, maxCooldownMs: 2 * 60_000 }
+export const GATEWAY_BUCKET: BucketConfig = { ratePerSec: 8, burst: 10, cooldownMs: 2_000, maxCooldownMs: 5 * 60_000, maxQueueWaitMs: 15_000 }
+export const API_BUCKET: BucketConfig = { ratePerSec: 15, burst: 15, cooldownMs: 2_000, maxCooldownMs: 2 * 60_000, maxQueueWaitMs: 10_000 }
 
 type Clock = { now: () => number; sleep: (ms: number) => Promise<void> }
 
@@ -46,6 +60,8 @@ export interface BucketMetrics {
   last60s: number
   /** HTTP 429 responses since start */
   rateLimited: number
+  /** Requests dropped after waiting too long in the queue, since start */
+  dropped: number
   /** When requests are paused until (ms), 0 if not paused */
   pausedUntil: number
   /** Configured sustained rate */
@@ -60,6 +76,7 @@ export class TokenBucket {
   private strikes = 0
   private sent: number[] = []
   private rateLimitedCount = 0
+  private droppedCount = 0
   private queue: Promise<void> = Promise.resolve()
 
   constructor(private readonly config: BucketConfig, private readonly clock: Clock = realClock) {
@@ -67,9 +84,14 @@ export class TokenBucket {
     this.last = clock.now()
   }
 
-  /** Wait until a request may be sent */
-  acquire(): Promise<void> {
-    const turn = this.queue.then(() => this.take())
+  /**
+   * Wait until a request may be sent. Rejects with RequestDroppedError when
+   * that would take longer than `maxWaitMs` (default: the bucket's
+   * `maxQueueWaitMs`; pass Infinity to always wait).
+   */
+  acquire(maxWaitMs: number = this.config.maxQueueWaitMs ?? Infinity): Promise<void> {
+    const deadline = this.clock.now() + maxWaitMs
+    const turn = this.queue.then(() => this.take(deadline, maxWaitMs))
     this.queue = turn.catch(() => undefined)
     return turn
   }
@@ -91,6 +113,7 @@ export class TokenBucket {
       perSecond10s: Math.round((last10 / 10) * 10) / 10,
       last60s: last60,
       rateLimited: this.rateLimitedCount,
+      dropped: this.droppedCount,
       pausedUntil: this.blockedUntil > now ? this.blockedUntil : 0,
       ratePerSec: this.config.ratePerSec,
     }
@@ -119,10 +142,16 @@ export class TokenBucket {
     return this.blockedUntil
   }
 
-  private async take(): Promise<void> {
+  private drop(maxWaitMs: number): never {
+    this.droppedCount++
+    throw new RequestDroppedError(`${Math.round(maxWaitMs / 1000)}s`)
+  }
+
+  private async take(deadline: number, maxWaitMs: number): Promise<void> {
     for (;;) {
       const now = this.clock.now()
       if (now < this.blockedUntil) {
+        if (this.blockedUntil > deadline) this.drop(maxWaitMs)
         await this.clock.sleep(this.blockedUntil - now)
         continue
       }
@@ -132,9 +161,16 @@ export class TokenBucket {
         this.tokens -= 1
         return
       }
-      await this.clock.sleep(Math.ceil(((1 - this.tokens) / this.config.ratePerSec) * 1000))
+      const waitMs = Math.ceil(((1 - this.tokens) / this.config.ratePerSec) * 1000)
+      if (now + waitMs > deadline) this.drop(maxWaitMs)
+      await this.clock.sleep(waitMs)
     }
   }
+}
+
+/** Order cancels (single, all-open) — never dropped from the queue */
+export function isCancelRequest(method: string, path: string): boolean {
+  return method.toUpperCase() === 'DELETE' || /\/cancel$/.test(path)
 }
 
 type RequestFn = (method: string, path: string, options?: { authenticated?: boolean } & Record<string, unknown>) => Promise<unknown>
@@ -152,7 +188,8 @@ export function throttleSdk<T extends object>(
   const original = target.request.bind(sdk) as RequestFn
   target.request = async (method, path, options = {}) => {
     const bucket = options.authenticated ? buckets.api : buckets.gateway
-    await bucket.acquire()
+    // Cancels must go out however long the queue is: they reduce exposure
+    await bucket.acquire(isCancelRequest(method, path) ? Infinity : undefined)
     bucket.noteSent()
     try {
       const result = await original(method, path, options)
