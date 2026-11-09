@@ -28,6 +28,8 @@ export interface TradingConfig {
   makerExpiryTakerFallback: boolean
   /** Max price (outcome terms, dollars) the taker fallback may pay above the maker limit */
   makerMaxChase: number
+  /** Strategies that skip maker-first even when it is on (e.g. short BTC windows) */
+  makerFirstDisabledStrategies: string[]
 }
 
 const DEFAULT_CONFIG: TradingConfig = {
@@ -41,6 +43,7 @@ const DEFAULT_CONFIG: TradingConfig = {
   makerFirst: false,           // opt-in (Settings → Trading → Order Execution)
   makerExpiryTakerFallback: true,
   makerMaxChase: 0.02,
+  makerFirstDisabledStrategies: [],
 }
 
 /**
@@ -165,12 +168,18 @@ export class TradingService {
     } : undefined
 
     // Maker-first: try a resting post-only order before crossing the spread
-    if (this.config.makerFirst && gtdMeta && !options?.orderType) {
+    if (this.makerFirstAppliesTo(gtdMeta?.strategy) && gtdMeta && !options?.orderType) {
       const maker = await this.tryMakerEntry(market, outcome, amount, gtdMeta)
       if (maker) return maker
     }
 
     return this.executeOrder(orderRequest, gtdMeta)
+  }
+
+  /** Maker-first is on and not switched off for this strategy */
+  makerFirstAppliesTo(strategy?: string): boolean {
+    if (!this.config.makerFirst) return false
+    return !this.config.makerFirstDisabledStrategies.includes(strategy ?? 'llm')
   }
 
   /**

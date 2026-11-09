@@ -706,6 +706,39 @@ const STRATEGY_LABELS: Record<string, string> = {
   llm: 'LLM', btc: 'BTC Up/Down', micro: 'Micro', meanrev: 'Mean Rev', dip: 'Dip Arb', fw: 'FW Arb', other: 'Other',
 }
 
+/** Strategies that place buys through TradingService.placeBet (maker-first eligible) */
+const MAKER_FIRST_STRATEGIES = ['llm', 'btc', 'micro'] as const
+
+/**
+ * Per-strategy maker-first switches, each with its own observed fill rate,
+ * so maker-first can stay on where it pays and off where fills are missed.
+ */
+const MakerFirstStrategyPicker: React.FC<{ disabled: string[]; onToggle: (s: string, enabled: boolean) => void }> = ({ disabled, onToggle }) => {
+  const [, force] = useState(0)
+  useEffect(() => makerFillTracker.onChange(() => force(n => n + 1)), [])
+  return (
+    <div>
+      <div className="text-agent-text-muted text-xs font-sans mb-1">Use maker-first for:</div>
+      <div className="grid grid-cols-2 gap-1 text-xs font-mono">
+        {MAKER_FIRST_STRATEGIES.map(strategy => {
+          const on = !disabled.includes(strategy)
+          const s = makerFillTracker.getStats(strategy)
+          const resolved = s.filled + s.expired + s.cancelled
+          return (
+            <label key={strategy} className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={on} onChange={e => onToggle(strategy, e.target.checked)} />
+              <span>{STRATEGY_LABELS[strategy]}</span>
+              <span className="text-agent-text-muted">
+                {resolved > 0 ? `${Math.round((s.fillRate ?? 0) * 100)}% of ${resolved}` : 'no data'}
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 const MakerFillStatsPanel: React.FC = () => {
   const [stats, setStats] = useState<MakerFillStats>(() => makerFillTracker.getStats())
   const [perStrategy, setPerStrategy] = useState(() => makerFillTracker.getStrategyStats())
@@ -770,6 +803,7 @@ const GtdFallbackSettings: React.FC = () => {
     gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes,
     makerFirstEntries, setMakerFirstEntries,
     makerExpiryTakerFallback, setMakerExpiryTakerFallback, makerMaxChaseCents, setMakerMaxChaseCents,
+    makerFirstDisabledStrategies, setMakerFirstForStrategy,
   } = useSettingsStore()
 
   return (
@@ -790,6 +824,10 @@ const GtdFallbackSettings: React.FC = () => {
         />
         {makerFirstEntries && (
           <>
+            <MakerFirstStrategyPicker
+              disabled={makerFirstDisabledStrategies ?? []}
+              onToggle={setMakerFirstForStrategy}
+            />
             <MatrixToggle
               label="Taker Fallback on Expiry"
               description="If a maker entry expires unfilled, buy the rest with a normal order, but only if the price has not run away. Any partial fill is kept as a position either way."

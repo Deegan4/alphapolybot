@@ -106,6 +106,35 @@ describe('TradingService maker-first entries', () => {
   })
 })
 
+describe('TradingService per-strategy maker-first', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    getPrice.mockReturnValue({ bid: 0.27, ask: 0.34, mid: 0.305, last: 0.3, spread: 0.07, timestamp: new Date() })
+  })
+
+  it('skips maker-first for disabled strategies only', async () => {
+    placeOrder.mockResolvedValue({ success: true, orderId: 'x', filledSize: 16, avgPrice: 0.31 })
+    const s = service(true)
+    s.setConfig({ makerFirstDisabledStrategies: ['btc'] })
+    expect(s.makerFirstAppliesTo('btc')).toBe(false)
+    expect(s.makerFirstAppliesTo('micro')).toBe(true)
+    expect(s.makerFirstAppliesTo(undefined)).toBe(true) // defaults to 'llm'
+
+    await s.placeBet(market, 'yes', 5, { strategy: 'btc' })
+    expect((placeOrder.mock.calls[0][0] as OrderRequest).postOnly).toBeUndefined()
+
+    placeOrder.mockClear()
+    placeOrder.mockResolvedValueOnce({ success: true, orderId: 'y', pending: true })
+    await s.placeBet(market, 'yes', 5, { strategy: 'micro' })
+    expect((placeOrder.mock.calls[0][0] as OrderRequest).postOnly).toBe(true)
+  })
+
+  it('is fully off when the master switch is off', () => {
+    const s = service(false)
+    expect(s.makerFirstAppliesTo('micro')).toBe(false)
+  })
+})
+
 describe('TradingService.completeExpiredMakerEntry', () => {
   const expired = {
     orderId: 'mk1', marketSlug: 'mkt', outcome: 'yes' as const, question: 'Q', side: 'BUY' as const,
