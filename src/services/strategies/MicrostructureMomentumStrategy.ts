@@ -307,6 +307,9 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     // Log signals for the threshold report before any gate can skip the scan
     try { this.recordSignals() } catch { /* recording is best-effort */ }
 
+    // Recording-only mode: gather evidence, place nothing (not even simulated trades)
+    if (useSettingsStore.getState().signalRecordingOnly) return
+
     // Warmup gate — don't trade until we've collected enough microstructure data
     if (Date.now() < this.warmupUntil) {
       const remaining = Math.ceil((this.warmupUntil - Date.now()) / 1000)

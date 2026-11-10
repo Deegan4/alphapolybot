@@ -28,6 +28,7 @@ interface BannerState {
  */
 export const DiagnosticsBanner: React.FC = () => {
   const dryRun = useSettingsStore((s) => s.dryRun)
+  const recordingOnly = useSettingsStore((s) => s.signalRecordingOnly)
   const isConnected = useWalletStore((s) => s.isConnected)
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [rejections, setRejections] = useState<RejectionSummary>(rejectionTracker.getSummary())
@@ -65,6 +66,7 @@ export const DiagnosticsBanner: React.FC = () => {
     wsConnected,
     userFeedGaveUp,
     marketFeedGaveUp,
+    recordingOnly: recordingOnly ?? false,
   })
 
   if (!banner) return null
@@ -115,6 +117,7 @@ function computeBanner(ctx: {
   wsConnected: boolean
   userFeedGaveUp?: boolean
   marketFeedGaveUp?: boolean
+  recordingOnly?: boolean
 }): BannerState | null {
   // 1. Emergency stop (most critical)
   if (ctx.emergencyStopped) {
@@ -172,6 +175,15 @@ function computeBanner(ctx: {
       severity: 'yellow',
       message: 'STRATEGIES ENABLED BUT NOT RUNNING',
       detail: 'Start strategies from the dropdown above.',
+    }
+  }
+
+  // 3b. Recording-only: Momentum and Up/Down are running but will not trade
+  if (ctx.recordingOnly && ctx.strategies.some(s => s.status === 'running' && (s.id === 'micro-momentum' || s.id === 'btc-updown'))) {
+    return {
+      severity: 'cyan',
+      message: 'RECORDING SIGNALS ONLY',
+      detail: 'Momentum and Crypto Up/Down are logging signals and placing no trades. Turn off in Settings → Trading.',
     }
   }
 

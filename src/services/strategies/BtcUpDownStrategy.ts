@@ -907,6 +907,9 @@ export class BtcUpDownStrategy extends BaseStrategy {
       this._lastSignals.set(asset, { signal, windowOpenPrice, currentPrice })
       this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice })
 
+      // Recording-only mode: the signal is logged and shown; no LLM call, no trade
+      if (useSettingsStore.getState().signalRecordingOnly) return
+
       this.log(
         `${asset} ${durationLabel} signal: ${signal.direction.toUpperCase()} conf=${(signal.confidence * 100).toFixed(0)}% ` +
         `(price $${currentPrice.toFixed(2)} vs ref $${windowOpenPrice.toFixed(2)}, ` +

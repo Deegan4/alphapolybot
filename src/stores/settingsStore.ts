@@ -33,6 +33,7 @@ export interface AppSettingsState {
   makerFirstEntries: boolean    // Post-only entries inside the spread before taking
   makerExpiryTakerFallback: boolean // Take the remainder when a maker entry expires
   pauseEntriesWhenFeedDown: boolean // Block new entries while the market-data feed is offline
+  signalRecordingOnly: boolean // Strategies compute and record signals but place no trades (not even simulated)
   makerMaxChaseCents: number    // Max cents above the maker price the fallback may pay
   makerFirstDisabledStrategies: string[] // Strategies that always take (skip maker-first)
 
@@ -143,6 +144,7 @@ interface SettingsStore extends AppSettingsState {
   setMakerFirstEntries: (enabled: boolean) => void
   setMakerExpiryTakerFallback: (enabled: boolean) => void
   setPauseEntriesWhenFeedDown: (enabled: boolean) => void
+  setSignalRecordingOnly: (enabled: boolean) => void
   setMakerMaxChaseCents: (cents: number) => void
   setMakerFirstForStrategy: (strategy: string, enabled: boolean) => void
   setKellyFraction: (fraction: number) => void
@@ -232,6 +234,7 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   makerFirstEntries: false,
   makerExpiryTakerFallback: true,
   pauseEntriesWhenFeedDown: false,
+  signalRecordingOnly: false,
   makerMaxChaseCents: 2,
   makerFirstDisabledStrategies: [],
   kellyFraction: 0.15,
@@ -367,6 +370,8 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ makerFirstEntries: enabled })
         import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerFirst: enabled }))
       },
+
+      setSignalRecordingOnly: (enabled: boolean) => set({ signalRecordingOnly: enabled }),
 
       setPauseEntriesWhenFeedDown: (enabled: boolean) => {
         set({ pauseEntriesWhenFeedDown: enabled })
@@ -1007,6 +1012,7 @@ export const useSettingsStore = create<SettingsStore>()(
         makerFirstEntries: state.makerFirstEntries,
         makerExpiryTakerFallback: state.makerExpiryTakerFallback,
         pauseEntriesWhenFeedDown: state.pauseEntriesWhenFeedDown,
+        signalRecordingOnly: state.signalRecordingOnly,
         makerMaxChaseCents: state.makerMaxChaseCents,
         makerFirstDisabledStrategies: state.makerFirstDisabledStrategies,
         kellyFraction: state.kellyFraction,

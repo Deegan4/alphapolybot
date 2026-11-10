@@ -806,6 +806,7 @@ const GtdFallbackSettings: React.FC = () => {
     makerFirstEntries, setMakerFirstEntries,
     makerExpiryTakerFallback, setMakerExpiryTakerFallback, makerMaxChaseCents, setMakerMaxChaseCents,
     pauseEntriesWhenFeedDown, setPauseEntriesWhenFeedDown,
+    signalRecordingOnly, setSignalRecordingOnly,
     makerFirstDisabledStrategies, setMakerFirstForStrategy,
   } = useSettingsStore()
 
@@ -824,6 +825,12 @@ const GtdFallbackSettings: React.FC = () => {
           description="Rest buys as post-only orders one cent inside the spread (no taker fee, about 4.75% of the stake at 50¢). Falls back to a normal order if the book is one-sided or the exchange rejects it. Fills are slower and may not happen."
           enabled={makerFirstEntries}
           onChange={setMakerFirstEntries}
+        />
+        <MatrixToggle
+          label="Record Signals Only"
+          description="Momentum and Crypto Up/Down keep scanning and recording signals for the Analytics reports, but place no trades at all, not even simulated ones. Use it to gather evidence for days. Other strategies are not affected."
+          enabled={signalRecordingOnly ?? false}
+          onChange={setSignalRecordingOnly}
         />
         <MatrixToggle
           label="Pause Entries When Price Feed Is Down"
