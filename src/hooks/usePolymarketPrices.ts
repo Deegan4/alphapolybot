@@ -9,6 +9,7 @@ import {
 } from '@/services/strategies/BtcUpDownStrategy'
 import { useSettingsStore } from '@/stores/settingsStore'
 import type { Market, PriceData } from '@/types'
+import type { WireEvent } from '@/services/api/pmusWire'
 
 // ==========================================
 // TYPES
@@ -130,7 +131,7 @@ export function usePolymarketPrices(): Record<AssetKey, PolymarketAssetState> {
             if (!event || !event.markets?.length) continue
 
             // PM US Up/Down events hold ONE binary market: YES = Up, NO = Down
-            const market = normalizeEventToMarkets(event as any).find(m => m.active && !m.closed)
+            const market = normalizeEventToMarkets(event as unknown as WireEvent).find(m => m.active && !m.closed)
             if (!market) continue
 
             const windowEnd = market.windowEnd

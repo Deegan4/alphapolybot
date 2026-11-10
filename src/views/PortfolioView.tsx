@@ -6,6 +6,7 @@ import { polymarketUSClient } from '@/services/api'
 import { positionLifecycleManager, type PositionStatus } from '@/services/trading'
 import type { Position, Trade } from '@/types'
 import { cn } from '@/utils/cn'
+import type { SpotPosition } from '@/types/api'
 
 const containerVariants = {
   hidden: {},
@@ -362,7 +363,7 @@ export const PortfolioView: React.FC = () => {
  * Spot Portfolio View - Coinbase spot crypto positions
  */
 const SpotPortfolioView: React.FC = () => {
-  const [spotPositions, setSpotPositions] = useState<any[]>([])
+  const [spotPositions, setSpotPositions] = useState<SpotPosition[]>([])
 
   useEffect(() => {
     const updatePositions = async () => {
@@ -424,11 +425,11 @@ const SpotPortfolioView: React.FC = () => {
 /**
  * Spot Position Card Component
  */
-const SpotPositionCard: React.FC<{ position: any }> = ({ position }) => {
+const SpotPositionCard: React.FC<{ position: SpotPosition }> = ({ position }) => {
   const pnlUsd = position.currentPrice * position.quantity - position.costBasis
   const pnlPercent = (pnlUsd / position.costBasis) * 100
   const isProfit = pnlUsd >= 0
-  const holdTimeMs = Date.now() - position.entryTimestamp
+  const holdTimeMs = Date.now() - position.entryTime
   const holdTimeStr = formatHoldTime(holdTimeMs)
 
   return (

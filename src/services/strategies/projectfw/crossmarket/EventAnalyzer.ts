@@ -1,6 +1,7 @@
 import type { Market } from '@/types'
 import type { MarketGroup } from './types'
 import { polymarketUSClient, normalizeEventToMarkets } from '@/services/api'
+import type { WireEvent } from '@/services/api/pmusWire'
 
 /**
  * EventAnalyzer
@@ -32,7 +33,7 @@ export class EventAnalyzer {
     const groups: MarketGroup[] = []
 
     for (const event of events) {
-      const normalized = normalizeEventToMarkets(event as any)
+      const normalized = normalizeEventToMarkets(event as unknown as WireEvent)
       const active = normalized.filter(m => m.active && !m.closed)
       if (active.length < 2) continue
 

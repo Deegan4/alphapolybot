@@ -443,7 +443,9 @@ export class TradingService {
     }
 
     try {
-      return await polymarketUSClient.closePosition(slug, slippageBips)
+      // Reference price for the exchange's slippage tolerance (YES terms)
+      const mid = realtimeService.getPrice(slug)?.mid
+      return await polymarketUSClient.closePosition(slug, slippageBips, mid)
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Close position failed' }
     }

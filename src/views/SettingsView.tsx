@@ -36,25 +36,26 @@ const ShelvedStrategyNotice: React.FC<{ reason?: string }> = ({ reason }) => (
 /**
  * SettingsView - Application settings and configuration
  */
+const SETTINGS_TABS = [
+  { id: 'trading', label: 'Trading Mode' },
+  { id: 'risk', label: 'Risk Management' },
+  { id: 'wallet', label: 'Wallet' },
+  { id: 'llm', label: 'LLM Strategy' },
+  { id: 'dip', label: 'Dip Arbitrage' },
+  { id: 'projectfw', label: 'ProjectFW Arb' },
+  { id: 'btcupdown', label: 'BTC Up/Down' },
+  { id: 'micro', label: 'Micro Momentum' },
+  { id: 'meanrev', label: 'Mean Reversion' },
+  { id: 'alerts', label: 'Alerts' },
+  { id: 'api', label: 'API Keys' },
+]
+
 export const SettingsView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'alerts' | 'api'>('trading')
 
-  const tabs = [
-    { id: 'trading', label: 'Trading Mode' },
-    { id: 'risk', label: 'Risk Management' },
-    { id: 'wallet', label: 'Wallet' },
-    { id: 'llm', label: 'LLM Strategy' },
-    { id: 'dip', label: 'Dip Arbitrage' },
-    { id: 'projectfw', label: 'ProjectFW Arb' },
-    { id: 'btcupdown', label: 'BTC Up/Down' },
-    { id: 'micro', label: 'Micro Momentum' },
-    { id: 'meanrev', label: 'Mean Reversion' },
-    { id: 'alerts', label: 'Alerts' },
-    { id: 'api', label: 'API Keys' },
-  ]
 
   const handleTabKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const tabIds = tabs.map(t => t.id)
+    const tabIds = SETTINGS_TABS.map(t => t.id)
     const currentIndex = tabIds.indexOf(activeTab)
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
       e.preventDefault()
@@ -65,7 +66,7 @@ export const SettingsView: React.FC = () => {
       const prev = tabIds[(currentIndex - 1 + tabIds.length) % tabIds.length]
       setActiveTab(prev as typeof activeTab)
     }
-  }, [activeTab, tabs])
+  }, [activeTab])
 
   return (
     <div className="h-full flex flex-col md:flex-row gap-4">
@@ -76,7 +77,7 @@ export const SettingsView: React.FC = () => {
         aria-label="Settings sections"
         onKeyDown={handleTabKeyDown}
       >
-        {tabs.map(tab => (
+        {SETTINGS_TABS.map(tab => (
           <button
             key={tab.id}
             role="tab"
@@ -103,7 +104,7 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {/* Content — animated tab transitions */}
-      <div className="flex-1 min-h-0 overflow-auto" role="tabpanel" aria-label={tabs.find(t => t.id === activeTab)?.label}>
+      <div className="flex-1 min-h-0 overflow-auto" role="tabpanel" aria-label={SETTINGS_TABS.find(t => t.id === activeTab)?.label}>
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -2014,23 +2015,19 @@ const BtcUpDownSettings: React.FC = () => {
               try {
                 const { polymarketUSClient } = await import('@/services/api')
                 // Use the same slug-based discovery the actual strategy uses
-                const nowSec = Math.floor(Date.now() / 1000)
-                const window15m = Math.floor(nowSec / 900) * 900
-                const slugs = [
-                  { asset: 'BTC', slug: `btc-updown-15m-${window15m}`, dur: '15m' },
-                  { asset: 'ETH', slug: `eth-updown-15m-${window15m}`, dur: '15m' },
-                  { asset: 'SOL', slug: `sol-updown-15m-${window15m}`, dur: '15m' },
-                  { asset: 'XRP', slug: `xrp-updown-15m-${window15m}`, dur: '15m' },
-                ]
+                const { upDownEventSlugs, normalizeEventToMarkets } = await import('@/services/api')
                 const results: string[] = []
-                for (const { asset, slug, dur } of slugs) {
+                for (const asset of ['BTC', 'ETH', 'SOL', 'XRP']) {
+                  const [slug] = upDownEventSlugs(asset, '15m')
+                  if (!slug) continue
                   try {
                     const event = await polymarketUSClient.getEventBySlug(slug)
-                    const activeMarkets = event?.markets?.filter((m: { active: boolean; closed: boolean }) => m.active && !m.closed) || []
-                    if (activeMarkets.length > 0) {
-                      // US API: each market in event is a single outcome with its own price
-                      const prices = activeMarkets.map((m: any) => m.lastTradePrice || m.outcomePrices?.[0] || 0)
-                      results.push(`${asset} ${dur}: ${activeMarkets.length} mkt (${prices.map((p: number) => `${(Number(p) * 100).toFixed(0)}c`).join('/')})`)
+                    if (!event) continue
+                    const active = normalizeEventToMarkets(event as unknown as Parameters<typeof normalizeEventToMarkets>[0])
+                      .filter(m => m.active && !m.closed)
+                    for (const m of active) {
+                      const [up, down] = m.outcomePrices
+                      results.push(`${asset} 15m: Up ${(up * 100).toFixed(0)}c / Down ${(down * 100).toFixed(0)}c`)
                     }
                   } catch { /* skip failed lookups */ }
                 }

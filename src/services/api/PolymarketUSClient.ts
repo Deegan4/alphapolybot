@@ -443,7 +443,7 @@ export class PolymarketUSClient {
       type: 'ORDER_TYPE_LIMIT',
       price: { value: apiPrice.toFixed(2), currency: 'USD' },
       quantity: request.size,
-      tif: toSDKTIF(request.type) as any,
+      tif: toSDKTIF(request.type) as CreateOrderParams['tif'],
       manualOrderIndicator: 'MANUAL_ORDER_INDICATOR_AUTOMATIC',
       synchronousExecution: true,
       maxBlockTime: '5s',
@@ -530,18 +530,26 @@ export class PolymarketUSClient {
     }
   }
 
-  /** Close an entire position on a market */
-  async closePosition(slug: string, slippageBips?: number): Promise<OrderResult> {
+  /**
+   * Close an entire position on a market. The exchange's slippage tolerance
+   * is measured from a reference price, so `slippageBips` only applies when
+   * `currentPrice` (YES terms) is given; without it the close is sent with no
+   * tolerance rather than with a malformed one.
+   */
+  async closePosition(slug: string, slippageBips?: number, currentPrice?: number): Promise<OrderResult> {
     try {
       const sdk = this.getAuthSDK()
-      const params: any = {
+      const params: Parameters<typeof sdk.orders.closePosition>[0] = {
         marketSlug: slug,
         manualOrderIndicator: 'MANUAL_ORDER_INDICATOR_AUTOMATIC',
         synchronousExecution: true,
         maxBlockTime: '5s',
       }
-      if (slippageBips) {
-        params.slippageTolerance = { bips: slippageBips }
+      if (slippageBips && currentPrice != null && currentPrice > 0 && currentPrice < 1) {
+        params.slippageTolerance = {
+          currentPrice: { value: currentPrice.toFixed(4), currency: 'USD' },
+          bips: slippageBips,
+        }
       }
       const resp: ClosePositionResponse = await sdk.orders.closePosition(params)
       return {

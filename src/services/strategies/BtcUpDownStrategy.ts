@@ -19,6 +19,8 @@ import {
 // Re-export types from signalEngine for backward compatibility
 export type { SignalInput, Signal } from './btcupdown/signalEngine'
 import type { SignalInput, Signal } from './btcupdown/signalEngine'
+import type { WireEvent } from '@/services/api/pmusWire'
+import type { RealtimeService } from '@/services/realtime/RealtimeService'
 
 // ==========================================
 // DEFAULTS
@@ -169,7 +171,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
   /** Last computed signal per asset — exposed for dashboard display */
   private _lastSignals = new Map<string, { signal: Signal; windowOpenPrice: number; currentPrice: number }>()
   /** Cached RealtimeService reference (set in start(), null if unavailable) */
-  private realtimeServiceRef: any | null = null
+  private realtimeServiceRef: RealtimeService | null = null
   /** Map clobTokenId → { asset, outcomeIndex } for reverse-lookup on live price reads */
   private slugToOutcomeMap = new Map<string, { asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'; outcomeIndex: number }>()
   // Maps marketId → [outcomeSlug0, outcomeSlug1] for WS subscription and live price lookups
@@ -682,7 +684,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
         if (!event) continue
 
         // One binary market per event; Up = YES, Down = NO on the same slug
-        for (const m of normalizeEventToMarkets(event as any)) {
+        for (const m of normalizeEventToMarkets(event as unknown as WireEvent)) {
           if (m.active && !m.closed) {
             markets.push(m)
             this.marketOutcomeSlugs.set(m.id, m.outcomeSlugs ?? [m.slug, m.slug])
