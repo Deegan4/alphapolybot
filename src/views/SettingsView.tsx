@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixInput, MatrixButton, MatrixToggle, MatrixSelect, MatrixBadge, MatrixNumberInput, AnimatedCounter, MatrixSlider } from '@/components/ui'
 import { useWalletStore, useSettingsStore } from '@/stores'
 import { getRequestMetrics, type BucketMetrics } from '@/services/api'
+import { realtimeService, userChannelService } from '@/services/realtime'
 import { makerFillTracker, type MakerFillStats } from '@/services/trading/MakerFillTracker'
 import { strategyManager } from '@/services/strategies'
 import { tradingService, riskManager } from '@/services/trading'
@@ -2379,10 +2380,26 @@ const AlertSettings: React.FC = () => {
  * Live Polymarket US request usage against the client-side throttle and the
  * documented 25 req/s per-IP limit, with 429 counts and any active pause.
  */
+const feedStateClass = (state: string) =>
+  state === 'connected' ? 'text-agent-green' : state === 'idle' ? 'text-agent-text-muted' : 'text-agent-orange'
+
+/** "3s ago" style age for a feed's last message */
+function formatFeedAge(lastMessageAt: number, now = Date.now()): string {
+  if (!lastMessageAt) return 'never'
+  const s = Math.max(0, Math.round((now - lastMessageAt) / 1000))
+  if (s < 60) return `${s}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  return `${Math.floor(s / 3600)}h ago`
+}
+
 const ApiUsagePanel: React.FC = () => {
   const [m, setM] = useState(() => getRequestMetrics())
+  const [feeds, setFeeds] = useState(() => ({ market: realtimeService.getStatus(), user: userChannelService.getStatus() }))
   useEffect(() => {
-    const id = window.setInterval(() => setM(getRequestMetrics()), 2000)
+    const id = window.setInterval(() => {
+      setM(getRequestMetrics())
+      setFeeds({ market: realtimeService.getStatus(), user: userChannelService.getStatus() })
+    }, 2000)
     return () => window.clearInterval(id)
   }, [])
   const row = (label: string, b: BucketMetrics) => {
@@ -2415,6 +2432,30 @@ const ApiUsagePanel: React.FC = () => {
         <tbody>
           {row('Gateway', m.gateway)}
           {row('API', m.api)}
+        </tbody>
+      </table>
+      <table className="w-full text-xs font-mono mt-3">
+        <thead>
+          <tr className="text-agent-text-muted text-left">
+            <th className="font-normal py-1">Live feed</th>
+            <th className="font-normal text-right">State</th>
+            <th className="font-normal text-right">Last message</th>
+            <th className="font-normal text-right">Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td className="py-0.5">Market data</td>
+            <td className={cn('text-right', feedStateClass(feeds.market.state))}>{feeds.market.state}</td>
+            <td className="text-right">{formatFeedAge(feeds.market.lastMessageAt)}</td>
+            <td className="text-right">{feeds.market.subscriptions} markets, books {feeds.market.booksFresh}/{feeds.market.booksWatched} fresh</td>
+          </tr>
+          <tr>
+            <td className="py-0.5">Private (orders, balance)</td>
+            <td className={cn('text-right', feedStateClass(feeds.user.state))}>{feeds.user.state}</td>
+            <td className="text-right">{formatFeedAge(feeds.user.lastMessageAt)}</td>
+            <td className="text-right">{feeds.user.hasBalance ? 'balance live' : 'balance via REST'}</td>
+          </tr>
         </tbody>
       </table>
       <p className="text-agent-text-muted text-xs font-sans mt-2">

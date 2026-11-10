@@ -34,6 +34,7 @@ export const DiagnosticsBanner: React.FC = () => {
   const [emergencyStopped, setEmergencyStopped] = useState(false)
   const [wsConnected, setWsConnected] = useState(realtimeService.isConnected())
   const [userFeedGaveUp, setUserFeedGaveUp] = useState(userChannelService.hasGivenUp())
+  const [marketFeedGaveUp, setMarketFeedGaveUp] = useState(realtimeService.hasGivenUp())
 
   useEffect(() => {
     return strategyManager.subscribe(setStrategies)
@@ -46,6 +47,7 @@ export const DiagnosticsBanner: React.FC = () => {
       setEmergencyStopped(riskManager.getStatus().emergencyStopped)
       setWsConnected(realtimeService.isConnected())
       setUserFeedGaveUp(userChannelService.hasGivenUp())
+      setMarketFeedGaveUp(realtimeService.hasGivenUp())
     }
     tick()
     const id = setInterval(tick, 3000)
@@ -62,6 +64,7 @@ export const DiagnosticsBanner: React.FC = () => {
     pmCredentials: polymarketUSClient.hasCredentials(),
     wsConnected,
     userFeedGaveUp,
+    marketFeedGaveUp,
   })
 
   if (!banner) return null
@@ -111,6 +114,7 @@ function computeBanner(ctx: {
   pmCredentials: boolean
   wsConnected: boolean
   userFeedGaveUp?: boolean
+  marketFeedGaveUp?: boolean
 }): BannerState | null {
   // 1. Emergency stop (most critical)
   if (ctx.emergencyStopped) {
@@ -190,6 +194,14 @@ function computeBanner(ctx: {
         label: 'Settings',
         onClick: () => { window.location.hash = ''; window.location.pathname = '/settings' },
       },
+    }
+  }
+  if (ctx.pmCredentials && !ctx.wsConnected && ctx.marketFeedGaveUp) {
+    return {
+      severity: 'yellow',
+      message: 'MARKET DATA FEED OFFLINE',
+      detail: 'Stopped reconnecting after repeated failures — live prices and order books fell back to REST.',
+      action: { label: 'Retry', onClick: () => { void realtimeService.retry() } },
     }
   }
   if (ctx.pmCredentials && !ctx.wsConnected) {

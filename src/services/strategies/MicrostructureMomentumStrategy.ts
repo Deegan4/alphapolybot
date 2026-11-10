@@ -79,6 +79,9 @@ export function signalSlugFor(market: Market): string | undefined {
  * - Aggressive buying/selling pressure detected via compositeSignal
  * - Tight SL/TP and short hold time (these are momentum scalps)
  */
+/** Most candidate markets to stream full order books for at once */
+const MAX_WATCHED_BOOKS = 10
+
 export class MicrostructureMomentumStrategy extends BaseStrategy {
   name = 'Micro Momentum'
   description = 'Order flow-based directional trading using bid/ask imbalance signals'
@@ -89,6 +92,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
   // Market tracking
   private trackedMarkets = new Map<string, Market>()
+  private watchedBooks: string[] = []
   private subscribedSlugs = new Set<string>()
   private positionMarkets = new Set<string>() // Markets we already have positions in
   private lastTradeTimes = new Map<string, number>() // marketId → timestamp
@@ -167,6 +171,8 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       } catch { /* ignore */ }
     }
 
+    realtimeService.unwatchBooks?.(this.watchedBooks)
+    this.watchedBooks = []
     this.trackedMarkets.clear()
     this.subscribedSlugs.clear()
     this.positionMarkets.clear()
@@ -180,6 +186,17 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
   // ==========================================
   // MARKET DISCOVERY
   // ==========================================
+
+  /** Stream a candidate's full order book; keeps only the most recent few */
+  private watchBook(slug: string): void {
+    if (this.watchedBooks.includes(slug)) return
+    this.watchedBooks.push(slug)
+    realtimeService.watchBooks?.([slug])
+    while (this.watchedBooks.length > MAX_WATCHED_BOOKS) {
+      const evicted = this.watchedBooks.shift()!
+      realtimeService.unwatchBooks?.([evicted])
+    }
+  }
 
   private async refreshMarkets(): Promise<void> {
     if (!this._enabled || this._status !== 'running') return
@@ -298,7 +315,10 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       const currentPrice = market.outcomePrices[outcomeIndex]
       if (!currentPrice || currentPrice <= 0 || currentPrice >= 1) continue
 
-      // 5. Check order book depth for fills
+      // 5. Check order book depth for fills. A market that gets this far is a
+      // live candidate: stream its full book so the next check (and the entry
+      // itself) reads depth from memory instead of REST.
+      this.watchBook(market.slug)
       let depthOk = true
       try {
         const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')

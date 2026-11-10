@@ -32,6 +32,18 @@ export function chunkSlugs(slugs: string[], size = WS_MAX_MARKETS_PER_SUBSCRIPTI
   return out
 }
 
+/** Connection summary for diagnostics (Settings → API) */
+export interface FeedStatus {
+  state: 'connected' | 'reconnecting' | 'offline' | 'idle'
+  /** ms timestamp of the last message, 0 if none yet */
+  lastMessageAt: number
+  /** Markets subscribed for prices */
+  subscriptions: number
+  /** Markets with a full order book streamed, and how many of those are fresh */
+  booksWatched: number
+  booksFresh: number
+}
+
 type PriceUpdateCallback = (slug: string, price: PriceData) => void
 type ConnectionCallback = (status: 'connected' | 'disconnected' | 'error') => void
 
@@ -43,6 +55,11 @@ export class RealtimeService {
   private reconnectTimeout: number | null = null
   private cleanupInterval: number | null = null
   private subscriptions = new Set<string>()
+  /** Set by disconnect() so the resulting close does not schedule a reconnect */
+  private closingIntentionally = false
+  /** True after max reconnect attempts failed; cleared by a successful open */
+  private gaveUp = false
+  private everConnected = false
   /** Markets that also get the full order book (MARKET_DATA), not just BBO */
   private bookSubscriptions = new Set<string>()
   private books = new Map<string, { book: OrderBook; receivedAt: number }>()
@@ -67,6 +84,7 @@ export class RealtimeService {
       return false
     }
 
+    this.closingIntentionally = false
     return new Promise((resolve) => {
       try {
         this.ws = new MarketsWebSocket({
@@ -78,6 +96,8 @@ export class RealtimeService {
         this.ws.on('open', () => {
           console.log('[RealtimeService] WebSocket connected')
           this.reconnectAttempts = 0
+          this.gaveUp = false
+          this.everConnected = true
           this.messageCount = 0
           this.startCleanupInterval()
           this.notifyConnectionCallbacks('connected')
@@ -116,6 +136,7 @@ export class RealtimeService {
         this.ws.on('close', () => {
           console.log('[RealtimeService] WebSocket disconnected')
           this.notifyConnectionCallbacks('disconnected')
+          if (this.closingIntentionally) return
           this.attemptReconnect()
         })
 
@@ -128,6 +149,9 @@ export class RealtimeService {
   }
 
   disconnect(): void {
+    this.closingIntentionally = true
+    this.everConnected = false
+    this.gaveUp = false
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
@@ -244,6 +268,33 @@ export class RealtimeService {
     return this.lastMessageTime
   }
 
+  /** Whether reconnecting stopped after the maximum attempts */
+  hasGivenUp(): boolean {
+    return this.gaveUp && !this.isConnected()
+  }
+
+  /** Manual retry after giving up: start a fresh round of reconnect attempts */
+  async retry(): Promise<boolean> {
+    this.reconnectAttempts = 0
+    this.gaveUp = false
+    return this.connect()
+  }
+
+  getStatus(now = Date.now()): FeedStatus {
+    let booksFresh = 0
+    for (const slug of this.bookSubscriptions) {
+      const entry = this.books.get(slug)
+      if (entry && now - entry.receivedAt <= LIVE_BOOK_MAX_AGE_MS) booksFresh++
+    }
+    return {
+      state: this.isConnected() ? 'connected' : this.hasGivenUp() ? 'offline' : this.everConnected ? 'reconnecting' : 'idle',
+      lastMessageAt: this.lastMessageTime,
+      subscriptions: this.subscriptions.size,
+      booksWatched: this.bookSubscriptions.size,
+      booksFresh: this.isConnected() ? booksFresh : 0,
+    }
+  }
+
   // ─── Private ────────────────────────────────────────────
 
   private nextRequestId(): string {
@@ -357,6 +408,7 @@ export class RealtimeService {
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('[RealtimeService] Max reconnect attempts reached')
+      this.gaveUp = true
       return
     }
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts)

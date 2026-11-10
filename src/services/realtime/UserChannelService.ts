@@ -44,6 +44,8 @@ export class UserChannelService {
   private closingIntentionally = false
   /** True after max reconnect attempts failed; cleared by a successful open */
   private gaveUp = false
+  private everConnected = false
+  private lastMessageTime = 0
   /** Latest pushed balance; null until the first snapshot or after the socket closes */
   private latestBalance: { balance: number; buyingPower: number; at: number } | null = null
 
@@ -80,6 +82,7 @@ export class UserChannelService {
           console.log('[UserChannel] Private WebSocket connected')
           this.reconnectAttempts = 0
           this.gaveUp = false
+          this.everConnected = true
           this.messageCount = 0
           this.notifyConnectionCallbacks('connected')
 
@@ -100,6 +103,7 @@ export class UserChannelService {
         // ─── Order Events ──────────────────────────────────
         this.ws.on('orderSnapshot', (data: OrderSnapshot) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           if (this.messageCount === 1) {
             console.log('[UserChannel] First message received — pipeline active')
           }
@@ -109,6 +113,7 @@ export class UserChannelService {
 
         this.ws.on('orderUpdate', (data: OrderUpdate) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const exec = data.orderSubscriptionUpdate.execution
           const mapped = this.mapExecution(exec)
 
@@ -128,12 +133,14 @@ export class UserChannelService {
         // ─── Position Events ───────────────────────────────
         this.ws.on('positionSnapshot', (data: PositionSnapshot) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const positions = data.positionSubscriptionSnapshot.positions || {}
           console.log(`[UserChannel] Position snapshot: ${Object.keys(positions).length} positions`)
         })
 
         this.ws.on('positionUpdate', (data: PositionUpdate) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const update = data.positionSubscriptionUpdate
           const mapped: USPositionUpdate = {
             marketSlug: update.marketSlug,
@@ -150,6 +157,7 @@ export class UserChannelService {
         // ─── Balance Events ────────────────────────────────
         this.ws.on('accountBalanceSnapshot', (data: AccountBalanceSnapshot) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const snap = data.accountBalanceSubscriptionSnapshot
           console.log(`[UserChannel] Balance snapshot: $${snap.balance} (buying power: $${snap.buyingPower})`)
           this.notifyBalanceCallbacks(snap.balance, snap.buyingPower)
@@ -157,11 +165,13 @@ export class UserChannelService {
 
         this.ws.on('accountBalanceUpdate', (data: AccountBalanceUpdate) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const update = data.accountBalanceSubscriptionUpdate
           this.notifyBalanceCallbacks(update.balance, update.buyingPower)
         })
 
         this.ws.on('heartbeat', () => {
+          this.lastMessageTime = Date.now()
           // SDK handles keepalive internally
         })
 
@@ -190,6 +200,8 @@ export class UserChannelService {
 
   disconnect(): void {
     this.closingIntentionally = true
+    this.everConnected = false
+    this.gaveUp = false
     this.latestBalance = null
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout)
@@ -268,6 +280,14 @@ export class UserChannelService {
   /** Whether reconnecting stopped after the maximum attempts (REST fallback only) */
   hasGivenUp(): boolean {
     return this.gaveUp && !this.isConnected()
+  }
+
+  getStatus(): { state: 'connected' | 'reconnecting' | 'offline' | 'idle'; lastMessageAt: number; hasBalance: boolean } {
+    return {
+      state: this.isConnected() ? 'connected' : this.hasGivenUp() ? 'offline' : this.everConnected ? 'reconnecting' : 'idle',
+      lastMessageAt: this.lastMessageTime,
+      hasBalance: this.getLatestBalance() !== null,
+    }
   }
 
   /** Manual retry after giving up: start a fresh round of reconnect attempts */

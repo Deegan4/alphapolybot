@@ -79,3 +79,33 @@ describe('UserChannelService give-up state', () => {
     expect(svc.hasGivenUp()).toBe(false)
   })
 })
+
+describe('RealtimeService give-up state and status', () => {
+  it('reports offline after max attempts, with fresh-book counts while connected', () => {
+    const svc = new RealtimeService()
+    const internals = svc as unknown as Internals & { reconnectAttempts: number; maxReconnectAttempts: number; attemptReconnect: () => void }
+    expect(svc.getStatus().state).toBe('idle')
+
+    internals.ws = { isConnected: true, subscribeMarketData: vi.fn(), subscribeMarketDataLite: vi.fn() }
+    svc.watchBooks(['a', 'b'])
+    internals.handleMarketData(md('a'))
+    expect(svc.getStatus()).toMatchObject({ state: 'connected', booksWatched: 2, booksFresh: 1 })
+
+    internals.ws.isConnected = false
+    internals.reconnectAttempts = internals.maxReconnectAttempts
+    internals.attemptReconnect()
+    expect(svc.hasGivenUp()).toBe(true)
+    expect(svc.getStatus()).toMatchObject({ state: 'offline', booksFresh: 0 })
+  })
+})
+
+describe('UserChannelService status', () => {
+  it('is idle before connecting and offline after giving up', () => {
+    const svc = new UserChannelService()
+    expect(svc.getStatus()).toEqual({ state: 'idle', lastMessageAt: 0, hasBalance: false })
+    const internals = svc as unknown as { reconnectAttempts: number; maxReconnectAttempts: number; attemptReconnect: () => void }
+    internals.reconnectAttempts = internals.maxReconnectAttempts
+    internals.attemptReconnect()
+    expect(svc.getStatus().state).toBe('offline')
+  })
+})
