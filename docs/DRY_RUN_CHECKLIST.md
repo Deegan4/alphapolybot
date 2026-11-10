@@ -19,6 +19,10 @@ The public gateway was exercised live on 2026-11-08 (`npm run smoke` in `mcp-ser
 | Fees | **Documented:** taker fee Θ × contracts × p × (1 − p), Θ = 0.095 at tier 1. Sizing and take-profit now use it. |
 | WebSockets | **Documented:** both feeds need the API key; message shapes match the code; at most 100 markets per subscription (now chunked). Not verified live. |
 | Latency reject | **Documented:** "Order Processing Max Delay Exceeded" is transient. The bot resubmits once. |
+| Private feed balance | **Assumed** to be in the same dollar units as the REST balance; neither the SDK types nor the docs say. Step 2 confirms it. |
+| Full order book stream, trade stream | **Documented** message shapes (each book update carries the whole top of the book; trades carry the taker's side and intent). Not verified live. The lite feed's `bidDepth`/`askDepth` are in the docs but not the SDK types. |
+| Heartbeats | **Unknown interval.** The stall watchdog only arms after it has seen two heartbeats; if the server sends none it never fires. |
+| Up/Down settlement | The settlement endpoint was verified live for expired markets. **Assumed:** it returns 1 when the market's first outcome won, and that the first outcome is "Up" when the recorder says so. Step 2 confirms it. |
 
 Rows not marked verified live are the point of this checklist.
 
@@ -57,6 +61,14 @@ Settings → Trading: confirm **Dry run is on**. Connect your key in Settings �
 - [ ] **Up/Down prices.** The dashboard Up and Down prices add up to about $1 and track the market page.
 - [ ] **Micro Momentum.** The refresh log shows a nonzero `eligible after filters` count within a few refreshes. Coverage grows as stats are cached. A `Gateway rate limit hit` warning means lookups paused for 5 minutes.
 - [ ] **Signals in both directions.** Over time you see Micro Momentum SIGNAL lines for both YES and NO.
+- [ ] **Live balance.** Settings → API shows the private feed `connected` with `balance live`, and the header balance still matches the Polymarket US app. A balance off by a factor (100×, for example) means the feed uses different units from REST: report it and do not trade.
+- [ ] **Feed status.** Settings → API shows both feeds `connected` with a last message under a minute old. `stall restarts` should stay at 0 on a healthy connection; a count that climbs every minute or so means the heartbeat assumption is wrong.
+- [ ] **Order books in memory.** With BTC Up/Down or Micro Momentum running, the market-data row shows `books N/M fresh` with N close to M on active markets. `0/M` while prices update means the full-book messages are not arriving or have a different shape.
+- [ ] **Request rates.** The same panel stays well under 8/s (gateway) and 15/s (API), with 0 in the 429 and Dropped columns. Balance and open-order calls should be rare while the private feed is connected.
+- [ ] **Feed loss.** Turn the network off for a few minutes. The dashboard shows MARKET DATA FEED OFFLINE or PRIVATE FEED OFFLINE once reconnecting stops; **Retry** brings the feed back after the network returns. With "Pause Entries When Price Feed Is Down" on (and dry run off, in step 3), no new entries are placed while the market-data feed is down.
+- [ ] **Micro signals.** Dashboard → Analytics → Microstructure signals lists tracked markets with signals of both signs, `full book` in the last column, and trade-flow values on markets that are trading. All signals negative, or `level counts` everywhere, means depth is not reaching the signal.
+- [ ] **Signal reports fill in.** After 30–60 minutes the "If entered at each threshold" table has trades, and "Crypto Up/Down signals" has resolved windows. Treat both as evidence only after days of data, not from this session.
+- [ ] **Up/Down results.** In the Crypto Up/Down panel, windows move from "provisional from the bot's spot price" to "settled by the exchange" within about 20 minutes of ending. Check two or three finished windows against the market page: the winner must match. A mismatch on a clear (not near-tie) window means the settlement mapping is wrong.
 - [ ] **No console errors** other than expected network retries.
 
 ## 3. One tiny live order per path

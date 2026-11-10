@@ -336,6 +336,21 @@ export class PolymarketUSClient {
   }
 
   /**
+   * YES settlement price of a resolved market (1 = YES won, 0 = NO won), or
+   * null when the market has not settled yet or the lookup fails.
+   */
+  async getSettlementPrice(slug: string): Promise<number | null> {
+    try {
+      const st = (await this.getSDK().markets.settlement(slug)) as unknown as { settlement?: number | string | null }
+      if (st.settlement == null || st.settlement === '') return null
+      const yes = Number(st.settlement)
+      return Number.isFinite(yes) ? yes : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * Single market by slug. Expired markets are no longer served by the
    * market endpoint, so fall back to the settlement endpoint and report the
    * market closed with outcomePrices [yesSettle, noSettle].

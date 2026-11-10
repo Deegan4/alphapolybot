@@ -72,3 +72,78 @@ describe('confidenceReport', () => {
     expect(confidenceReport(samples, [0.55], { maxPrice: 0.9 })[0].n).toBe(1)
   })
 })
+
+import { confidenceHoldout, EXCHANGE_RETRY_MS, EXCHANGE_SETTLE_WINDOW_MS } from '../BtcSignalRecorder'
+
+describe('exchange settlement', () => {
+  const withSlug = (over: Partial<BtcSignalSample> = {}) => sample({ slug: 'btc-updown-15m-x', yesMeansUp: true, ...over })
+
+  it('overrides the provisional spot result and counts disagreements', () => {
+    const rec = new BtcSignalRecorder(false)
+    rec.record(withSlug())                                  // signalled UP
+    rec.record(withSlug({ t: 5, direction: 'down' }))
+    rec.resolve('BTC', 100_010, 901_000)                    // spot says up won
+    expect(rec.getSamples().map(s => [s.won, s.source])).toEqual([[true, 'spot'], [false, 'spot']])
+    expect(rec.getSourceCounts()).toEqual({ exchange: 0, spot: 1, disagreed: 0 })
+
+    rec.settleFromExchange('w1', 0, 960_000)                // exchange: YES (= Up) lost
+    expect(rec.getSamples().map(s => [s.won, s.source])).toEqual([[false, 'exchange'], [true, 'exchange']])
+    expect(rec.getSourceCounts()).toEqual({ exchange: 1, spot: 0, disagreed: 1 })
+  })
+
+  it('respects which side YES is, and ignores a non-binary settlement', () => {
+    const rec = new BtcSignalRecorder(false)
+    rec.record(withSlug({ yesMeansUp: false }))             // YES = Down; signalled UP
+    rec.settleFromExchange('w1', 0.5, 901_000)
+    expect(rec.getSamples()[0].won).toBeUndefined()
+    rec.settleFromExchange('w1', 0, 901_000)                // YES (Down) lost → Up won
+    expect(rec.getSamples()[0].won).toBe(true)
+  })
+
+  it('lists ended, unsettled markets, with a retry delay and a deadline', () => {
+    const rec = new BtcSignalRecorder(false)
+    rec.record(withSlug())
+    rec.record(sample({ marketId: 'noslug' }))              // cannot be settled by the exchange
+    expect(rec.marketsAwaitingExchange(899_000)).toEqual([])
+    expect(rec.marketsAwaitingExchange(900_000)).toEqual([{ marketId: 'w1', slug: 'btc-updown-15m-x' }])
+    expect(rec.marketsAwaitingExchange(900_000 + EXCHANGE_RETRY_MS - 1)).toEqual([])
+    expect(rec.marketsAwaitingExchange(900_000 + EXCHANGE_RETRY_MS)).toHaveLength(1)
+    expect(rec.marketsAwaitingExchange(900_000 + EXCHANGE_SETTLE_WINDOW_MS + 1)).toEqual([])
+    rec.settleFromExchange('w1', 1, 950_000)
+    expect(rec.marketsAwaitingExchange(950_000 + EXCHANGE_RETRY_MS)).toEqual([])
+  })
+
+  it('keeps a tie or a late window for the exchange, and prunes it after the deadline', () => {
+    const rec = new BtcSignalRecorder(false)
+    rec.record(withSlug())
+    rec.resolve('BTC', 100_000, 901_000)                    // exact tie
+    expect(rec.getCounts()).toEqual({ total: 1, resolved: 0 })
+    rec.prune(900_000 + EXCHANGE_SETTLE_WINDOW_MS + 1)
+    expect(rec.getCounts().total).toBe(0)
+  })
+})
+
+describe('confidenceHoldout', () => {
+  const windows = (count: number, won: (k: number) => boolean): BtcSignalSample[] =>
+    Array.from({ length: count }, (_, k) => ({ ...sample({ marketId: `w${k}`, t: k * 1000, windowEndMs: k * 1000 + 500, confidence: 0.7 }), won: won(k) }))
+
+  it('confirms a level that also wins on later windows', () => {
+    const result = confidenceHoldout(windows(90, k => k % 4 !== 0), [0.6], { theta: 0 })!
+    expect(result.train).toMatchObject({ minConfidence: 0.6, n: 60 })
+    expect(result.test.n).toBe(30)
+    expect(result.confirmed).toBe(true)
+  })
+
+  it('does not confirm a level that only won early', () => {
+    const result = confidenceHoldout(windows(90, k => k < 60), [0.6], { theta: 0 })!
+    expect(result.train.avgNet).toBeGreaterThan(0)
+    expect(result.test.avgNet).toBeLessThan(0)
+    expect(result.confirmed).toBe(false)
+  })
+
+  it('is null without enough profitable early windows', () => {
+    expect(confidenceHoldout([])).toBeNull()
+    expect(confidenceHoldout(windows(20, () => true), [0.6])).toBeNull()
+    expect(confidenceHoldout(windows(90, () => false), [0.6])).toBeNull()
+  })
+})

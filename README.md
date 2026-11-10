@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-603_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-610_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
@@ -142,7 +142,7 @@ It covers the strategies, the layered architecture, the risk stack, the test sui
 
 - **Every market is one binary order book on one slug, quoted YES-side.** NO prices are derived (NO ask = 1 − YES bid). An event's markets are separate candidates (teams, price ranges, dates), each its own Yes/No market.
 - **BBO and book responses are wrapped in `marketData`**, markets carry inline quotes, tick size and fee coefficient, and expose no volume or liquidity. Volume and liquidity are USD proxies from each market's BBO (shares traded and open interest).
-- **Microstructure signal inputs**: the imbalance signal uses real resting size — the top 5 levels per side from the full book, which Microstructure Momentum now streams for every market it tracks (the lite feed's level counts, `bidDepth`/`askDepth`, are the fallback elsewhere). Before this it was fed a size of 1 per side, so it compared prices rather than depth and could never read bullish. The trade stream adds net aggressive flow over the last minute; Microstructure Momentum skips an entry when that flow runs 0.3 or more against the book signal. Dashboard → Analytics shows each tracked market's live signal, imbalance and trade flow against the entry threshold. The strategy also records every signal with the price 5 minutes later (in dry run too, last 5,000 samples kept in the browser), and the same panel reports what entering at each threshold from 0.1 to 0.5 would have returned after spread and taker fees. Samples overlap, so that view is a guide rather than a backtest. The default view instead replays the strategy's own exits (stop-loss, take-profit, hold limit, cooldown) over the recorded prices, one non-overlapping trade per market at a time. The threshold suggestion is chosen on the first two-thirds of the recorded period (at least 30 simulated trades, positive after fees) and only offered for one-click apply if it is also positive on at least 10 trades in the last third, which played no part in choosing it. The panel also compares the replay with the strategy's logged trades over the same period, and shows a stop-loss × take-profit grid at the current threshold. A simulated trade still open at the last reading is closed at that price. BTC Up/Down records its signals the same way: each signal's direction, confidence and outcome price, settled from the bot's spot price just after the window ends, with a report of win rate and held-to-resolution return per confidence level (one entry per window, inside the entry-price limits). Samples can be exported as CSV.
+- **Microstructure signal inputs**: the imbalance signal uses real resting size — the top 5 levels per side from the full book, which Microstructure Momentum now streams for every market it tracks (the lite feed's level counts, `bidDepth`/`askDepth`, are the fallback elsewhere). Before this it was fed a size of 1 per side, so it compared prices rather than depth and could never read bullish. The trade stream adds net aggressive flow over the last minute; Microstructure Momentum skips an entry when that flow runs 0.3 or more against the book signal. Dashboard → Analytics shows each tracked market's live signal, imbalance and trade flow against the entry threshold. The strategy also records every signal with the price 5 minutes later (in dry run too, last 5,000 samples kept in the browser), and the same panel reports what entering at each threshold from 0.1 to 0.5 would have returned after spread and taker fees. Samples overlap, so that view is a guide rather than a backtest. The default view instead replays the strategy's own exits (stop-loss, take-profit, hold limit, cooldown) over the recorded prices, one non-overlapping trade per market at a time. The threshold suggestion is chosen on the first two-thirds of the recorded period (at least 30 simulated trades, positive after fees) and only offered for one-click apply if it is also positive on at least 10 trades in the last third, which played no part in choosing it. The panel also compares the replay with the strategy's logged trades over the same period, and shows a stop-loss × take-profit grid at the current threshold. A simulated trade still open at the last reading is closed at that price. BTC Up/Down records its signals the same way: each signal's direction, confidence and outcome price, settled by the exchange's own settlement when it posts (a provisional result from the bot's spot price fills in until then), with a report of win rate and held-to-resolution return per confidence level (one entry per window, inside the entry-price limits). A confidence level is suggested for one-click apply only if it was chosen on the first two-thirds of windows and is still profitable on the rest. Samples can be exported as CSV.
 - **Rate limit: 25 requests per second per IP**, shared by every key on that IP. On the public gateway a burst also draws a Cloudflare ban (HTTP 429, error 1015) that lasts minutes. Every SDK call goes through a shared token bucket (`requestThrottle.ts`): 8 requests per second for the gateway and 15 for the authenticated API, with a pause after a 429 that starts at 2 seconds and doubles while the ban lasts. Per-market stats lookups are budgeted and cached on top of that. A request that would wait more than 15s (gateway) or 10s (API) in the queue, as during a long ban, is dropped with `RequestDroppedError` instead of firing late on stale prices; cancels are never dropped. Balance comes from the private WebSocket's balance stream when it is live (also used for the pre-order buying-power check), with REST every 2 minutes as a safety net. Likewise the open-order poll for resting GTD orders only hits REST every 3 minutes while the private feed is live (every 60s otherwise), and if the private feed stops reconnecting the dashboard shows a PRIVATE FEED OFFLINE banner with a Retry button. BTC Up/Down also streams the full order book for the windows it is tracking, so the depth check before an entry reads it from memory (when under 5s old) instead of calling REST. Microstructure Momentum does the same for all its tracked markets. If the market-data feed stops reconnecting, the dashboard shows a MARKET DATA FEED OFFLINE banner with Retry, and Settings → API lists both live feeds with their state, last message time and how many streamed order books are fresh. Each feed has a watchdog: once the server's heartbeat interval is known, silence longer than 3 intervals (60s minimum) reopens the connection. Settings → Trading → Order Execution has an optional switch that blocks new entries while the market-data feed is down (exits still go out). Settings → API shows live request rates, 429 counts, dropped requests and any active pause per host. BTC Up/Down fetches the next window shortly before rollover (staggered per asset) instead of every asset at once after it.
 - **Fees are Θ × contracts × p × (1 − p)** (Θ = 0.095 at tier 1, published per market as `feeCoefficient`): about 4.75% of the stake at 50¢. Kelly sizing and take-profit / time-exit decisions use it (`pmusFees.ts`).
 - **Orders need whole contracts** unless a market's `minimumTradeQty` is below 1, so order sizes are rounded down to that step.
@@ -196,7 +196,7 @@ npm run dev        # Dev server on :4000
 npm run dev            # Vite dev server on :4000
 npm run dev:strict-csp # Dev with strict CSP (no Fast Refresh)
 npm run build          # Production build (Vite 7 + esbuild)
-npm test               # 603 tests (Vitest)
+npm test               # 610 tests (Vitest)
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
 npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
@@ -205,7 +205,7 @@ npm run preview        # Preview production build
 
 ## Testing
 
-603 tests across 33 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
+610 tests across 33 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
@@ -229,7 +229,7 @@ npm run preview        # Preview production build
 | requestThrottle | 13 | Token bucket pacing, separate gateway/API buckets, escalating 429 cooldown, request metrics, stale-request dropping (cancels exempt) |
 | LiveFeeds | 15 | Pushed order books for watched markets (freshness, disconnect), slow REST order poll while the feed is live, feed give-up, retry and status for both feeds, stall watchdog, depth imbalance from real sizes, trade flow and its entry veto |
 | SignalRecorder | 20 | Signal samples resolved at the 5-minute horizon, return after spread and fees for YES and NO entries, per-threshold report, exit-rule replay (stop-loss, take-profit, hold limit, cooldown, data gaps), held-out threshold suggestion, stop-loss/take-profit grid, logged-trade summary, CSV export |
-| BtcSignalRecorder | 6 | Up/Down signals settled from spot after the window ends (grace period, ties), held-to-resolution return after the entry fee, per-confidence report with one entry per window |
+| BtcSignalRecorder | 13 | Up/Down signals settled from spot after the window ends (grace period, ties), held-to-resolution return after the entry fee, per-confidence report with one entry per window, exchange settlement overriding spot, held-out confidence suggestion |
 | WalletLiveBalance | 3 | Pushed balance applied while connected; REST balance only as a 2-min fallback while the private feed is live |
 | pmusFees | 6 | Documented taker fee Θ·C·p(1−p), round-trip fee, fee-aware Kelly |
 | pmusOrders | 15 | Quantity step rounding, decimal position fields, USD balance, latency-reject detection, 100-market WS chunks, maker entry price |
@@ -244,7 +244,7 @@ npm run preview        # Preview production build
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
 
 ```bash
-npm test    # Runs all 603 tests in ~5s
+npm test    # Runs all 610 tests in ~5s
 ```
 
 ## MCP Server
@@ -336,7 +336,7 @@ Configured for Netlify with GitHub Actions CI:
 # 1. npm ci
 # 2. npm run lint
 # 3. npm run typecheck
-# 4. npm test (603 tests)
+# 4. npm test (610 tests)
 # 5. npm run build
 ```
 

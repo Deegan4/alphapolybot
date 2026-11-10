@@ -4,9 +4,10 @@
  * evidence.
  *
  * These markets are held to resolution, so the outcome is binary: did the
- * asset finish the window above its reference price? It is read from the
- * strategy's own spot feed shortly after the window ends, which can differ
- * from the exchange's settlement source on a near-tie.
+ * asset finish the window above its reference price? The exchange's own
+ * settlement decides it when available. Until then (settlement can lag the
+ * window end) a provisional result comes from the strategy's spot feed just
+ * after the window ends, which can be wrong on a near-tie.
  */
 
 import { takerCostPerContract, PMUS_DEFAULT_TAKER_THETA } from './pmusFees'
@@ -15,6 +16,15 @@ import { takerCostPerContract, PMUS_DEFAULT_TAKER_THETA } from './pmusFees'
 export const MAX_BTC_SAMPLES = 5000
 /** A spot reading this long after the window end is too late to stand in for the settlement price (ms) */
 export const RESOLVE_GRACE_MS = 90_000
+
+/** Keep asking the exchange for a window's settlement this long after it ends (ms) */
+export const EXCHANGE_SETTLE_WINDOW_MS = 20 * 60_000
+/** Wait this long between settlement lookups for the same market (ms) */
+export const EXCHANGE_RETRY_MS = 30_000
+/** Windows a confidence level needs in the earlier data before it can be suggested */
+export const MIN_WINDOWS_TO_SUGGEST = 30
+/** Held-out windows a suggestion needs before it counts as confirmed */
+export const MIN_HOLDOUT_WINDOWS = 10
 
 const STORAGE_KEY = 'apb:btc-signal-samples'
 
@@ -32,8 +42,46 @@ export interface BtcSignalSample {
   /** Window reference price and end time */
   refPrice: number
   windowEndMs: number
+  /** Market slug, and whether its YES side is the "Up" outcome (for exchange settlement) */
+  slug?: string
+  yesMeansUp?: boolean
   /** Whether the signalled direction won; unset until the window has ended */
   won?: boolean
+  /** Where `won` came from: the exchange's settlement, or the bot's spot price (provisional) */
+  source?: 'exchange' | 'spot'
+  /** The spot-price verdict, kept when the exchange later settles, to measure how often they differ */
+  spotWon?: boolean
+}
+
+export interface ConfidenceHoldout {
+  /** Best confidence level on the earlier windows */
+  train: ConfidenceRow
+  /** The same level on the later windows, which played no role in choosing it */
+  test: ConfidenceRow
+  confirmed: boolean
+}
+
+/**
+ * Choose the confidence level on the first `trainShare` of resolved windows
+ * (by end time), then score it on the rest. Null when no level has enough
+ * profitable windows in the earlier part.
+ */
+export function confidenceHoldout(
+  samples: BtcSignalSample[],
+  levels: number[] = [0.55, 0.6, 0.65, 0.7, 0.8],
+  opts: { minPrice?: number; maxPrice?: number; theta?: number } = {},
+  trainShare = 2 / 3,
+): ConfidenceHoldout | null {
+  const resolved = samples.filter(s => s.won != null)
+  const ends = [...new Set(resolved.map(s => s.windowEndMs))].sort((a, b) => a - b)
+  if (ends.length === 0) return null
+  const cutoff = ends[Math.min(ends.length - 1, Math.floor(ends.length * trainShare))]
+  const trainRows = confidenceReport(resolved.filter(s => s.windowEndMs < cutoff), levels, opts)
+  const ok = trainRows.filter(r => r.n >= MIN_WINDOWS_TO_SUGGEST && r.avgNet > 0)
+  if (ok.length === 0) return null
+  const train = ok.reduce((best, r) => (r.avgNet > best.avgNet ? r : best))
+  const [test] = confidenceReport(resolved.filter(s => s.windowEndMs >= cutoff), [train.minConfidence], opts)
+  return { train, test, confirmed: test.n >= MIN_HOLDOUT_WINDOWS && test.avgNet > 0 }
 }
 
 export interface ConfidenceRow {
@@ -89,6 +137,7 @@ export class BtcSignalRecorder {
   private samples: BtcSignalSample[] = []
   private loaded = false
   private lastPersist = 0
+  private lastExchangeTry = new Map<string, number>()
 
   constructor(private readonly persist = true) {}
 
@@ -116,12 +165,75 @@ export class BtcSignalRecorder {
     if (!(spotPrice > 0)) return
     this.samples = this.samples.filter(s => {
       if (s.asset !== asset || s.won != null || s.windowEndMs > now) return true
-      if (now - s.windowEndMs > RESOLVE_GRACE_MS) return false
-      if (spotPrice === s.refPrice) return false // tie: settlement rule unknown, leave it out
+      // Samples the exchange can still settle are kept past the grace period
+      const exchangeCanSettle = s.slug != null && s.yesMeansUp != null && now - s.windowEndMs <= EXCHANGE_SETTLE_WINDOW_MS
+      if (now - s.windowEndMs > RESOLVE_GRACE_MS) return exchangeCanSettle
+      if (spotPrice === s.refPrice) return exchangeCanSettle // tie: only the exchange can call it
       s.won = (spotPrice > s.refPrice) === (s.direction === 'up')
+      s.spotWon = s.won
+      s.source = 'spot'
       return true
     })
     this.save(now, true)
+  }
+
+  /**
+   * Markets whose window has ended and that the exchange has not settled in
+   * our records yet, oldest first, skipping any tried within EXCHANGE_RETRY_MS.
+   * Marks the returned ones as tried.
+   */
+  marketsAwaitingExchange(now: number, limit = 3): Array<{ marketId: string; slug: string }> {
+    this.load()
+    const out = new Map<string, string>()
+    for (const s of this.samples) {
+      if (out.size >= limit) break
+      if (!s.slug || s.yesMeansUp == null || s.source === 'exchange') continue
+      if (s.windowEndMs > now || now - s.windowEndMs > EXCHANGE_SETTLE_WINDOW_MS) continue
+      if (now - (this.lastExchangeTry.get(s.marketId) ?? -Infinity) < EXCHANGE_RETRY_MS) continue
+      out.set(s.marketId, s.slug)
+    }
+    for (const id of out.keys()) this.lastExchangeTry.set(id, now)
+    return [...out].map(([marketId, slug]) => ({ marketId, slug }))
+  }
+
+  /** Apply the exchange's settlement (YES price 1 or 0) to every sample of a market */
+  settleFromExchange(marketId: string, yesSettlement: number, now: number): void {
+    this.load()
+    if (yesSettlement !== 0 && yesSettlement !== 1) return // not a clean binary result: leave as is
+    for (const s of this.samples) {
+      if (s.marketId !== marketId || s.yesMeansUp == null) continue
+      const upWon = (yesSettlement === 1) === s.yesMeansUp
+      s.won = upWon === (s.direction === 'up')
+      s.source = 'exchange'
+    }
+    this.lastExchangeTry.delete(marketId)
+    this.save(now, true)
+  }
+
+  /** Drop samples that never got a result and no longer can (call occasionally) */
+  prune(now: number): void {
+    this.load()
+    this.samples = this.samples.filter(s => s.won != null || now - s.windowEndMs <= EXCHANGE_SETTLE_WINDOW_MS)
+  }
+
+  /**
+   * How results were decided, counted per window: settled by the exchange,
+   * provisional from spot, and windows where the two disagreed.
+   */
+  getSourceCounts(): { exchange: number; spot: number; disagreed: number } {
+    this.load()
+    const perWindow = new Map<string, BtcSignalSample>()
+    for (const s of this.samples) if (s.won != null && !perWindow.has(s.marketId)) perWindow.set(s.marketId, s)
+    let exchange = 0, spot = 0, disagreed = 0
+    for (const s of perWindow.values()) {
+      if (s.source === 'exchange') {
+        exchange++
+        if (s.spotWon != null && s.spotWon !== s.won) disagreed++
+      } else {
+        spot++
+      }
+    }
+    return { exchange, spot, disagreed }
   }
 
   getSamples(): BtcSignalSample[] {
@@ -136,6 +248,7 @@ export class BtcSignalRecorder {
 
   clear(): void {
     this.samples = []
+    this.lastExchangeTry.clear()
     this.loaded = true
     try { if (this.persist) localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
   }

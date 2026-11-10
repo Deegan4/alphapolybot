@@ -324,6 +324,12 @@ export class BtcUpDownStrategy extends BaseStrategy {
           btcSignalRecorder.resolve(asset, priceUSD, Date.now())
         } catch { /* price unavailable: retried next cycle until the grace period passes */ }
       }
+      // The exchange's settlement overrides the provisional spot result
+      for (const { marketId, slug } of btcSignalRecorder.marketsAwaitingExchange(Date.now())) {
+        const yes = await polymarketUSClient.getSettlementPrice(slug)
+        if (yes != null) btcSignalRecorder.settleFromExchange(marketId, yes, Date.now())
+      }
+      btcSignalRecorder.prune(Date.now())
 
       if (this.activeMarkets.size === 0) {
         const assets: string[] = []
@@ -892,6 +898,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
           price: this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[sigIndex], sigIndex, market.outcomePrices[sigIndex]),
           refPrice: windowOpenPrice,
           windowEndMs,
+          slug: market.slug,
+          yesMeansUp: upIndex === 0,
         })
       } catch { /* recording is best-effort */ }
 
