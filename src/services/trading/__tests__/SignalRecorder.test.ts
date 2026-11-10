@@ -86,8 +86,10 @@ describe('simulateTrades', () => {
     const trades = simulateTrades(samples, 0.4, rules, 0)
     expect(trades[0]).toMatchObject({ t: 0, exitT: 40_000, reason: 'take_profit' })
     expect(trades[0].gross).toBeCloseTo((0.62 - 0.51) / 0.51, 6)
-    // exit at 40s + 60s cooldown → next entry at 100s; it is still open at the end, so not counted
-    expect(trades).toHaveLength(1)
+    // exit at 40s + 60s cooldown → next entry at 100s, still open at the last reading: closed there
+    expect(trades).toHaveLength(2)
+    expect(trades[1]).toMatchObject({ t: 100_000, exitT: 120_000, reason: 'data_end' })
+    expect(trades[1].gross).toBeCloseTo((0.62 - 0.64) / 0.64, 6) // paid the spread, price flat
   })
 
   it('stops out a NO entry when YES rallies', () => {
@@ -107,9 +109,13 @@ describe('simulateTrades', () => {
     expect(trade.net).toBeLessThan(trade.gross)
   })
 
-  it('leaves out weak or low-confidence signals, open trades and trades across a data gap', () => {
+  it('leaves out weak or low-confidence signals and trades across a data gap; closes open trades at the last price', () => {
     expect(simulateTrades(path([[0.3, 0.5], [0.3, 0.7]]), 0.4, rules, 0)).toHaveLength(0)
-    expect(simulateTrades(path([[0.5, 0.5], [0.5, 0.52]]), 0.4, rules, 0)).toHaveLength(0) // still open
+    const open = simulateTrades(path([[0.5, 0.5], [0.5, 0.52]]), 0.4, rules, 0)
+    expect(open).toHaveLength(1)
+    expect(open[0]).toMatchObject({ reason: 'data_end', exitT: 20_000 })
+    expect(open[0].gross).toBeCloseTo((0.51 - 0.51) / 0.51, 6)
+    expect(simulateTrades(path([[0.5, 0.5]]), 0.4, rules, 0)).toHaveLength(0) // no later reading at all
     const lowConf = path([[0.5, 0.5], [0.5, 0.7]]).map(s => ({ ...s, confidence: 0.2 }))
     expect(simulateTrades(lowConf, 0.4, rules, 0)).toHaveLength(0)
     const gapped = path([[0.5, 0.5]]).concat(path([[0, 0.7]], 'm', MAX_PATH_GAP_MS + 1))
@@ -202,7 +208,8 @@ describe('exitGridReport', () => {
     expect(tp5).toMatchObject({ stopLossPercent: 0.15, takeProfitPercent: 0.05, n: 1 })
     expect(tp5.avgNet).toBeCloseTo((0.55 - 0.51) / 0.51, 6) // exits at the first reading
     expect(tp20.avgNet).toBeCloseTo((0.62 - 0.51) / 0.51, 6)
-    expect(tp50.n).toBe(0) // never reached: still open
+    expect(tp50.n).toBe(1) // never reached: closed at the last reading
+    expect(tp50.avgNet).toBeCloseTo((0.62 - 0.51) / 0.51, 6)
   })
 })
 

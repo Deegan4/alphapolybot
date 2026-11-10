@@ -279,7 +279,7 @@ export const MicroSignalPanel: React.FC = () => {
 
       <p className="text-agent-text-muted text-[11px] font-sans mt-2">
         {mode === 'exits' && rules
-          ? `Replays the strategy's exits on the recorded prices: ${Math.round(rules.stopLossPercent * 100)}% stop-loss, ${Math.round(rules.takeProfitPercent * 100)}% take-profit, ${Math.round(rules.maxHoldMs / 60_000)}-minute limit, one trade per market at a time. Buys at the ask, sells at the bid, taker fees both ways. Prices are sampled once per scan, so fast moves between scans are missed.`
+          ? `Replays the strategy's exits on the recorded prices: ${Math.round(rules.stopLossPercent * 100)}% stop-loss, ${Math.round(rules.takeProfitPercent * 100)}% take-profit, ${Math.round(rules.maxHoldMs / 60_000)}-minute limit, one trade per market at a time; a trade still open at the last reading is closed at that price. Buys at the ask, sells at the bid, taker fees both ways. Prices are sampled once per scan, so fast moves between scans are missed.`
           : `Assumes buying at the ask and selling at the bid ${holdMin} minutes later, with taker fees both ways. Samples overlap, so read this as a rough guide (${counts.resolved} of ${counts.total} samples have an outcome).`}
       </p>
     </div>

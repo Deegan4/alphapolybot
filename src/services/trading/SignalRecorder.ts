@@ -108,7 +108,8 @@ export interface SimulatedTrade {
   t: number
   exitT: number
   strength: number
-  reason: 'stop_loss' | 'take_profit' | 'max_hold'
+  /** `data_end`: still open at the last reading, valued at that reading's bid */
+  reason: 'stop_loss' | 'take_profit' | 'max_hold' | 'data_end'
   gross: number
   net: number
 }
@@ -123,7 +124,9 @@ export const MAX_PATH_GAP_MS = 3 * 60_000
  * until stop-loss, take-profit or the hold limit closes the trade. No new
  * entry in that market until the trade is closed and the cooldown has passed,
  * so trades do not overlap and can be counted as separate observations.
- * Trades still open at the end of the data, or crossing a gap in it, are left out.
+ * A trade still open at the market's last reading is closed there at the bid
+ * (leaving it out would hide slow losers behind wide exits); a trade crossing
+ * a gap in the readings is left out.
  */
 export function simulateTrades(
   samples: SignalSample[],
@@ -150,6 +153,7 @@ export function simulateTrades(
 
       let prevT = entry.t
       let settled = false
+      let lastMark: { t: number; pnl: number; mark: number } | null = null
       for (let j = i + 1; j < list.length; j++) {
         const r = list[j]
         if (r.t - prevT > MAX_PATH_GAP_MS) { freeAt = r.t; settled = true; break } // path unknown: discard
@@ -157,6 +161,7 @@ export function simulateTrades(
         const mark = (yes ? r.mid : 1 - r.mid) - Math.max(0, r.spread) / 2
         if (!(mark > 0 && mark < 1)) continue
         const pnl = (mark - entryPx) / entryPx
+        lastMark = { t: r.t, pnl, mark }
         const reason: SimulatedTrade['reason'] | null =
           pnl <= -rules.stopLossPercent ? 'stop_loss'
             : pnl >= rules.takeProfitPercent ? 'take_profit'
@@ -172,8 +177,18 @@ export function simulateTrades(
         settled = true
         break
       }
-      // still open at the end of the data: block further entries in this market
-      if (!settled) freeAt = Infinity
+      // still open at the end of the data: value it at the last reading and
+      // block further entries in this market
+      if (!settled) {
+        if (lastMark) {
+          trades.push({
+            slug, t: entry.t, exitT: lastMark.t, strength, reason: 'data_end',
+            gross: lastMark.pnl,
+            net: lastMark.pnl - roundTripFeeFraction(entryPx, lastMark.mark, theta),
+          })
+        }
+        freeAt = Infinity
+      }
     }
   }
   return trades.sort((a, b) => a.t - b.t)

@@ -10,6 +10,7 @@ import { edgeTracker } from '@/services/trading/EdgeTracker'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
+import { btcSignalRecorder } from '@/services/trading/BtcSignalRecorder'
 import {
   computeSignal as _computeSignal,
   classifyRegime as _classifyRegime,
@@ -303,12 +304,26 @@ export class BtcUpDownStrategy extends BaseStrategy {
   // SCAN LOOP
   // ==========================================
 
+  /** Confidence and entry-price limits in force (for the confidence report) */
+  getEntryLimits(): { minConfidence: number; minEntryPrice: number; maxEntryPrice: number } {
+    const { minConfidence, minEntryPrice, maxEntryPrice } = this.btcConfig
+    return { minConfidence, minEntryPrice, maxEntryPrice }
+  }
+
   private async runScanCycle(): Promise<void> {
     if (!this._enabled || this._status !== 'running') return
 
     try {
       // 1. Discover markets for enabled assets
       await this.discoverMarkets()
+
+      // Settle recorded signals whose window has just ended (best-effort)
+      for (const asset of btcSignalRecorder.assetsToResolve(Date.now())) {
+        try {
+          const { priceUSD } = await priceOracleService.getPrice(asset as 'BTC' | 'ETH' | 'SOL' | 'XRP')
+          btcSignalRecorder.resolve(asset, priceUSD, Date.now())
+        } catch { /* price unavailable: retried next cycle until the grace period passes */ }
+      }
 
       if (this.activeMarkets.size === 0) {
         const assets: string[] = []
@@ -863,6 +878,22 @@ export class BtcUpDownStrategy extends BaseStrategy {
       } catch {
         // Enrichment unavailable — continue without
       }
+
+      // Log the signal for the confidence report (resolved after the window ends)
+      try {
+        const sigIndex = signal.direction === 'up' ? upIndex : downIndex
+        btcSignalRecorder.record({
+          marketId: market.id,
+          asset,
+          duration: durationKey,
+          t: Date.now(),
+          direction: signal.direction,
+          confidence: signal.confidence,
+          price: this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[sigIndex], sigIndex, market.outcomePrices[sigIndex]),
+          refPrice: windowOpenPrice,
+          windowEndMs,
+        })
+      } catch { /* recording is best-effort */ }
 
       // Store for dashboard display + emit event for real-time UI updates
       this._lastSignals.set(asset, { signal, windowOpenPrice, currentPrice })
