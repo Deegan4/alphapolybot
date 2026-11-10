@@ -1,3 +1,6 @@
+// @vitest-environment node
+// Node environment: under jsdom on Node 20, typed arrays come from jsdom's realm and
+// Node's WebCrypto rejects them, which fails the signing library. Browsers are unaffected.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as ed25519 from '@noble/ed25519'
 import {
