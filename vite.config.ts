@@ -37,6 +37,9 @@ function binanceWsProxy(): Plugin {
               if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
               if (upstream) {
                 upstream.removeAllListeners()
+                // terminate() on a socket that is still connecting emits 'error';
+                // with no listener that crashes the whole dev server
+                upstream.on('error', () => {})
                 // Use terminate() instead of close() — close() throws on CONNECTING sockets
                 upstream.terminate()
                 upstream = null
