@@ -54,6 +54,15 @@ export function selectEligibleMarkets(markets: Market[], batchSize: number): Mar
 }
 
 /** Slug whose order book feeds the microstructure signal (the YES outcome) */
+/** Trade flow this strongly against the book signal vetoes the entry */
+export const TRADE_FLOW_VETO = 0.3
+
+/** Whether recent executed trades contradict the order-book signal's direction */
+export function tradeFlowOpposes(compositeSignal: number, tradeFlow: number | null | undefined): boolean {
+  if (tradeFlow == null) return false
+  return compositeSignal > 0 ? tradeFlow <= -TRADE_FLOW_VETO : tradeFlow >= TRADE_FLOW_VETO
+}
+
 export function signalSlugFor(market: Market): string | undefined {
   return market.outcomeSlugs?.[0]
 }
@@ -215,6 +224,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           if (!this.subscribedSlugs.has(slug)) {
             try {
               realtimeService.subscribeMarket(slug)
+              realtimeService.subscribeTrades?.([slug])
               this.subscribedSlugs.add(slug)
             } catch {
               // Subscription failed — will retry on next refresh
@@ -303,6 +313,13 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
       // 4. Spread reasonable (avoid illiquid markets)
       if (signal.spreadFraction > this.microConfig.maxSpreadFraction) continue
+
+      // 4b. Recent trades must not be running the other way: resting depth
+      // can be spoofed, executed trades cannot
+      if (tradeFlowOpposes(signal.compositeSignal, signal.tradeFlow)) {
+        rejectionTracker.record('microstructure', 'micro', `trade flow ${signal.tradeFlow?.toFixed(2)} opposes book signal ${signal.compositeSignal.toFixed(2)}`)
+        continue
+      }
 
       // === DIRECTION ===
       // Positive compositeSignal = bullish (more bids than asks) → BUY YES

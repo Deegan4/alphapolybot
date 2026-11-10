@@ -32,6 +32,7 @@ export interface AppSettingsState {
   gtcExpiryMinutes: number
   makerFirstEntries: boolean    // Post-only entries inside the spread before taking
   makerExpiryTakerFallback: boolean // Take the remainder when a maker entry expires
+  pauseEntriesWhenFeedDown: boolean // Block new entries while the market-data feed is offline
   makerMaxChaseCents: number    // Max cents above the maker price the fallback may pay
   makerFirstDisabledStrategies: string[] // Strategies that always take (skip maker-first)
 
@@ -141,6 +142,7 @@ interface SettingsStore extends AppSettingsState {
   setGtcExpiryMinutes: (minutes: number) => void
   setMakerFirstEntries: (enabled: boolean) => void
   setMakerExpiryTakerFallback: (enabled: boolean) => void
+  setPauseEntriesWhenFeedDown: (enabled: boolean) => void
   setMakerMaxChaseCents: (cents: number) => void
   setMakerFirstForStrategy: (strategy: string, enabled: boolean) => void
   setKellyFraction: (fraction: number) => void
@@ -229,6 +231,7 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   gtcExpiryMinutes: 5,
   makerFirstEntries: false,
   makerExpiryTakerFallback: true,
+  pauseEntriesWhenFeedDown: false,
   makerMaxChaseCents: 2,
   makerFirstDisabledStrategies: [],
   kellyFraction: 0.15,
@@ -363,6 +366,11 @@ export const useSettingsStore = create<SettingsStore>()(
       setMakerFirstEntries: (enabled: boolean) => {
         set({ makerFirstEntries: enabled })
         import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerFirst: enabled }))
+      },
+
+      setPauseEntriesWhenFeedDown: (enabled: boolean) => {
+        set({ pauseEntriesWhenFeedDown: enabled })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ pauseEntriesWhenFeedDown: enabled }))
       },
 
       setMakerExpiryTakerFallback: (enabled: boolean) => {
@@ -998,6 +1006,7 @@ export const useSettingsStore = create<SettingsStore>()(
         gtcExpiryMinutes: state.gtcExpiryMinutes,
         makerFirstEntries: state.makerFirstEntries,
         makerExpiryTakerFallback: state.makerExpiryTakerFallback,
+        pauseEntriesWhenFeedDown: state.pauseEntriesWhenFeedDown,
         makerMaxChaseCents: state.makerMaxChaseCents,
         makerFirstDisabledStrategies: state.makerFirstDisabledStrategies,
         kellyFraction: state.kellyFraction,

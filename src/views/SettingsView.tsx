@@ -805,6 +805,7 @@ const GtdFallbackSettings: React.FC = () => {
     gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes,
     makerFirstEntries, setMakerFirstEntries,
     makerExpiryTakerFallback, setMakerExpiryTakerFallback, makerMaxChaseCents, setMakerMaxChaseCents,
+    pauseEntriesWhenFeedDown, setPauseEntriesWhenFeedDown,
     makerFirstDisabledStrategies, setMakerFirstForStrategy,
   } = useSettingsStore()
 
@@ -823,6 +824,12 @@ const GtdFallbackSettings: React.FC = () => {
           description="Rest buys as post-only orders one cent inside the spread (no taker fee, about 4.75% of the stake at 50¢). Falls back to a normal order if the book is one-sided or the exchange rejects it. Fills are slower and may not happen."
           enabled={makerFirstEntries}
           onChange={setMakerFirstEntries}
+        />
+        <MatrixToggle
+          label="Pause Entries When Price Feed Is Down"
+          description="Block new entries while the live market-data feed is disconnected, instead of trading on slower REST prices. Exits and stop-losses still go out."
+          enabled={pauseEntriesWhenFeedDown ?? false}
+          onChange={setPauseEntriesWhenFeedDown}
         />
         {makerFirstEntries && (
           <>
@@ -2448,13 +2455,13 @@ const ApiUsagePanel: React.FC = () => {
             <td className="py-0.5">Market data</td>
             <td className={cn('text-right', feedStateClass(feeds.market.state))}>{feeds.market.state}</td>
             <td className="text-right">{formatFeedAge(feeds.market.lastMessageAt)}</td>
-            <td className="text-right">{feeds.market.subscriptions} markets, books {feeds.market.booksFresh}/{feeds.market.booksWatched} fresh</td>
+            <td className="text-right">{feeds.market.subscriptions} markets, books {feeds.market.booksFresh}/{feeds.market.booksWatched} fresh{feeds.market.stallReconnects > 0 ? `, ${feeds.market.stallReconnects} stall restarts` : ''}</td>
           </tr>
           <tr>
             <td className="py-0.5">Private (orders, balance)</td>
             <td className={cn('text-right', feedStateClass(feeds.user.state))}>{feeds.user.state}</td>
             <td className="text-right">{formatFeedAge(feeds.user.lastMessageAt)}</td>
-            <td className="text-right">{feeds.user.hasBalance ? 'balance live' : 'balance via REST'}</td>
+            <td className="text-right">{feeds.user.hasBalance ? 'balance live' : 'balance via REST'}{feeds.user.stallReconnects > 0 ? `, ${feeds.user.stallReconnects} stall restarts` : ''}</td>
           </tr>
         </tbody>
       </table>

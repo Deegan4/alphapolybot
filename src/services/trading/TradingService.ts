@@ -30,6 +30,8 @@ export interface TradingConfig {
   makerMaxChase: number
   /** Strategies that skip maker-first even when it is on (e.g. short BTC windows) */
   makerFirstDisabledStrategies: string[]
+  /** Block new entries while the market-data WebSocket is down (exits still go out) */
+  pauseEntriesWhenFeedDown: boolean
 }
 
 const DEFAULT_CONFIG: TradingConfig = {
@@ -44,6 +46,7 @@ const DEFAULT_CONFIG: TradingConfig = {
   makerExpiryTakerFallback: true,
   makerMaxChase: 0.02,
   makerFirstDisabledStrategies: [],
+  pauseEntriesWhenFeedDown: false,
 }
 
 /**
@@ -102,6 +105,13 @@ export class TradingService {
     amount: number,
     options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number }
   ): Promise<OrderResult> {
+    // Optional: no new entries on REST-only prices while the live feed is down
+    if (this.config.pauseEntriesWhenFeedDown && !this.config.dryRun && realtimeService.isConnected?.() === false) {
+      const msg = 'Market-data feed offline — new entries paused'
+      rejectionTracker.record('risk', 'system', msg)
+      return { success: false, error: msg }
+    }
+
     // Risk management gate (pass marketSlug for per-market concentration check)
     const riskCheck = riskManager.validateTrade(amount, market.slug)
     if (!riskCheck.allowed) {

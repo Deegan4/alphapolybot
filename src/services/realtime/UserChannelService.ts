@@ -21,6 +21,7 @@ import {
   type AccountBalanceSnapshot,
 } from 'polymarket-us'
 import type { USOrderExecution, USPositionUpdate } from '@/types'
+import { HeartbeatClock, isFeedStalled, WATCHDOG_INTERVAL_MS } from './feedWatchdog'
 import { polymarketUSClient } from '@/services/api'
 
 /** Mapped from SDK OrderUpdate execution data */
@@ -46,6 +47,9 @@ export class UserChannelService {
   private gaveUp = false
   private everConnected = false
   private lastMessageTime = 0
+  private heartbeats = new HeartbeatClock()
+  private watchdogInterval: number | null = null
+  private stallReconnects = 0
   /** Latest pushed balance; null until the first snapshot or after the socket closes */
   private latestBalance: { balance: number; buyingPower: number; at: number } | null = null
 
@@ -83,6 +87,9 @@ export class UserChannelService {
           this.reconnectAttempts = 0
           this.gaveUp = false
           this.everConnected = true
+          this.lastMessageTime = Date.now()
+          this.heartbeats.reset()
+          this.startWatchdog()
           this.messageCount = 0
           this.notifyConnectionCallbacks('connected')
 
@@ -172,6 +179,7 @@ export class UserChannelService {
 
         this.ws.on('heartbeat', () => {
           this.lastMessageTime = Date.now()
+          this.heartbeats.beat(this.lastMessageTime)
           // SDK handles keepalive internally
         })
 
@@ -200,6 +208,7 @@ export class UserChannelService {
 
   disconnect(): void {
     this.closingIntentionally = true
+    this.stopWatchdog()
     this.everConnected = false
     this.gaveUp = false
     this.latestBalance = null
@@ -282,8 +291,9 @@ export class UserChannelService {
     return this.gaveUp && !this.isConnected()
   }
 
-  getStatus(): { state: 'connected' | 'reconnecting' | 'offline' | 'idle'; lastMessageAt: number; hasBalance: boolean } {
+  getStatus(): { state: 'connected' | 'reconnecting' | 'offline' | 'idle'; lastMessageAt: number; hasBalance: boolean; stallReconnects: number } {
     return {
+      stallReconnects: this.stallReconnects,
       state: this.isConnected() ? 'connected' : this.hasGivenUp() ? 'offline' : this.everConnected ? 'reconnecting' : 'idle',
       lastMessageAt: this.lastMessageTime,
       hasBalance: this.getLatestBalance() !== null,
@@ -307,6 +317,27 @@ export class UserChannelService {
   }
 
   // ─── Private ────────────────────────────────────────────
+
+  /** Reopen the socket when it has gone silent for several heartbeat intervals */
+  private startWatchdog(): void {
+    if (this.watchdogInterval) return
+    this.watchdogInterval = window.setInterval(() => {
+      if (!this.ws?.isConnected) return
+      if (!isFeedStalled({ nowMs: Date.now(), lastActivityMs: this.lastMessageTime, heartbeatIntervalMs: this.heartbeats.intervalMs })) return
+      console.warn('[UserChannel] No messages or heartbeats — reopening the connection')
+      this.stallReconnects++
+      this.heartbeats.reset()
+      this.lastMessageTime = 0
+      this.ws.close() // the close handler schedules the reconnect
+    }, WATCHDOG_INTERVAL_MS)
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval)
+      this.watchdogInterval = null
+    }
+  }
 
   private nextRequestId(): string {
     return `priv-${++this.requestIdCounter}-${Date.now()}`

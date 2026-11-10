@@ -15,7 +15,12 @@ import {
   MarketsWebSocket,
   type MarketDataLite,
   type MarketData,
+  type Trade,
 } from 'polymarket-us'
+import { HeartbeatClock, isFeedStalled, WATCHDOG_INTERVAL_MS } from './feedWatchdog'
+
+/** Book levels per side summed for the depth-imbalance signal */
+const DEPTH_LEVELS = 5
 import type { PriceData, OrderBook } from '@/types'
 import { polymarketUSClient, orderBookFromWire, type WireBook } from '@/services/api'
 
@@ -42,6 +47,8 @@ export interface FeedStatus {
   /** Markets with a full order book streamed, and how many of those are fresh */
   booksWatched: number
   booksFresh: number
+  /** Times the watchdog reopened a silent connection since start */
+  stallReconnects: number
 }
 
 type PriceUpdateCallback = (slug: string, price: PriceData) => void
@@ -60,6 +67,11 @@ export class RealtimeService {
   /** True after max reconnect attempts failed; cleared by a successful open */
   private gaveUp = false
   private everConnected = false
+  /** Markets with the trade stream subscribed (feeds trade flow) */
+  private tradeSubscriptions = new Set<string>()
+  private heartbeats = new HeartbeatClock()
+  private watchdogInterval: number | null = null
+  private stallReconnects = 0
   /** Markets that also get the full order book (MARKET_DATA), not just BBO */
   private bookSubscriptions = new Set<string>()
   private books = new Map<string, { book: OrderBook; receivedAt: number }>()
@@ -98,6 +110,9 @@ export class RealtimeService {
           this.reconnectAttempts = 0
           this.gaveUp = false
           this.everConnected = true
+          this.lastMessageTime = Date.now()
+          this.heartbeats.reset()
+          this.startWatchdog()
           this.messageCount = 0
           this.startCleanupInterval()
           this.notifyConnectionCallbacks('connected')
@@ -111,6 +126,9 @@ export class RealtimeService {
           if (this.bookSubscriptions.size > 0) {
             this.subscribeBooksInChunks(Array.from(this.bookSubscriptions))
           }
+          if (this.tradeSubscriptions.size > 0) {
+            this.subscribeTradesInChunks(Array.from(this.tradeSubscriptions))
+          }
 
           resolve(true)
         })
@@ -123,8 +141,13 @@ export class RealtimeService {
           this.handleMarketData(data)
         })
 
+        this.ws.on('trade', (data: Trade) => {
+          this.handleTrade(data)
+        })
+
         this.ws.on('heartbeat', () => {
           this.lastMessageTime = Date.now()
+          this.heartbeats.beat(this.lastMessageTime)
         })
 
         this.ws.on('error', (err) => {
@@ -157,6 +180,8 @@ export class RealtimeService {
       this.reconnectTimeout = null
     }
     this.stopCleanupInterval()
+    this.stopWatchdog()
+    this.tradeSubscriptions.clear()
     if (this.ws) {
       this.ws.close()
       this.ws = null
@@ -183,6 +208,22 @@ export class RealtimeService {
     for (const s of slugs) {
       this.bookSubscriptions.delete(s)
       this.books.delete(s)
+    }
+  }
+
+  /**
+   * Also stream trade prints for these markets; each print feeds the
+   * microstructure analyzer's trade flow (net aggressive buying vs selling).
+   */
+  subscribeTrades(slugs: string[]): void {
+    const fresh = [...new Set(slugs)].filter(s => !this.tradeSubscriptions.has(s))
+    for (const s of fresh) this.tradeSubscriptions.add(s)
+    if (fresh.length > 0 && this.ws?.isConnected) this.subscribeTradesInChunks(fresh)
+  }
+
+  private subscribeTradesInChunks(slugs: string[]): void {
+    for (const chunk of chunkSlugs(slugs)) {
+      this.ws?.subscribeTrades(this.nextRequestId(), chunk)
     }
   }
 
@@ -292,6 +333,7 @@ export class RealtimeService {
       subscriptions: this.subscriptions.size,
       booksWatched: this.bookSubscriptions.size,
       booksFresh: this.isConnected() ? booksFresh : 0,
+      stallReconnects: this.stallReconnects,
     }
   }
 
@@ -327,8 +369,26 @@ export class RealtimeService {
     }
 
     this.prices.set(slug, priceData)
-    this.feedMicrostructureAnalyzer(slug, bid, ask)
+    // The lite feed has no sizes, only how many price levels rest on each
+    // side. Use those counts unless the full book is streamed for this market
+    // (then handleMarketData feeds real sizes).
+    if (!this.bookSubscriptions.has(slug)) {
+      // bidDepth/askDepth are in the documented payload but not the SDK's type
+      const lite = data.marketDataLite as typeof data.marketDataLite & { bidDepth?: number; askDepth?: number }
+      this.feedDepth(slug, bid, ask, Number(lite.bidDepth) || 0, Number(lite.askDepth) || 0)
+    }
     this.notifyPriceCallbacks(slug, priceData)
+  }
+
+  private handleTrade(data: Trade): void {
+    this.lastMessageTime = Date.now()
+    this.messageCount++
+    const t = data.trade
+    if (!t?.marketSlug) return
+    const notional = parseFloat(t.price?.value || '0') * parseFloat(t.quantity?.value || '0')
+    this.withAnalyzer(m => {
+      m.microstructureAnalyzer.recordTrade(t.marketSlug, m.takerDirection(t.taker), notional)
+    })
   }
 
   private handleMarketData(data: MarketData): void {
@@ -361,7 +421,9 @@ export class RealtimeService {
     }
 
     this.prices.set(slug, priceData)
-    this.feedMicrostructureAnalyzer(slug, bestBid, bestAsk)
+    const sumQty = (levels: Array<{ qty: string }>) =>
+      levels.slice(0, DEPTH_LEVELS).reduce((sum, l) => sum + (parseFloat(l.qty) || 0), 0)
+    this.feedDepth(slug, bestBid, bestAsk, sumQty(bids), sumQty(offers))
     this.notifyPriceCallbacks(slug, priceData)
   }
 
@@ -370,27 +432,24 @@ export class RealtimeService {
    * Dynamic import cached after first resolution.
    */
   private microstructureModule: Promise<typeof import('@/services/trading/MicrostructureAnalyzer')> | null = null
-  private microstructureImporting = false
-  private feedMicrostructureAnalyzer(slug: string, bid: number, ask: number): void {
-    if (bid <= 0 || ask <= 0 || bid === ask) return
-
-    if (this.microstructureModule) {
-      this.microstructureModule.then(m => {
-        m.microstructureAnalyzer.recordSnapshot(slug, bid, 1, ask, 1)
-      })
-      return
+  /** Run `fn` with the analyzer module (lazy import, cached; best-effort) */
+  private withAnalyzer(fn: (m: typeof import('@/services/trading/MicrostructureAnalyzer')) => void): void {
+    if (!this.microstructureModule) {
+      this.microstructureModule = import('@/services/trading/MicrostructureAnalyzer')
+      this.microstructureModule.catch(() => { this.microstructureModule = null })
     }
+    this.microstructureModule.then(fn).catch(() => {})
+  }
 
-    if (this.microstructureImporting) return
-    this.microstructureImporting = true
-
-    this.microstructureModule = import('@/services/trading/MicrostructureAnalyzer')
-    this.microstructureModule.then(m => {
-      m.microstructureAnalyzer.recordSnapshot(slug, bid, 1, ask, 1)
-    }).catch(() => {
-      this.microstructureModule = null
-      this.microstructureImporting = false
-    })
+  /**
+   * Feed resting depth to the microstructure analyzer. Needs a two-sided
+   * book and a size on at least one side; without sizes there is no
+   * imbalance to measure, so nothing is recorded.
+   */
+  private feedDepth(slug: string, bid: number, ask: number, bidQty: number, askQty: number): void {
+    if (bid <= 0 || ask <= 0 || bid >= ask) return
+    if (!(bidQty > 0) && !(askQty > 0)) return
+    this.withAnalyzer(m => m.microstructureAnalyzer.recordDepth(slug, bid, ask, bidQty, askQty))
   }
 
   private notifyPriceCallbacks(slug: string, price: PriceData): void {
@@ -418,6 +477,27 @@ export class RealtimeService {
       this.reconnectTimeout = null
       this.connect()
     }, delay)
+  }
+
+  /** Reopen the socket when it has gone silent for several heartbeat intervals */
+  private startWatchdog(): void {
+    if (this.watchdogInterval) return
+    this.watchdogInterval = window.setInterval(() => {
+      if (!this.ws?.isConnected) return
+      if (!isFeedStalled({ nowMs: Date.now(), lastActivityMs: this.lastMessageTime, heartbeatIntervalMs: this.heartbeats.intervalMs })) return
+      console.warn('[RealtimeService] No messages or heartbeats — reopening the connection')
+      this.stallReconnects++
+      this.heartbeats.reset()
+      this.lastMessageTime = 0
+      this.ws.close() // the close handler schedules the reconnect
+    }, WATCHDOG_INTERVAL_MS)
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval)
+      this.watchdogInterval = null
+    }
   }
 
   startCleanupInterval(): void {

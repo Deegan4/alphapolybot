@@ -31,6 +31,36 @@ export interface MicrostructureSignal {
 
   /** Confidence in the signal (0-1, based on data freshness and consistency) */
   signalConfidence: number
+
+  /**
+   * Net aggressive trade flow over the last minute: (buy − sell) / total
+   * notional, range [-1, 1]. Null when too few trades to say anything.
+   */
+  tradeFlow: number | null
+}
+
+/** Trades needed in the window before trade flow is reported */
+export const MIN_TRADES_FOR_FLOW = 3
+/** Trade-flow lookback (ms) */
+export const TRADE_FLOW_WINDOW_MS = 60_000
+
+/**
+ * Direction of a trade on the YES-quoted book from the taker's side:
+ * +1 when the aggressor bought YES exposure (buy long / sell short),
+ * −1 when they sold it (sell long / buy short), 0 if unknown.
+ */
+export function takerDirection(taker: { side?: string; intent?: string } | undefined): 1 | -1 | 0 {
+  switch (taker?.intent) {
+    case 'ORDER_INTENT_BUY_LONG':
+    case 'ORDER_INTENT_SELL_SHORT':
+      return 1
+    case 'ORDER_INTENT_SELL_LONG':
+    case 'ORDER_INTENT_BUY_SHORT':
+      return -1
+  }
+  if (taker?.side === 'ORDER_SIDE_BUY') return 1
+  if (taker?.side === 'ORDER_SIDE_SELL') return -1
+  return 0
 }
 
 interface SnapshotEntry {
@@ -48,6 +78,8 @@ export class MicrostructureAnalyzer {
   /** Per-token snapshot history (capped at 100 snapshots each) */
   private snapshots = new Map<string, SnapshotEntry[]>()
   private maxSnapshotsPerToken = 100
+  /** Per-token recent trades: signed notional (+ = aggressive buy of YES) */
+  private trades = new Map<string, Array<{ timestamp: number; signed: number }>>()
 
   /**
    * Record a new order book snapshot.
@@ -77,6 +109,53 @@ export class MicrostructureAnalyzer {
     if (history.length > this.maxSnapshotsPerToken) {
       history.splice(0, history.length - this.maxSnapshotsPerToken)
     }
+  }
+
+  /**
+   * Record a book snapshot from real depth: `bidQty`/`askQty` are resting
+   * size near the top of each side in the same unit (contracts, or level
+   * counts when only those are known). Unlike `recordSnapshot`, volumes are
+   * not multiplied by price, so the imbalance compares depth, not price.
+   */
+  recordDepth(tokenId: string, bidPrice: number, askPrice: number, bidQty: number, askQty: number): void {
+    if (!(bidQty > 0) && !(askQty > 0)) return
+    if (!this.snapshots.has(tokenId)) this.snapshots.set(tokenId, [])
+    const history = this.snapshots.get(tokenId)!
+    history.push({
+      timestamp: Date.now(),
+      bidVolume: Math.max(0, bidQty),
+      askVolume: Math.max(0, askQty),
+      spread: askPrice - bidPrice,
+      midPrice: (bidPrice + askPrice) / 2,
+    })
+    if (history.length > this.maxSnapshotsPerToken) {
+      history.splice(0, history.length - this.maxSnapshotsPerToken)
+    }
+  }
+
+  /** Record a trade print: `direction` from takerDirection, notional = price × quantity */
+  recordTrade(tokenId: string, direction: 1 | -1 | 0, notional: number): void {
+    if (direction === 0 || !(notional > 0)) return
+    if (!this.trades.has(tokenId)) this.trades.set(tokenId, [])
+    const list = this.trades.get(tokenId)!
+    const now = Date.now()
+    list.push({ timestamp: now, signed: direction * notional })
+    while (list.length > 0 && list[0].timestamp < now - TRADE_FLOW_WINDOW_MS) list.shift()
+    if (list.length > 200) list.splice(0, list.length - 200)
+  }
+
+  /** Net aggressive flow over the window, or null with fewer than MIN_TRADES_FOR_FLOW trades */
+  getTradeFlow(tokenId: string): number | null {
+    const cutoff = Date.now() - TRADE_FLOW_WINDOW_MS
+    const recent = (this.trades.get(tokenId) ?? []).filter(t => t.timestamp >= cutoff)
+    if (recent.length < MIN_TRADES_FOR_FLOW) return null
+    let net = 0
+    let total = 0
+    for (const t of recent) {
+      net += t.signed
+      total += Math.abs(t.signed)
+    }
+    return total > 0 ? Math.round((net / total) * 1000) / 1000 : null
   }
 
   /**
@@ -139,6 +218,7 @@ export class MicrostructureAnalyzer {
       spreadWidening,
       compositeSignal: Math.round(compositeSignal * 1000) / 1000,
       signalConfidence: Math.round(signalConfidence * 100) / 100,
+      tradeFlow: this.getTradeFlow(tokenId),
     }
   }
 
@@ -170,6 +250,7 @@ export class MicrostructureAnalyzer {
    * Clear all data for a token (when unsubscribing).
    */
   clearToken(tokenId: string): void {
+    this.trades.delete(tokenId)
     this.snapshots.delete(tokenId)
   }
 
