@@ -3,6 +3,7 @@ import type { MicroMomentumConfig, Market } from '@/types'
 import { polymarketUSClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { microstructureAnalyzer } from '@/services/trading/MicrostructureAnalyzer'
+import { signalRecorder } from '@/services/trading/SignalRecorder'
 import { tradingService } from '@/services/trading/TradingService'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import { tradeLogger } from '@/services/trading/TradeLogger'
@@ -53,7 +54,6 @@ export function selectEligibleMarkets(markets: Market[], batchSize: number): Mar
     .slice(0, batchSize)
 }
 
-/** Slug whose order book feeds the microstructure signal (the YES outcome) */
 /** Trade flow this strongly against the book signal vetoes the entry */
 export const TRADE_FLOW_VETO = 0.3
 
@@ -63,6 +63,7 @@ export function tradeFlowOpposes(compositeSignal: number, tradeFlow: number | nu
   return compositeSignal > 0 ? tradeFlow <= -TRADE_FLOW_VETO : tradeFlow >= TRADE_FLOW_VETO
 }
 
+/** Slug whose order book feeds the microstructure signal (the YES outcome) */
 export function signalSlugFor(market: Market): string | undefined {
   return market.outcomeSlugs?.[0]
 }
@@ -88,8 +89,17 @@ export function signalSlugFor(market: Market): string | undefined {
  * - Aggressive buying/selling pressure detected via compositeSignal
  * - Tight SL/TP and short hold time (these are momentum scalps)
  */
-/** Most candidate markets to stream full order books for at once */
-const MAX_WATCHED_BOOKS = 10
+/** One row of the live signal view (dashboard → Analytics) */
+export interface LiveSignalRow {
+  slug: string
+  question: string
+  composite: number
+  imbalance: number
+  tradeFlow: number | null
+  confidence: number
+  /** Whether the full order book (real sizes) is arriving for this market */
+  fullBook: boolean
+}
 
 export class MicrostructureMomentumStrategy extends BaseStrategy {
   name = 'Micro Momentum'
@@ -101,7 +111,6 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
   // Market tracking
   private trackedMarkets = new Map<string, Market>()
-  private watchedBooks: string[] = []
   private subscribedSlugs = new Set<string>()
   private positionMarkets = new Set<string>() // Markets we already have positions in
   private lastTradeTimes = new Map<string, number>() // marketId → timestamp
@@ -180,8 +189,6 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       } catch { /* ignore */ }
     }
 
-    realtimeService.unwatchBooks?.(this.watchedBooks)
-    this.watchedBooks = []
     this.trackedMarkets.clear()
     this.subscribedSlugs.clear()
     this.positionMarkets.clear()
@@ -196,14 +203,52 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
   // MARKET DISCOVERY
   // ==========================================
 
-  /** Stream a candidate's full order book; keeps only the most recent few */
-  private watchBook(slug: string): void {
-    if (this.watchedBooks.includes(slug)) return
-    this.watchedBooks.push(slug)
-    realtimeService.watchBooks?.([slug])
-    while (this.watchedBooks.length > MAX_WATCHED_BOOKS) {
-      const evicted = this.watchedBooks.shift()!
-      realtimeService.unwatchBooks?.([evicted])
+  /**
+   * Current signal for every tracked market that has one, strongest first.
+   * For display only.
+   */
+  getLiveSignals(limit = 15): LiveSignalRow[] {
+    const rows: LiveSignalRow[] = []
+    for (const market of this.trackedMarkets.values()) {
+      const slug = signalSlugFor(market)
+      if (!slug) continue
+      const signal = microstructureAnalyzer.getSignal(slug)
+      if (!signal) continue
+      rows.push({
+        slug,
+        question: market.question ?? slug,
+        composite: signal.compositeSignal,
+        imbalance: signal.imbalance,
+        tradeFlow: signal.tradeFlow,
+        confidence: signal.signalConfidence,
+        fullBook: realtimeService.getBook?.(slug) != null,
+      })
+    }
+    return rows.sort((a, b) => Math.abs(b.composite) - Math.abs(a.composite)).slice(0, limit)
+  }
+
+  /** Entry threshold currently in force (for the live signal view) */
+  getEntryThreshold(): number {
+    return this.microConfig.minCompositeSignal
+  }
+
+  /** Log every tracked market's signal and price for the threshold report */
+  private recordSignals(): void {
+    const now = Date.now()
+    for (const market of this.trackedMarkets.values()) {
+      const slug = signalSlugFor(market)
+      if (!slug) continue
+      const signal = microstructureAnalyzer.getSignal(slug)
+      const price = realtimeService.getPrice(slug)
+      if (!signal || !price || !(price.bid > 0) || !(price.ask > price.bid)) continue
+      signalRecorder.record({
+        slug,
+        t: now,
+        composite: signal.compositeSignal,
+        confidence: signal.signalConfidence,
+        mid: (price.bid + price.ask) / 2,
+        spread: price.ask - price.bid,
+      })
     }
   }
 
@@ -225,6 +270,9 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
             try {
               realtimeService.subscribeMarket(slug)
               realtimeService.subscribeTrades?.([slug])
+              // Full book for every tracked market: the imbalance signal needs
+              // real resting sizes, and depth checks then skip REST
+              realtimeService.watchBooks?.([slug])
               this.subscribedSlugs.add(slug)
             } catch {
               // Subscription failed — will retry on next refresh
@@ -249,6 +297,9 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
 
   private async scanForSignals(): Promise<void> {
     if (!this._enabled || this._status !== 'running') return
+
+    // Log signals for the threshold report before any gate can skip the scan
+    try { this.recordSignals() } catch { /* recording is best-effort */ }
 
     // Warmup gate — don't trade until we've collected enough microstructure data
     if (Date.now() < this.warmupUntil) {
@@ -332,10 +383,7 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
       const currentPrice = market.outcomePrices[outcomeIndex]
       if (!currentPrice || currentPrice <= 0 || currentPrice >= 1) continue
 
-      // 5. Check order book depth for fills. A market that gets this far is a
-      // live candidate: stream its full book so the next check (and the entry
-      // itself) reads depth from memory instead of REST.
-      this.watchBook(market.slug)
+      // 5. Check order book depth for fills (read from the streamed book when fresh)
       let depthOk = true
       try {
         const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')

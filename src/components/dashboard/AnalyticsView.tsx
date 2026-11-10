@@ -3,6 +3,7 @@ import { useTradeAnalytics } from '@/hooks/useTradeAnalytics'
 import { MatrixAreaChart } from '@/components/charts/MatrixAreaChart'
 import { MatrixLineChart } from '@/components/charts/MatrixLineChart'
 import { MatrixBarChart } from '@/components/charts/MatrixBarChart'
+import { MicroSignalPanel } from './MicroSignalPanel'
 
 /**
  * AnalyticsView — Multi-chart analytics dashboard tab.
@@ -14,11 +15,14 @@ export const AnalyticsView: React.FC = () => {
 
   if (analytics.totalTrades === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-3 p-8">
+      <div className="flex-1 flex flex-col gap-4 p-4 sm:p-5 min-h-0 overflow-y-auto">
+        <MicroSignalPanel />
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 p-8">
         <span className="text-4xl opacity-20">&#128202;</span>
         <span className="text-sm font-sans text-agent-text-label">
           No closed trades yet. Analytics will appear after your first completed trade.
         </span>
+      </div>
       </div>
     )
   }
@@ -38,6 +42,7 @@ export const AnalyticsView: React.FC = () => {
 
   return (
     <div className="flex-1 flex flex-col gap-4 p-4 sm:p-5 min-h-0 overflow-y-auto">
+      <MicroSignalPanel />
       {/* Top row — Equity curve + Strategy comparison */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="card-base p-4">
