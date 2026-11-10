@@ -232,6 +232,12 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
     return this.microConfig.minCompositeSignal
   }
 
+  /** Exit rules currently in force (for replaying recorded signals) */
+  getExitRules(): { stopLossPercent: number; takeProfitPercent: number; maxHoldMs: number; cooldownMs: number } {
+    const { stopLossPercent, takeProfitPercent, maxHoldMs, cooldownMs } = this.microConfig
+    return { stopLossPercent, takeProfitPercent, maxHoldMs, cooldownMs }
+  }
+
   /** Log every tracked market's signal and price for the threshold report */
   private recordSignals(): void {
     const now = Date.now()

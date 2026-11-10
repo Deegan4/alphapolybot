@@ -90,6 +90,140 @@ export function thresholdReport(
   })
 }
 
+/** Exit rules of the strategy being simulated */
+export interface ExitRules {
+  /** Close when the mark is down this fraction of the entry price (e.g. 0.15) */
+  stopLossPercent: number
+  /** Close when the mark is up this fraction of the entry price (e.g. 0.20) */
+  takeProfitPercent: number
+  /** Close after this long regardless (ms) */
+  maxHoldMs: number
+  /** Do not re-enter the same market for this long after an exit (ms) */
+  cooldownMs?: number
+}
+
+export interface SimulatedTrade {
+  slug: string
+  /** Entry and exit times (ms) */
+  t: number
+  exitT: number
+  strength: number
+  reason: 'stop_loss' | 'take_profit' | 'max_hold'
+  gross: number
+  net: number
+}
+
+/** A gap this long between readings means the price path is unknown: the trade is discarded */
+export const MAX_PATH_GAP_MS = 3 * 60_000
+
+/**
+ * Replay the strategy's exits over the recorded readings. Per market, in time
+ * order: enter at the first confident reading at or above `threshold` (buying
+ * at the ask), then follow that market's later readings, marking at the bid,
+ * until stop-loss, take-profit or the hold limit closes the trade. No new
+ * entry in that market until the trade is closed and the cooldown has passed,
+ * so trades do not overlap and can be counted as separate observations.
+ * Trades still open at the end of the data, or crossing a gap in it, are left out.
+ */
+export function simulateTrades(
+  samples: SignalSample[],
+  threshold: number,
+  rules: ExitRules,
+  theta = PMUS_DEFAULT_TAKER_THETA,
+): SimulatedTrade[] {
+  const bySlug = new Map<string, SignalSample[]>()
+  for (const s of samples) {
+    if (!bySlug.has(s.slug)) bySlug.set(s.slug, [])
+    bySlug.get(s.slug)!.push(s)
+  }
+  const trades: SimulatedTrade[] = []
+  for (const [slug, list] of bySlug) {
+    list.sort((a, b) => a.t - b.t)
+    let freeAt = -Infinity
+    for (let i = 0; i < list.length; i++) {
+      const entry = list[i]
+      const strength = Math.abs(entry.composite)
+      if (entry.t < freeAt || strength < threshold || entry.confidence < REPORT_MIN_CONFIDENCE) continue
+      const yes = entry.composite > 0
+      const entryPx = (yes ? entry.mid : 1 - entry.mid) + Math.max(0, entry.spread) / 2
+      if (!(entryPx > 0 && entryPx < 1)) continue
+
+      let prevT = entry.t
+      let settled = false
+      for (let j = i + 1; j < list.length; j++) {
+        const r = list[j]
+        if (r.t - prevT > MAX_PATH_GAP_MS) { freeAt = r.t; settled = true; break } // path unknown: discard
+        prevT = r.t
+        const mark = (yes ? r.mid : 1 - r.mid) - Math.max(0, r.spread) / 2
+        if (!(mark > 0 && mark < 1)) continue
+        const pnl = (mark - entryPx) / entryPx
+        const reason: SimulatedTrade['reason'] | null =
+          pnl <= -rules.stopLossPercent ? 'stop_loss'
+            : pnl >= rules.takeProfitPercent ? 'take_profit'
+              : r.t - entry.t >= rules.maxHoldMs ? 'max_hold'
+                : null
+        if (!reason) continue
+        trades.push({
+          slug, t: entry.t, exitT: r.t, strength, reason,
+          gross: pnl,
+          net: pnl - roundTripFeeFraction(entryPx, mark, theta),
+        })
+        freeAt = r.t + (rules.cooldownMs ?? 0)
+        settled = true
+        break
+      }
+      // still open at the end of the data: block further entries in this market
+      if (!settled) freeAt = Infinity
+    }
+  }
+  return trades.sort((a, b) => a.t - b.t)
+}
+
+/** Per-threshold outcome of replaying the strategy's exits (non-overlapping trades) */
+export function exitRuleReport(
+  samples: SignalSample[],
+  rules: ExitRules,
+  thresholds: number[] = [0.1, 0.2, 0.3, 0.4, 0.5],
+  theta = PMUS_DEFAULT_TAKER_THETA,
+): ThresholdRow[] {
+  return thresholds.map(threshold => {
+    const trades = simulateTrades(samples, threshold, rules, theta)
+    const n = trades.length
+    if (n === 0) return { threshold, n: 0, winRate: 0, avgGross: 0, avgNet: 0 }
+    return {
+      threshold,
+      n,
+      winRate: trades.filter(t => t.net > 0).length / n,
+      avgGross: trades.reduce((sum, t) => sum + t.gross, 0) / n,
+      avgNet: trades.reduce((sum, t) => sum + t.net, 0) / n,
+    }
+  })
+}
+
+/** Simulated trades a threshold needs before it can be suggested */
+export const MIN_TRADES_TO_SUGGEST = 30
+
+/**
+ * The threshold with the best average after-fee return among those with at
+ * least `minTrades` simulated trades and a positive average. Null when none
+ * qualifies: too little data, or nothing has been profitable.
+ */
+export function suggestThreshold(rows: ThresholdRow[], minTrades = MIN_TRADES_TO_SUGGEST): ThresholdRow | null {
+  const ok = rows.filter(r => r.n >= minTrades && r.avgNet > 0)
+  if (ok.length === 0) return null
+  return ok.reduce((best, r) => (r.avgNet > best.avgNet ? r : best))
+}
+
+/** CSV of every sample (exit_mid empty until the 5-minute outcome is known) */
+export function samplesToCsv(samples: SignalSample[]): string {
+  const lines = ['time_iso,market_slug,composite_signal,confidence,yes_mid,spread,exit_mid_5m']
+  for (const s of samples) {
+    const slug = /[",\n]/.test(s.slug) ? `"${s.slug.replace(/"/g, '""')}"` : s.slug
+    lines.push([new Date(s.t).toISOString(), slug, s.composite, s.confidence, s.mid, s.spread, s.exitMid ?? ''].join(','))
+  }
+  return lines.join('\n') + '\n'
+}
+
 export class SignalRecorder {
   private samples: SignalSample[] = []
   private lastPersist = 0
