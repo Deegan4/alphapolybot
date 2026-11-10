@@ -62,7 +62,50 @@ export const getPriceHistorySchema = {
  * minutes), so keep this small; tightest-spread markets are looked up first.
  */
 const MAX_STATS_LOOKUPS = 30;
-const LOOKUP_CONCURRENCY = 4;
+const LOOKUP_CONCURRENCY = 2;
+/** Volume / liquidity move slowly: reuse a market's stats for this long */
+const STATS_TTL_MS = 15 * 60 * 1000;
+
+const statsCache = new Map<string, { volume: number; liquidity: number; at: number }>();
+
+/** For tests */
+export function clearStatsCache(): void {
+  statsCache.clear();
+}
+
+/**
+ * Fill volume / liquidity on rows. Bid/ask already come inline with the event
+ * listing, so a BBO call is only needed for the stats, and only when they are
+ * not cached. Rows with cached stats keep their (fresher) inline quotes; at
+ * most `maxLookups` uncached rows are fetched, tightest spread first.
+ */
+async function withStats(rows: MarketRow[], maxLookups: number): Promise<MarketRow[]> {
+  const sdk = getPublicSdk();
+  const now = Date.now();
+  const fresh = (slug: string) => {
+    const c = statsCache.get(slug);
+    return c && now - c.at < STATS_TTL_MS ? c : null;
+  };
+  const todo = rows
+    .filter(r => relSpread(r) < Infinity && !fresh(r.market_slug))
+    .sort((a, b) => relSpread(a) - relSpread(b))
+    .slice(0, Math.max(0, maxLookups));
+  const bbos = await mapLimit(todo, LOOKUP_CONCURRENCY, r => sdk.markets.bbo(r.market_slug));
+  const fetched = new Map<string, MarketRow>();
+  todo.forEach((r, i) => {
+    const raw = bbos[i];
+    if (!raw) return;
+    const row = withBbo(r, raw);
+    statsCache.set(r.market_slug, { volume: row.volume, liquidity: row.liquidity, at: Date.now() });
+    fetched.set(r.market_slug, row);
+  });
+  return rows.map(r => {
+    const got = fetched.get(r.market_slug);
+    if (got) return got;
+    const c = fresh(r.market_slug);
+    return c ? { ...r, volume: c.volume, liquidity: c.liquidity } : r;
+  });
+}
 
 const relSpread = (r: MarketRow) =>
   r.best_bid != null && r.best_ask != null && r.mid ? (r.best_ask - r.best_bid) / r.mid : Infinity;
@@ -99,20 +142,16 @@ export async function handleGetMarkets(args: {
     // those (two-sided markets first, capped) — otherwise every row is 0.
     const needStats = args.include_prices !== false && (args.sort ?? 'volume') !== 'end_time';
     if (needStats) {
-      const candidates = rows
-        .filter(r => relSpread(r) < Infinity)
-        .sort((a, b) => relSpread(a) - relSpread(b))
-        .slice(0, MAX_STATS_LOOKUPS);
-      const bbos = await mapLimit(candidates, LOOKUP_CONCURRENCY, r => sdk.markets.bbo(r.market_slug));
-      const bySlug = new Map(candidates.map((r, i) => [r.market_slug, bbos[i]]));
-      rows = rows.map(r => (bySlug.has(r.market_slug) ? withBbo(r, bySlug.get(r.market_slug) ?? null) : r));
+      // Look up about twice as many markets as were asked for (to rank them), capped
+      rows = await withStats(rows, Math.min(MAX_STATS_LOOKUPS, Math.max(10, limit * 2)));
     }
 
     rows = sortRows(rows, args.sort ?? 'volume').slice(0, limit);
 
+    // Sorted by end time: quotes are already inline, so only the returned
+    // rows need stats, and cached ones cost nothing
     if (args.include_prices !== false && !needStats && rows.length > 0) {
-      const bbos = await mapLimit(rows, LOOKUP_CONCURRENCY, r => sdk.markets.bbo(r.market_slug));
-      rows = rows.map((r, i) => withBbo(r, bbos[i]));
+      rows = await withStats(rows, Math.min(MAX_STATS_LOOKUPS, rows.length));
     }
 
     return { markets: rows, count: rows.length };
@@ -154,11 +193,7 @@ export async function handleGetMarketDetail(args: {
       const { event } = await sdk.events.retrieveBySlug(args.event_slug);
       // Quotes are inline; BBO stats only for the tightest markets (rate limit)
       let rows = flattenEvents([event]);
-      const top = new Set(rows.filter(r => relSpread(r) < Infinity).sort((a, b) => relSpread(a) - relSpread(b)).slice(0, MAX_STATS_LOOKUPS).map(r => r.market_slug));
-      const picked = rows.filter(r => top.has(r.market_slug));
-      const bbos = await mapLimit(picked, LOOKUP_CONCURRENCY, r => sdk.markets.bbo(r.market_slug));
-      const bySlug = new Map(picked.map((r, i) => [r.market_slug, bbos[i]]));
-      rows = rows.map(r => (bySlug.has(r.market_slug) ? withBbo(r, bySlug.get(r.market_slug) ?? null) : r));
+      rows = await withStats(rows, MAX_STATS_LOOKUPS);
       return {
         event_slug: event.slug,
         title: event.title,
