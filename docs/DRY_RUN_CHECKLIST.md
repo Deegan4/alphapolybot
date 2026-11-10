@@ -10,7 +10,7 @@ The public gateway was exercised live on 2026-11-08 (`npm run smoke` in `mcp-ser
 |:-----|:-------|
 | Events, markets, BBO, book, settlement, price history (gateway) | Verified live |
 | Up/Down slug format, window, price to beat | Verified live |
-| Rate limit | Documented at 25 requests/s per IP. On the gateway, bursts also drew a Cloudflare 1015 ban for several minutes. The throttle runs at 8/s (gateway) + 15/s (API). If the console shows `HTTP 429 rate limit … pausing requests`, lower `GATEWAY_BUCKET` in `src/services/api/requestThrottle.ts`. |
+| Rate limit | Documented at 25 requests/s per IP. On the gateway, bursts also drew a Cloudflare 1015 ban for several minutes. The throttle runs at 5/s (gateway) + 15/s (API); 8/s still drew occasional 429s on 2026-11-10. The smoke test prints how many 429s it hit. If the console shows `HTTP 429 rate limit … pausing requests`, lower `GATEWAY_BUCKET` in `src/services/api/requestThrottle.ts`. |
 | Authenticated REST: balances, positions, orders | **Checked against the API reference** (2026-11-08), not live. Positions are a map keyed by slug with decimal quantity fields and a `nextCursor`; balances are a per-currency list. The code now reads those fields. |
 | `cashValue` on positions | **Ambiguous.** The reference calls it "Unrealized PnL"; the app treats it as current market value. Compare against the Polymarket US app in step 1. |
 | Order prices for NO | **Documented:** prices always refer to YES; buying NO at $0.40 is selling YES at $0.60. The code converts. |
@@ -25,6 +25,8 @@ The public gateway was exercised live on 2026-11-08 (`npm run smoke` in `mcp-ser
 | Up/Down settlement | The settlement endpoint was verified live for expired markets. **Assumed:** it returns 1 when the market's first outcome won, and that the first outcome is "Up" when the recorder says so. Step 2 confirms it. |
 
 Rows not marked verified live are the point of this checklist.
+
+A scheduled GitHub workflow (`.github/workflows/api-smoke.yml`) runs the public smoke test once a day and can be started by hand from the Actions tab. A red run means the public API changed shape or rate-limited the runner; it says nothing about the account endpoints.
 
 ## 0. Prerequisites
 
@@ -44,7 +46,8 @@ npm run smoke              # public checks
 npm run smoke -- --auth    # adds balance, positions, open orders, order preview
 ```
 
-- [ ] All public checks pass. A `get_markets` failure that mentions HTML or 429 means you are rate-limited. Wait 5–10 minutes.
+- [ ] All public checks pass, and the last line reads `No rate limiting`. A `WARNING: rate-limited N time(s)` line with passing checks means the throttle recovered but the gateway rate is still too high for your connection.
+  A `get_markets` failure that mentions HTML or 429 means you are rate-limited. Wait 5–10 minutes.
 - [ ] `get_balance` shows your real balance. An empty object or zeros on a funded account means the balance response shape differs from the SDK typings.
 - [ ] `get_positions` lists what the Polymarket US app shows. Note whether `cash_value_usd` equals the position's market value or its unrealized P&L, and report which.
 - [ ] The `place_order` dry run returns a preview without an error. It is a BUY YES of 1 share at 1¢ and is never sent.
@@ -66,7 +69,7 @@ Settings → Trading: confirm **Dry run is on**. Connect your key in Settings �
 - [ ] **Live balance.** Settings → API shows the private feed `connected` with `balance live`, and the header balance still matches the Polymarket US app. A balance off by a factor (100×, for example) means the feed uses different units from REST: report it and do not trade.
 - [ ] **Feed status.** Settings → API shows both feeds `connected` with a last message under a minute old. `stall restarts` should stay at 0 on a healthy connection; a count that climbs every minute or so means the heartbeat assumption is wrong.
 - [ ] **Order books in memory.** With BTC Up/Down or Micro Momentum running, the market-data row shows `books N/M fresh` with N close to M on active markets. `0/M` while prices update means the full-book messages are not arriving or have a different shape.
-- [ ] **Request rates.** The same panel stays well under 8/s (gateway) and 15/s (API), with 0 in the 429 and Dropped columns. Balance and open-order calls should be rare while the private feed is connected.
+- [ ] **Request rates.** The same panel stays at or under 5/s (gateway) and 15/s (API), with 0 in the 429 and Dropped columns. Balance and open-order calls should be rare while the private feed is connected.
 - [ ] **Feed loss.** Turn the network off for a few minutes. The dashboard shows MARKET DATA FEED OFFLINE or PRIVATE FEED OFFLINE once reconnecting stops; **Retry** brings the feed back after the network returns. With "Pause Entries When Price Feed Is Down" on (and dry run off, in step 3), no new entries are placed while the market-data feed is down.
 - [ ] **Micro signals.** Dashboard → Analytics → Microstructure signals lists tracked markets with signals of both signs, `full book` in the last column, and trade-flow values on markets that are trading. All signals negative, or `level counts` everywhere, means depth is not reaching the signal.
 - [ ] **Recording only (optional).** With Settings → Trading → Record Signals Only on, the dashboard shows RECORDING SIGNALS ONLY, no Momentum or Up/Down trades appear (simulated or real), and the Analytics reports keep growing.

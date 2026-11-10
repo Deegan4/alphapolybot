@@ -17,6 +17,7 @@ import { handleGetMarkets, handleGetMarketDetail, handleGetPriceHistory } from '
 import { handleGetBalance } from './tools/balance.js';
 import { handleGetOpenOrders, handleGetPositions, handlePlaceOrder } from './tools/trading.js';
 import { hasCredentials } from './clients/polymarket-us.js';
+import { getRequestMetrics } from './clients/throttle.js';
 
 type Check = { name: string; ok: boolean; detail: string };
 const results: Check[] = [];
@@ -111,6 +112,19 @@ function report() {
   for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}\n      ${r.detail}`);
   const failed = results.filter(r => !r.ok).length;
   console.log(`\n${results.length - failed}/${results.length} checks passed`);
+  // A pass that needed rate-limit pauses is not a clean pass: say so
+  const m = getRequestMetrics();
+  const limited = m.gateway.rateLimited + m.api.rateLimited;
+  const dropped = m.gateway.dropped + m.api.dropped;
+  if (limited > 0 || dropped > 0) {
+    console.log(
+      `WARNING: rate-limited ${limited} time(s) (gateway ${m.gateway.rateLimited}, api ${m.api.rateLimited})` +
+      `${dropped > 0 ? `, ${dropped} request(s) dropped` : ''}. ` +
+      `If this repeats on your connection, lower GATEWAY_BUCKET in src/clients/throttle.ts and src/services/api/requestThrottle.ts.`,
+    );
+  } else {
+    console.log('No rate limiting (0 HTTP 429 responses).');
+  }
   process.exit(failed === 0 && results.length > 0 ? 0 : 1);
 }
 

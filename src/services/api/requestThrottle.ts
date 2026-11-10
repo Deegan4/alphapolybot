@@ -40,9 +40,10 @@ export class RequestDroppedError extends Error {
  * (shared by every key on that IP); on 429 wait at least 1s, then back off
  * exponentially. Gateway + API together stay under 25/s. Bursts of ~30
  * requests in under two seconds drew Cloudflare 1015 bans in testing, so the
- * gateway (bulk market data) gets the smaller share.
+ * gateway (bulk market data) gets the smaller share. At 8/s the gateway still
+ * returned occasional 429s during a 10-market scan (2026-11-10), so it runs at 5/s.
  */
-export const GATEWAY_BUCKET: BucketConfig = { ratePerSec: 8, burst: 10, cooldownMs: 2_000, maxCooldownMs: 5 * 60_000, maxQueueWaitMs: 15_000 }
+export const GATEWAY_BUCKET: BucketConfig = { ratePerSec: 5, burst: 6, cooldownMs: 2_000, maxCooldownMs: 5 * 60_000, maxQueueWaitMs: 15_000 }
 export const API_BUCKET: BucketConfig = { ratePerSec: 15, burst: 15, cooldownMs: 2_000, maxCooldownMs: 2 * 60_000, maxQueueWaitMs: 10_000 }
 
 type Clock = { now: () => number; sleep: (ms: number) => Promise<void> }
@@ -176,7 +177,8 @@ type RequestFn = (method: string, path: string, options?: { authenticated?: bool
 
 /**
  * Wrap an SDK instance's `request` so every call waits for its bucket and a
- * 429 pauses that bucket. Idempotent per instance.
+ * 429 pauses that bucket. A rate-limited GET is retried once after the pause.
+ * Idempotent per instance.
  */
 export function throttleSdk<T extends object>(
   sdk: T,
@@ -187,22 +189,29 @@ export function throttleSdk<T extends object>(
   const original = target.request.bind(sdk) as RequestFn
   target.request = async (method, path, options = {}) => {
     const bucket = options.authenticated ? buckets.api : buckets.gateway
+    const label = options.authenticated ? 'api' : 'gateway'
     // Cancels must go out however long the queue is: they reduce exposure
-    await bucket.acquire(isCancelRequest(method, path) ? Infinity : undefined)
-    bucket.noteSent()
-    try {
-      const result = await original(method, path, options)
-      bucket.succeed()
-      return result
-    } catch (err) {
-      if ((err as { status?: number })?.status === 429) {
+    const maxWait = isCancelRequest(method, path) ? Infinity : undefined
+    // A rate-limited read is retried once after the pause. Reads are safe to
+    // repeat; anything that changes state (orders, cancels) is never resent
+    // here, because the first attempt may have been accepted.
+    const attempts = method.toUpperCase() === 'GET' ? 2 : 1
+    for (let attempt = 1; ; attempt++) {
+      await bucket.acquire(maxWait)
+      bucket.noteSent()
+      try {
+        const result = await original(method, path, options)
+        bucket.succeed()
+        return result
+      } catch (err) {
+        if ((err as { status?: number })?.status !== 429) throw err
         const wasPaused = Date.now() < bucket.pausedUntil
         bucket.penalize()
         if (!wasPaused) {
-          console.warn(`[polymarket-us] HTTP 429 rate limit on ${options.authenticated ? 'api' : 'gateway'} — pausing requests for ${Math.round((bucket.pausedUntil - Date.now()) / 1000)}s`)
+          console.warn(`[polymarket-us] HTTP 429 rate limit on ${label} — pausing requests for ${Math.round((bucket.pausedUntil - Date.now()) / 1000)}s`)
         }
+        if (attempt >= attempts) throw err
       }
-      throw err
     }
   }
   target.__throttled = true

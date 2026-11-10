@@ -78,10 +78,12 @@ describe('throttleSdk', () => {
 
   it('penalizes the bucket on HTTP 429 and rethrows', async () => {
     const b = buckets()
-    const fake: FakeSdk = { request: async () => { throw Object.assign(new Error('rate limited'), { status: 429 }) } }
+    let calls = 0
+    const fake: FakeSdk = { request: async () => { calls++; throw Object.assign(new Error('rate limited'), { status: 429 }) } }
     const sdk = throttleSdk(fake, b)
     await expect(sdk.request('GET', '/v1/markets/x/bbo', {})).rejects.toThrow('rate limited')
-    expect(b.gateway.pausedUntil).toBe(5000)
+    expect(calls).toBe(2) // a read is retried once after the pause, then gives up
+    expect(b.gateway.pausedUntil).toBeGreaterThanOrEqual(5000)
     expect(b.api.pausedUntil).toBe(0)
   })
 
@@ -197,5 +199,49 @@ describe('dropping stale queued requests', () => {
     await expect(sdk.request('POST', '/v1/orders', { authenticated: true })).rejects.toBeInstanceOf(RequestDroppedError)
     await expect(sdk.request('POST', '/v1/order/x/cancel', { authenticated: true })).resolves.toBe('/v1/order/x/cancel')
     expect(clock.now()).toBe(20_000)
+  })
+})
+
+describe('429 retry', () => {
+  const setup = () => {
+    const clock = fakeClock()
+    return {
+      clock,
+      gateway: new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 2000 }, clock),
+      api: new TokenBucket({ ratePerSec: 10, burst: 10, cooldownMs: 2000 }, clock),
+    }
+  }
+
+  it('retries a rate-limited read once, after the pause', async () => {
+    const b = setup()
+    let calls = 0
+    const fake: FakeSdk = {
+      request: async () => {
+        if (++calls === 1) throw Object.assign(new Error('rate limited'), { status: 429 })
+        return 'book'
+      },
+    }
+    await expect(throttleSdk(fake, b).request('GET', '/v1/markets/x/book', {})).resolves.toBe('book')
+    expect(calls).toBe(2)
+    expect(b.clock.now()).toBeGreaterThanOrEqual(2000)
+    expect(b.gateway.metrics().rateLimited).toBe(1)
+  })
+
+  it('never resends an order or a cancel', async () => {
+    const b = setup()
+    let calls = 0
+    const fake: FakeSdk = { request: async () => { calls++; throw Object.assign(new Error('rate limited'), { status: 429 }) } }
+    const sdk = throttleSdk(fake, b)
+    await expect(sdk.request('POST', '/v1/orders', { authenticated: true })).rejects.toThrow('rate limited')
+    await expect(sdk.request('POST', '/v1/order/x/cancel', { authenticated: true })).rejects.toThrow('rate limited')
+    expect(calls).toBe(2) // one attempt each
+  })
+
+  it('does not retry other errors', async () => {
+    const b = setup()
+    let calls = 0
+    const fake: FakeSdk = { request: async () => { calls++; throw Object.assign(new Error('not found'), { status: 404 }) } }
+    await expect(throttleSdk(fake, b).request('GET', '/v1/market/slug/x', {})).rejects.toThrow('not found')
+    expect(calls).toBe(1)
   })
 })
