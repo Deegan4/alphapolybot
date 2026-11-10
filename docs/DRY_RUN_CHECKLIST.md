@@ -21,6 +21,7 @@ The public gateway was exercised live on 2026-11-08 (`npm run smoke` in `mcp-ser
 | Latency reject | **Documented:** "Order Processing Max Delay Exceeded" is transient. The bot resubmits once. |
 | Private feed balance | **Assumed** to be in the same dollar units as the REST balance; neither the SDK types nor the docs say. Step 2 confirms it. |
 | Full order book stream, trade stream | **Documented** message shapes (each book update carries the whole top of the book; trades carry the taker's side and intent). Not verified live. The lite feed's `bidDepth`/`askDepth` are in the docs but not the SDK types. |
+| WebSockets from the browser | The SDK refuses to open a WebSocket in a browser, so the feeds never connected before 2026-11-10. They now go through the dev server's bridge. Verified: the bridge reaches the exchange and a bad signature is refused with HTTP 401. **Not verified:** a real key being accepted. |
 | Heartbeats | **Unknown interval.** The stall watchdog only arms after it has seen two heartbeats; if the server sends none it never fires. |
 | Up/Down settlement | The settlement endpoint was verified live for expired markets. **Assumed:** it returns 1 when the market's first outcome won, and that the first outcome is "Up" when the recorder says so. Step 2 confirms it. |
 

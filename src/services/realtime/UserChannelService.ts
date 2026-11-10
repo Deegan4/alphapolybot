@@ -11,18 +11,18 @@
  *   onConnectionChange(), isConnected()
  */
 
-import {
-  PrivateWebSocket,
-  type OrderUpdate,
-  type OrderSnapshot,
-  type PositionUpdate,
-  type PositionSnapshot,
-  type AccountBalanceUpdate,
-  type AccountBalanceSnapshot,
+import type {
+  OrderUpdate,
+  OrderSnapshot,
+  PositionUpdate,
+  PositionSnapshot,
+  AccountBalanceUpdate,
+  AccountBalanceSnapshot,
 } from 'polymarket-us'
 import type { USOrderExecution, USPositionUpdate } from '@/types'
 import { HeartbeatClock, isFeedStalled, WATCHDOG_INTERVAL_MS } from './feedWatchdog'
 import { polymarketUSClient } from '@/services/api'
+import { BrowserPrivateWebSocket } from './pmusBrowserSocket'
 
 /** Mapped from SDK OrderUpdate execution data */
 type TradeCallback = (exec: USOrderExecution) => void
@@ -33,7 +33,7 @@ type BalanceCallback = (balance: number, buyingPower: number) => void
 type ConnectionCallback = (status: 'connected' | 'disconnected' | 'error') => void
 
 export class UserChannelService {
-  private ws: PrivateWebSocket | null = null
+  private ws: BrowserPrivateWebSocket | null = null
   private subscribedSlugs = new Set<string>()
   private reconnectAttempts = 0
   private maxReconnectAttempts = 10
@@ -76,11 +76,9 @@ export class UserChannelService {
 
     return new Promise((resolve) => {
       try {
-        this.ws = new PrivateWebSocket({
-          keyId: wsOpts.keyId,
-          secretKey: wsOpts.secretKey,
-          baseUrl: wsOpts.baseUrl,
-        })
+        // Browser-safe client: connects through the dev server's bridge,
+        // which adds the auth headers a browser WebSocket cannot send
+        this.ws = new BrowserPrivateWebSocket({ keyId: wsOpts.keyId, secretKey: wsOpts.secretKey })
 
         this.ws.on('open', () => {
           console.log('[UserChannel] Private WebSocket connected')
@@ -183,7 +181,7 @@ export class UserChannelService {
           // SDK handles keepalive internally
         })
 
-        this.ws.on('error', (err) => {
+        this.ws.on('error', (err: unknown) => {
           console.error('[UserChannel] WebSocket error:', err)
           this.notifyConnectionCallbacks('error')
           resolve(false)
@@ -198,7 +196,7 @@ export class UserChannelService {
           this.attemptReconnect()
         })
 
-        this.ws.connect()
+        void this.ws.connect()
       } catch (error) {
         console.error('[UserChannel] Failed to connect:', error)
         resolve(false)

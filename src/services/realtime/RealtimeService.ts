@@ -11,12 +11,8 @@
  * Key difference: subscriptions use market slugs, not token IDs.
  */
 
-import {
-  MarketsWebSocket,
-  type MarketDataLite,
-  type MarketData,
-  type Trade,
-} from 'polymarket-us'
+import type { MarketDataLite, MarketData, Trade } from 'polymarket-us'
+import { BrowserMarketsWebSocket } from './pmusBrowserSocket'
 import { HeartbeatClock, isFeedStalled, WATCHDOG_INTERVAL_MS } from './feedWatchdog'
 
 /** Book levels per side summed for the depth-imbalance signal */
@@ -55,7 +51,7 @@ type PriceUpdateCallback = (slug: string, price: PriceData) => void
 type ConnectionCallback = (status: 'connected' | 'disconnected' | 'error') => void
 
 export class RealtimeService {
-  private ws: MarketsWebSocket | null = null
+  private ws: BrowserMarketsWebSocket | null = null
   private reconnectAttempts = 0
   private maxReconnectAttempts = 10
   private reconnectDelay = 1000
@@ -99,11 +95,9 @@ export class RealtimeService {
     this.closingIntentionally = false
     return new Promise((resolve) => {
       try {
-        this.ws = new MarketsWebSocket({
-          keyId: wsOpts.keyId,
-          secretKey: wsOpts.secretKey,
-          baseUrl: wsOpts.baseUrl,
-        })
+        // Browser-safe client: connects through the dev server's bridge,
+        // which adds the auth headers a browser WebSocket cannot send
+        this.ws = new BrowserMarketsWebSocket({ keyId: wsOpts.keyId, secretKey: wsOpts.secretKey })
 
         this.ws.on('open', () => {
           console.log('[RealtimeService] WebSocket connected')
@@ -150,7 +144,7 @@ export class RealtimeService {
           this.heartbeats.beat(this.lastMessageTime)
         })
 
-        this.ws.on('error', (err) => {
+        this.ws.on('error', (err: unknown) => {
           console.error('[RealtimeService] WebSocket error:', err)
           this.notifyConnectionCallbacks('error')
           resolve(false)
@@ -163,7 +157,7 @@ export class RealtimeService {
           this.attemptReconnect()
         })
 
-        this.ws.connect()
+        void this.ws.connect()
       } catch (error) {
         console.error('[RealtimeService] Failed to connect:', error)
         resolve(false)
