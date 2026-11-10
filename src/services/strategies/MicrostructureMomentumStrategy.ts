@@ -492,6 +492,8 @@ export class MicrostructureMomentumStrategy extends BaseStrategy {
           filledSize: result.filledSize,
           success: true,
           modelProbability: modelProb,
+          bidAskImbalance: signal.imbalance,
+          bidAskSpread: signal.spreadFraction,
         })
 
         this.emit('tradePlaced', { market, signal, result })

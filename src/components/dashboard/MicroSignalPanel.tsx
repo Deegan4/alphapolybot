@@ -2,10 +2,12 @@ import React, { useEffect, useState } from 'react'
 import { strategyManager } from '@/services/strategies'
 import type { LiveSignalRow } from '@/services/strategies/MicrostructureMomentumStrategy'
 import {
-  signalRecorder, thresholdReport, exitRuleReport, suggestThreshold, samplesToCsv,
-  SIGNAL_HORIZON_MS, MIN_TRADES_TO_SUGGEST, type ThresholdRow, type ExitRules,
+  signalRecorder, thresholdReport, exitRuleReport, holdoutSuggestion, exitGridReport, realTradeSummary, simulateTrades, samplesToCsv,
+  SIGNAL_HORIZON_MS, MIN_TRADES_TO_SUGGEST, MIN_HOLDOUT_TRADES,
+  type ThresholdRow, type ExitRules, type HoldoutResult, type ExitGridCell,
 } from '@/services/trading/SignalRecorder'
 import { useSettingsStore } from '@/stores'
+import { tradeLogger } from '@/services/trading'
 import { cn } from '@/utils/cn'
 
 const pct = (x: number) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`
@@ -22,6 +24,9 @@ export const MicroSignalPanel: React.FC = () => {
   const [report, setReport] = useState<ThresholdRow[]>([])
   const [exitReport, setExitReport] = useState<ThresholdRow[]>([])
   const [rules, setRules] = useState<ExitRules | null>(null)
+  const [holdout, setHoldout] = useState<HoldoutResult | null>(null)
+  const [grid, setGrid] = useState<ExitGridCell[][]>([])
+  const [compare, setCompare] = useState<{ real: ReturnType<typeof realTradeSummary>; simN: number; simGross: number } | null>(null)
   const [mode, setMode] = useState<'exits' | 'fixed'>('exits')
   const [counts, setCounts] = useState({ total: 0, resolved: 0 })
 
@@ -35,6 +40,20 @@ export const MicroSignalPanel: React.FC = () => {
       setReport(thresholdReport(samples))
       setExitReport(exitRuleReport(samples, exitRules))
       setRules(exitRules)
+      setHoldout(holdoutSuggestion(samples, exitRules))
+      const current = strategy.getEntryThreshold()
+      setGrid(exitGridReport(samples, current, exitRules))
+      if (samples.length > 0) {
+        const since = samples.reduce((min, x) => Math.min(min, x.t), Infinity)
+        const sim = simulateTrades(samples, current, exitRules)
+        setCompare({
+          real: realTradeSummary(tradeLogger.getRecords(), since),
+          simN: sim.length,
+          simGross: sim.length ? sim.reduce((sum, t) => sum + t.gross, 0) / sim.length : 0,
+        })
+      } else {
+        setCompare(null)
+      }
       setCounts(signalRecorder.getCounts())
     }
     tick()
@@ -45,7 +64,6 @@ export const MicroSignalPanel: React.FC = () => {
   const setMicroMinCompositeSignal = useSettingsStore((st) => st.setMicroMinCompositeSignal)
   const holdMin = Math.round(SIGNAL_HORIZON_MS / 60_000)
   const shown = mode === 'exits' ? exitReport : report
-  const suggestion = suggestThreshold(exitReport)
 
   const downloadCsv = () => {
     const blob = new Blob([samplesToCsv(signalRecorder.getSamples())], { type: 'text/csv' })
@@ -115,7 +133,7 @@ export const MicroSignalPanel: React.FC = () => {
             export CSV
           </button>
           <button
-            onClick={() => { signalRecorder.clear(); setReport([]); setExitReport([]); setCounts({ total: 0, resolved: 0 }) }}
+            onClick={() => { signalRecorder.clear(); setReport([]); setExitReport([]); setHoldout(null); setGrid([]); setCompare(null); setCounts({ total: 0, resolved: 0 }) }}
             className="text-agent-text-muted hover:text-agent-green"
           >
             clear samples
@@ -159,17 +177,24 @@ export const MicroSignalPanel: React.FC = () => {
 
       {mode === 'exits' && counts.total > 0 && (
         <div className="mt-2 text-xs font-sans">
-          {suggestion ? (
+          {holdout ? (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-agent-text">
-                Best so far: ±{suggestion.threshold.toFixed(1)} ({pct(suggestion.avgNet)} average after fees over {suggestion.n} simulated trades).
+                Best on the first two-thirds of the data: ±{holdout.train.threshold.toFixed(1)} ({pct(holdout.train.avgNet)} after fees over {holdout.train.n} trades).{' '}
+                {holdout.test.n === 0
+                  ? 'No trades yet in the last third to check it against.'
+                  : `On the last third, which was not used to pick it: ${pct(holdout.test.avgNet)} over ${holdout.test.n} trades.`}
               </span>
-              {Math.abs(suggestion.threshold - threshold) > 1e-9 ? (
+              {!holdout.confirmed ? (
+                <span className="text-agent-orange">
+                  {holdout.test.n < MIN_HOLDOUT_TRADES ? `Needs ${MIN_HOLDOUT_TRADES} held-out trades before it can be applied.` : 'It did not hold up, so it is not offered.'}
+                </span>
+              ) : Math.abs(holdout.train.threshold - threshold) > 1e-9 ? (
                 <button
-                  onClick={() => { setMicroMinCompositeSignal(suggestion.threshold); setThreshold(suggestion.threshold) }}
+                  onClick={() => { setMicroMinCompositeSignal(holdout.train.threshold); setThreshold(holdout.train.threshold) }}
                   className="text-[10px] font-mono font-bold text-agent-cyan border border-agent-cyan/30 hover:bg-agent-cyan/10 rounded px-2 py-0.5"
                 >
-                  Apply ±{suggestion.threshold.toFixed(1)}
+                  Apply ±{holdout.train.threshold.toFixed(1)}
                 </button>
               ) : (
                 <span className="text-agent-text-muted">Already in use.</span>
@@ -177,9 +202,78 @@ export const MicroSignalPanel: React.FC = () => {
             </div>
           ) : (
             <span className="text-agent-text-muted">
-              No suggestion yet: a threshold needs at least {MIN_TRADES_TO_SUGGEST} simulated trades and a positive average after fees.
+              No suggestion yet: a threshold needs at least {MIN_TRADES_TO_SUGGEST} simulated trades and a positive average after fees on the first two-thirds of the data.
             </span>
           )}
+        </div>
+      )}
+
+      {mode === 'exits' && compare && (compare.real.n > 0 || compare.simN > 0) && (
+        <div className="mt-4">
+          <h4 className="text-agent-green text-xs font-mono mb-1">Replay vs logged trades at ±{threshold.toFixed(1)} (before fees)</h4>
+          <table className="w-full text-xs font-mono">
+            <thead>
+              <tr className="text-agent-text-muted text-left">
+                <th className="font-normal py-1">Source</th>
+                <th className="font-normal text-right">Trades</th>
+                <th className="font-normal text-right">Profitable</th>
+                <th className="font-normal text-right">Avg return</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td className="py-0.5">Replay on recorded prices</td>
+                <td className="text-right">{compare.simN}</td>
+                <td className="text-right text-agent-text-muted">—</td>
+                <td className="text-right">{compare.simN ? pct(compare.simGross) : '—'}</td>
+              </tr>
+              <tr>
+                <td className="py-0.5">Logged trades{compare.real.dryRun > 0 ? ` (${compare.real.dryRun} dry run)` : ''}</td>
+                <td className="text-right">{compare.real.n}</td>
+                <td className="text-right">{compare.real.n ? `${Math.round(compare.real.winRate * 100)}%` : '—'}</td>
+                <td className="text-right">{compare.real.n ? pct(compare.real.avgPnl) : '—'}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p className="text-agent-text-muted text-[11px] font-sans mt-1">
+            The replay enters every qualifying signal; the strategy also applies its depth, trade-flow and position-limit checks, so expect fewer logged trades. A large gap in average return means the replay is not a good stand-in.
+          </p>
+        </div>
+      )}
+
+      {mode === 'exits' && grid.some(r => r.some(c => c.n > 0)) && (
+        <div className="mt-4">
+          <h4 className="text-agent-green text-xs font-mono mb-1">Stop-loss and take-profit levels at ±{threshold.toFixed(1)} (average after fees, trades)</h4>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-agent-text-muted text-left">
+                  <th className="font-normal py-1">Stop-loss</th>
+                  {grid[0].map(c => (
+                    <th key={c.takeProfitPercent} className="font-normal text-right">TP {Math.round(c.takeProfitPercent * 100)}%</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {grid.map(row => (
+                  <tr key={row[0].stopLossPercent}>
+                    <td className="py-0.5">{Math.round(row[0].stopLossPercent * 100)}%</td>
+                    {row.map(c => {
+                      const current = rules != null && Math.abs(c.stopLossPercent - rules.stopLossPercent) < 1e-9 && Math.abs(c.takeProfitPercent - rules.takeProfitPercent) < 1e-9
+                      return (
+                        <td key={c.takeProfitPercent} className={cn('text-right', current && 'underline', c.n > 0 && (c.avgNet > 0 ? 'text-agent-green' : 'text-agent-orange'))}>
+                          {c.n ? `${pct(c.avgNet)} (${c.n})` : '—'}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-agent-text-muted text-[11px] font-sans mt-1">
+            Your current levels are underlined when they are on the grid. This compares 20 combinations on the same data, so the best cell is partly luck; change levels in Settings only on a clear, well-sampled difference.
+          </p>
         </div>
       )}
 

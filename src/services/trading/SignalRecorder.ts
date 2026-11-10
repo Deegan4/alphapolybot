@@ -214,6 +214,116 @@ export function suggestThreshold(rows: ThresholdRow[], minTrades = MIN_TRADES_TO
   return ok.reduce((best, r) => (r.avgNet > best.avgNet ? r : best))
 }
 
+function summarise(threshold: number, trades: Array<{ gross: number; net: number }>): ThresholdRow {
+  const n = trades.length
+  if (n === 0) return { threshold, n: 0, winRate: 0, avgGross: 0, avgNet: 0 }
+  return {
+    threshold,
+    n,
+    winRate: trades.filter(t => t.net > 0).length / n,
+    avgGross: trades.reduce((sum, t) => sum + t.gross, 0) / n,
+    avgNet: trades.reduce((sum, t) => sum + t.net, 0) / n,
+  }
+}
+
+/** Held-out trades a suggestion needs before it counts as confirmed */
+export const MIN_HOLDOUT_TRADES = 10
+
+export interface HoldoutResult {
+  /** Best threshold on the earlier part of the data */
+  train: ThresholdRow
+  /** The same threshold on the later part, which played no role in choosing it */
+  test: ThresholdRow
+  /** Positive after fees on at least MIN_HOLDOUT_TRADES held-out trades */
+  confirmed: boolean
+}
+
+/**
+ * Choose the threshold on the first `trainShare` of the recorded period, then
+ * score it on the rest. Picking the best of several thresholds on the same
+ * data flatters the winner; the later part is a fair check because it was not
+ * used for the choice. Null when no threshold qualifies on the earlier part.
+ */
+export function holdoutSuggestion(
+  samples: SignalSample[],
+  rules: ExitRules,
+  thresholds: number[] = [0.1, 0.2, 0.3, 0.4, 0.5],
+  theta = PMUS_DEFAULT_TAKER_THETA,
+  trainShare = 2 / 3,
+): HoldoutResult | null {
+  if (samples.length === 0) return null
+  const times = samples.map(s => s.t).sort((a, b) => a - b)
+  const cutoff = times[Math.min(times.length - 1, Math.floor(times.length * trainShare))]
+  const perThreshold = thresholds.map(threshold => {
+    const trades = simulateTrades(samples, threshold, rules, theta)
+    return {
+      // a trade belongs to the earlier part only if it also closed there
+      train: summarise(threshold, trades.filter(t => t.exitT < cutoff)),
+      test: summarise(threshold, trades.filter(t => t.t >= cutoff)),
+    }
+  })
+  const train = suggestThreshold(perThreshold.map(x => x.train))
+  if (!train) return null
+  const test = perThreshold.find(x => x.train.threshold === train.threshold)!.test
+  return { train, test, confirmed: test.n >= MIN_HOLDOUT_TRADES && test.avgNet > 0 }
+}
+
+export interface ExitGridCell {
+  stopLossPercent: number
+  takeProfitPercent: number
+  n: number
+  avgNet: number
+}
+
+/**
+ * Replay at one entry threshold across stop-loss × take-profit levels (hold
+ * limit and cooldown unchanged). Rows are stop-losses, columns take-profits.
+ */
+export function exitGridReport(
+  samples: SignalSample[],
+  threshold: number,
+  rules: ExitRules,
+  stopLosses: number[] = [0.05, 0.10, 0.15, 0.20, 0.30],
+  takeProfits: number[] = [0.10, 0.20, 0.30, 0.50],
+  theta = PMUS_DEFAULT_TAKER_THETA,
+): ExitGridCell[][] {
+  return stopLosses.map(stopLossPercent =>
+    takeProfits.map(takeProfitPercent => {
+      const row = summarise(threshold, simulateTrades(samples, threshold, { ...rules, stopLossPercent, takeProfitPercent }, theta))
+      return { stopLossPercent, takeProfitPercent, n: row.n, avgNet: row.avgNet }
+    }),
+  )
+}
+
+/** The fields of a logged trade the comparison needs (a subset of TradeRecord) */
+export interface LoggedTrade {
+  strategy: string
+  success: boolean
+  timestamp: number
+  exitTimestamp?: number
+  pnlPercent?: number
+  dryRun?: boolean
+}
+
+/**
+ * Closed Microstructure Momentum trades from the trade log since `sinceMs`,
+ * summarised like a report row. `pnlPercent` is taken as logged (price move
+ * on the position; fees are not subtracted there), so compare it with the
+ * replay's before-fees column.
+ */
+export function realTradeSummary(records: LoggedTrade[], sinceMs: number): { n: number; winRate: number; avgPnl: number; dryRun: number } {
+  const closed = records.filter(r =>
+    r.strategy === 'micro' && r.success && r.exitTimestamp != null && r.timestamp >= sinceMs && typeof r.pnlPercent === 'number' && Number.isFinite(r.pnlPercent))
+  const n = closed.length
+  if (n === 0) return { n: 0, winRate: 0, avgPnl: 0, dryRun: 0 }
+  return {
+    n,
+    winRate: closed.filter(r => r.pnlPercent! > 0).length / n,
+    avgPnl: closed.reduce((sum, r) => sum + r.pnlPercent!, 0) / n,
+    dryRun: closed.filter(r => r.dryRun).length,
+  }
+}
+
 /** CSV of every sample (exit_mid empty until the 5-minute outcome is known) */
 export function samplesToCsv(samples: SignalSample[]): string {
   const lines = ['time_iso,market_slug,composite_signal,confidence,yes_mid,spread,exit_mid_5m']

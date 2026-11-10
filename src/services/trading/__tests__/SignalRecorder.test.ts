@@ -152,3 +152,72 @@ describe('samplesToCsv', () => {
     ])
   })
 })
+
+import { holdoutSuggestion, exitGridReport, realTradeSummary } from '../SignalRecorder'
+
+/** `count` back-to-back trades for one market, each 3 readings: entry, drift, exit */
+const run = (slug: string, start: number, count: number, composite: number, win: (k: number) => boolean): SignalSample[] => {
+  const out: SignalSample[] = []
+  for (let k = 0; k < count; k++) {
+    const t0 = start + k * 9 * 20_000 // exit at +40s, 60s cooldown, next entry at +180s
+    const mids = win(k) ? [0.50, 0.56, 0.63] : [0.50, 0.46, 0.41]
+    mids.forEach((mid, i) => out.push({ slug, t: t0 + i * 20_000, composite: i === 0 ? composite : 0, confidence: 0.8, mid, spread: 0.02 }))
+  }
+  return out
+}
+
+describe('holdoutSuggestion', () => {
+  it('confirms a threshold that also works on the later data', () => {
+    const samples = run('a', 0, 90, 0.45, k => k % 5 !== 0) // 80% winners throughout
+    const result = holdoutSuggestion(samples, rules, [0.4], 0)!
+    expect(result.train.threshold).toBe(0.4)
+    expect(result.train.n).toBeGreaterThanOrEqual(30)
+    expect(result.test.n).toBeGreaterThanOrEqual(10)
+    expect(result.train.n + result.test.n).toBeLessThanOrEqual(90)
+    expect(result.confirmed).toBe(true)
+  })
+
+  it('does not confirm one that only worked early', () => {
+    const samples = run('a', 0, 90, 0.45, k => k < 60) // wins early, loses late
+    const result = holdoutSuggestion(samples, rules, [0.4], 0)!
+    expect(result.train.avgNet).toBeGreaterThan(0)
+    expect(result.test.avgNet).toBeLessThan(0)
+    expect(result.confirmed).toBe(false)
+  })
+
+  it('is null without enough profitable early trades', () => {
+    expect(holdoutSuggestion([], rules)).toBeNull()
+    expect(holdoutSuggestion(run('a', 0, 12, 0.45, () => true), rules, [0.4], 0)).toBeNull()
+    expect(holdoutSuggestion(run('a', 0, 90, 0.45, () => false), rules, [0.4], 0)).toBeNull()
+  })
+})
+
+describe('exitGridReport', () => {
+  it('replays each stop-loss and take-profit pair', () => {
+    // entry 0.51; mark path 0.55, then 0.62 (+21.6%)
+    const samples = path([[0.5, 0.50], [0, 0.56], [0, 0.63]])
+    const grid = exitGridReport(samples, 0.4, rules, [0.15], [0.05, 0.20, 0.50], 0)
+    expect(grid).toHaveLength(1)
+    const [tp5, tp20, tp50] = grid[0]
+    expect(tp5).toMatchObject({ stopLossPercent: 0.15, takeProfitPercent: 0.05, n: 1 })
+    expect(tp5.avgNet).toBeCloseTo((0.55 - 0.51) / 0.51, 6) // exits at the first reading
+    expect(tp20.avgNet).toBeCloseTo((0.62 - 0.51) / 0.51, 6)
+    expect(tp50.n).toBe(0) // never reached: still open
+  })
+})
+
+describe('realTradeSummary', () => {
+  it('summarises closed momentum trades since the cutoff', () => {
+    const rec = (over: object) => ({ strategy: 'micro', success: true, timestamp: 1000, exitTimestamp: 2000, pnlPercent: 0.1, ...over })
+    const summary = realTradeSummary([
+      rec({}),
+      rec({ pnlPercent: -0.05, dryRun: true }),
+      rec({ strategy: 'llm' }),            // other strategy
+      rec({ timestamp: 10 }),              // before the cutoff
+      rec({ exitTimestamp: undefined }),   // still open
+      rec({ success: false }),
+    ], 500)
+    expect(summary).toEqual({ n: 2, winRate: 0.5, avgPnl: expect.closeTo(0.025, 6), dryRun: 1 })
+    expect(realTradeSummary([], 0)).toEqual({ n: 0, winRate: 0, avgPnl: 0, dryRun: 0 })
+  })
+})
