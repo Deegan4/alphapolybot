@@ -35,6 +35,8 @@ Rows not marked verified live are the point of this checklist.
 
 ## 1. MCP smoke test (5 minutes)
 
+Shortcut for steps 0–2: `npm run preflight` from the repo root installs both packages, runs the smoke test (with the account checks if your key is in `.env`) and starts the app. Add `-- --no-dev` to skip starting the app. The manual steps are below.
+
 ```bash
 cd mcp-server
 npm install
