@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preflight": "bash scripts/preflight.sh"
+    "preflight": "bash scripts/preflight.sh",
+    "test:ci": "npm run lint && npm run typecheck && npm test && npm run build && npm --prefix mcp-server run build && npm --prefix mcp-server test"
   },
   "dependencies": {
     "@noble/ed25519": "^2.3.0",
