@@ -34,6 +34,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install browser for the phone layout check
+        run: npx playwright install --with-deps chromium
+
+      - name: Phone layout check
+        run: npm run test:mobile
+
   mcp-server:
     runs-on: ubuntu-latest
     defaults:

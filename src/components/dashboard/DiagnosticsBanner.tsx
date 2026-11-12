@@ -84,13 +84,14 @@ export const DiagnosticsBanner: React.FC = () => {
   }[banner.severity]
 
   return (
-    <div className={`mx-4 mt-3 px-4 py-2 rounded border-l-4 ${borderColor} flex items-center justify-between`}>
-      <div className="flex items-center gap-3 min-w-0">
+    <div className={`mx-4 mt-3 px-4 py-2 rounded border-l-4 ${borderColor} flex items-center justify-between gap-3`}>
+      {/* Phones: the detail wraps under the title instead of being cut to a few letters */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-x-3 gap-y-0.5 min-w-0">
         <span className={`text-xs font-mono font-bold ${textColor} shrink-0`}>
           {banner.message}
         </span>
         {banner.detail && (
-          <span className="text-[10px] font-mono text-agent-text-muted truncate">
+          <span className="text-[10px] font-mono text-agent-text-muted sm:truncate">
             {banner.detail}
           </span>
         )}

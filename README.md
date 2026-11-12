@@ -200,6 +200,7 @@ npm run build          # Production build (Vite 7 + esbuild)
 npm test               # 624 tests (Vitest)
 npm run preflight      # install, smoke-test the API, start the app (dry-run checklist steps 0-2)
 npm run test:ci        # everything CI runs: lint, typecheck, tests, build, MCP server build and tests
+npm run test:mobile    # phone-size layout check on the built app (run `npm run build` first; CI runs it too)
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
 npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
