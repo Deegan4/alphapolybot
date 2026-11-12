@@ -110,7 +110,8 @@ const DashboardView: React.FC = () => {
         <div className="flex-1 flex flex-col lg:flex-row gap-3 p-3 sm:p-4 min-h-0 overflow-y-auto lg:overflow-hidden">
 
           {/* Main content — Left col (portfolio+follow) + Center col (assets+positions) */}
-          <div className="flex-1 flex flex-col lg:flex-row gap-3 min-h-0 min-w-0">
+          {/* On phones the page scrolls, so sections keep their natural height (no shrinking into each other) */}
+          <div className="flex-none lg:flex-1 flex flex-col lg:flex-row gap-3 lg:min-h-0 min-w-0">
             {/* Left column — Portfolio + Performance */}
             <div className="lg:w-[280px] shrink-0 flex flex-col gap-3 min-h-0 lg:overflow-y-auto">
               <PortfolioPanel />
@@ -118,9 +119,9 @@ const DashboardView: React.FC = () => {
             </div>
 
             {/* Center column — Asset cards + positions/trades */}
-            <div className="flex-1 flex flex-col gap-3 min-h-0 min-w-0">
+            <div className="flex-none lg:flex-1 flex flex-col gap-3 lg:min-h-0 min-w-0">
               <AssetCardsRow />
-              <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3 min-h-0">
+              <div className="flex-none lg:flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3 lg:min-h-0">
                 <ActivePositionsCard />
                 <RecentTradesGrid />
               </div>
@@ -128,8 +129,8 @@ const DashboardView: React.FC = () => {
           </div>
 
           {/* Right column — Activity (collapsible) */}
-          <div className={`shrink-0 flex flex-col min-h-0 transition-all duration-200 ${
-            sidebarCollapsed ? 'lg:w-10' : 'lg:w-[300px]'
+          <div className={`shrink-0 flex flex-col min-h-0 lg:h-auto transition-all duration-200 ${
+            sidebarCollapsed ? 'lg:w-10' : 'h-80 lg:w-[300px]'
           }`}>
             <ActivitySidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
           </div>
