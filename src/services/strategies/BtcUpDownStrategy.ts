@@ -312,6 +312,9 @@ export class BtcUpDownStrategy extends BaseStrategy {
     return { minConfidence, minEntryPrice, maxEntryPrice }
   }
 
+  private lastIdleMsg = ''
+  private lastIdleMsgAt = 0
+
   private async runScanCycle(): Promise<void> {
     if (!this._enabled || this._status !== 'running') return
 
@@ -355,9 +358,21 @@ export class BtcUpDownStrategy extends BaseStrategy {
           return
         }
 
-        const msg = `BTC: No Up/Down markets found (scanning ${durations.join('/')} for ${assets.join('/')})`
-        console.log(`[BTC Scan] ${msg}`)
-        activityLogger.logScan(msg, { total: 0, eligible: 0 })
+        // Nothing can ever be found with no coin or no window length switched on:
+        // say so (once a minute, not every scan) instead of "no markets found".
+        const msg = assets.length === 0
+          ? 'Crypto Up/Down is running but no coin is switched on. Turn on BTC, ETH, SOL or XRP in Settings → BTC Up/Down.'
+          : durations.length === 0
+            ? 'Crypto Up/Down is running but no window length is switched on. Turn one on in Settings → BTC Up/Down.'
+            : `BTC: No Up/Down markets found (scanning ${durations.join('/')} for ${assets.join('/')})`
+        const now = Date.now()
+        if (msg !== this.lastIdleMsg || now - this.lastIdleMsgAt >= 60_000) {
+          this.lastIdleMsg = msg
+          this.lastIdleMsgAt = now
+          console.log(`[BTC Scan] ${msg}`)
+          if (assets.length === 0 || durations.length === 0) activityLogger.logWarning(msg)
+          else activityLogger.logScan(msg, { total: 0, eligible: 0 })
+        }
         return
       }
 
