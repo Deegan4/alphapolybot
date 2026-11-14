@@ -41,6 +41,10 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [toggling, setToggling] = useState<Set<string>>(new Set())
   const dryRun = useSettingsStore((s) => s.dryRun)
+  // Crypto Up/Down trades nothing until at least one coin is switched on
+  const noCoinOn = useSettingsStore((s) => !s.btcEnableBtc && !s.btcEnableEth && !s.btcEnableSol && !s.btcEnableXrp)
+  const setBtcEnableBtc = useSettingsStore((s) => s.setBtcEnableBtc)
+  const upDownRunning = strategies.some((s) => s.id === 'btc-updown' && s.status === 'running')
 
   // Strategies not yet runnable on Polymarket US (ShelvedStrategy) are hidden from toggles
   const visible = strategies.filter((s) => s.available)
@@ -175,6 +179,22 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
           </button>
         ))}
       </div>
+
+      {/* Crypto Up/Down is on but has no coin to trade: offer the one-tap fix */}
+      {upDownRunning && noCoinOn && (
+        <div className="px-3 py-2 border-t border-agent-border flex items-center justify-between gap-2">
+          <span className="text-[9px] font-mono text-yellow-400 leading-snug">
+            BTC Up/Down is running but no coin is switched on, so it will not trade.
+          </span>
+          <button
+            type="button"
+            onClick={() => setBtcEnableBtc(true)}
+            className="shrink-0 text-[10px] font-mono font-semibold px-2 py-1 rounded border border-agent-green/30 text-agent-green hover:bg-agent-green/10 transition-colors"
+          >
+            Turn on BTC
+          </button>
+        </div>
+      )}
 
       {/* Dry run notice */}
       {dryRun && (

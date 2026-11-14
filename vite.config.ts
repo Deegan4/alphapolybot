@@ -255,7 +255,7 @@ export default defineConfig(({ mode }) => {
         // stripping any path prefix, so both hosts arrive here as /v1/*.
         // Public market data lives on the gateway; the api host answers those
         // paths with 401 "Missing required API key headers" when unsigned.
-        '^/v1/(events|markets|market|search|series|sports)(/|\\?|$)': {
+        '^/v1/(events|markets|market|search|series|sports|price-history)(/|\\?|$)': {
           target: 'https://gateway.polymarket.us',
           changeOrigin: true,
           secure: true,
