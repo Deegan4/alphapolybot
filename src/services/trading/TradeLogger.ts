@@ -17,13 +17,14 @@ export interface TradeRecord {
 
   // Market context
   marketId: string
-  conditionId: string
+  slug?: string                 // PM US market slug
+  conditionId?: string          // legacy (international CLOB) — unused on PM US
   question: string
   category?: string
   outcomes: string[]
 
   // Decision context
-  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'mr'
+  strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
   side: 'BUY' | 'SELL'
   outcome: string
   modelProbability?: number     // LLM confidence (0-1)
@@ -41,7 +42,7 @@ export interface TradeRecord {
 
   // Execution
   orderId?: string
-  orderType: 'FOK' | 'GTD' | 'GTC'
+  orderType: 'FOK' | 'GTD' | 'GTC' | 'MARKET'   // MARKET = Coinbase spot (Mean Reversion)
   fillPrice?: number
   filledSize?: number
   slippage?: number             // Actual slippage vs intended price
@@ -197,7 +198,7 @@ export class TradeLogger {
 
     // By strategy breakdown
     const byStrategy: BacktestSummary['byStrategy'] = {}
-    for (const strat of ['llm', 'dip', 'fw', 'btc', 'micro', 'mr'] as const) {
+    for (const strat of ['llm', 'dip', 'fw', 'btc', 'micro', 'meanrev', 'copy'] as const) {
       const stratRecords = closed.filter(r => r.strategy === strat)
       const stratWins = stratRecords.filter(r => (r.pnlUSD ?? 0) > 0)
       const stratPnl = stratRecords.reduce((s, r) => s + (r.pnlUSD ?? 0), 0)

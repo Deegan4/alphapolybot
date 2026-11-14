@@ -30,6 +30,12 @@ export interface AppSettingsState {
   // GTD Fallback
   gtcFallbackEnabled: boolean
   gtcExpiryMinutes: number
+  makerFirstEntries: boolean    // Post-only entries inside the spread before taking
+  makerExpiryTakerFallback: boolean // Take the remainder when a maker entry expires
+  pauseEntriesWhenFeedDown: boolean // Block new entries while the market-data feed is offline
+  signalRecordingOnly: boolean // Strategies compute and record signals but place no trades (not even simulated)
+  makerMaxChaseCents: number    // Max cents above the maker price the fallback may pay
+  makerFirstDisabledStrategies: string[] // Strategies that always take (skip maker-first)
 
   // Kelly Criterion position sizing
   kellyFraction: number // 0.0–1.0 (default 0.25 = quarter Kelly)
@@ -77,15 +83,6 @@ export interface AppSettingsState {
   microTradeSize: number
   microStopLossPercent: number
   microTakeProfitPercent: number
-
-  // Follow & Copy Trader
-  followedAddress: string
-  copyTradeSize: number           // USD per copied trade
-  copyMaxConcurrent: number       // Max simultaneous copied positions
-  copyPollIntervalMs: number      // Polling frequency (ms)
-  copyStopLossPercent: number     // SL for copied positions (0-1)
-  copyTakeProfitPercent: number   // TP for copied positions (0-1)
-  copyBuysOnly: boolean           // Only copy BUY trades
 
   // LLM Premium Model Tiering
   llmPremiumModel: string             // e.g. 'openai/gpt-4o' (empty = disabled)
@@ -144,6 +141,12 @@ interface SettingsStore extends AppSettingsState {
   setRiskManagementEnabled: (enabled: boolean) => void
   setGtcFallbackEnabled: (enabled: boolean) => void
   setGtcExpiryMinutes: (minutes: number) => void
+  setMakerFirstEntries: (enabled: boolean) => void
+  setMakerExpiryTakerFallback: (enabled: boolean) => void
+  setPauseEntriesWhenFeedDown: (enabled: boolean) => void
+  setSignalRecordingOnly: (enabled: boolean) => void
+  setMakerMaxChaseCents: (cents: number) => void
+  setMakerFirstForStrategy: (strategy: string, enabled: boolean) => void
   setKellyFraction: (fraction: number) => void
   setFwTradeSize: (size: number) => void
   setFwMinProfitBps: (bps: number) => void
@@ -153,6 +156,7 @@ interface SettingsStore extends AppSettingsState {
   setBtcEnableBtc: (enabled: boolean) => void
   setBtcEnableEth: (enabled: boolean) => void
   setBtcEnableSol: (enabled: boolean) => void
+  setBtcEnableXrp: (enabled: boolean) => void
   setBtcEnable5m: (enabled: boolean) => void
   setBtcEnable15m: (enabled: boolean) => void
   setBtcEnableHourly: (enabled: boolean) => void
@@ -192,13 +196,6 @@ interface SettingsStore extends AppSettingsState {
   setMrStopLossPercent: (percent: number) => void
   setMrTakeProfitPercent: (percent: number) => void
   setMrMaxHoldMs: (ms: number) => void
-  setFollowedAddress: (address: string) => void
-  setCopyTradeSize: (size: number) => void
-  setCopyMaxConcurrent: (max: number) => void
-  setCopyPollIntervalMs: (ms: number) => void
-  setCopyStopLossPercent: (percent: number) => void
-  setCopyTakeProfitPercent: (percent: number) => void
-  setCopyBuysOnly: (enabled: boolean) => void
   setLlmPremiumModel: (model: string) => void
   setLlmPremiumThreshold: (threshold: number) => void
   setLlmPremiumBudgetUSD: (budget: number) => void
@@ -234,6 +231,12 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   riskManagementEnabled: true,
   gtcFallbackEnabled: true,
   gtcExpiryMinutes: 5,
+  makerFirstEntries: false,
+  makerExpiryTakerFallback: true,
+  pauseEntriesWhenFeedDown: false,
+  signalRecordingOnly: false,
+  makerMaxChaseCents: 2,
+  makerFirstDisabledStrategies: [],
   kellyFraction: 0.15,
   fwTradeSize: 5,
   fwMinProfitBps: 30,
@@ -269,13 +272,6 @@ const DEFAULT_SETTINGS: AppSettingsState = {
   microTradeSize: 2.0,
   microStopLossPercent: 0.15,
   microTakeProfitPercent: 0.20,
-  followedAddress: '',
-  copyTradeSize: 5,
-  copyMaxConcurrent: 5,
-  copyPollIntervalMs: 15_000,
-  copyStopLossPercent: 0.30,
-  copyTakeProfitPercent: 0.50,
-  copyBuysOnly: true,
   llmPremiumModel: '',
   llmPremiumThreshold: 25,
   llmPremiumBudgetUSD: 0.50,
@@ -368,6 +364,37 @@ export const useSettingsStore = create<SettingsStore>()(
       setGtcFallbackEnabled: (enabled: boolean) => {
         set({ gtcFallbackEnabled: enabled })
         import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ gtcFallbackEnabled: enabled }))
+      },
+
+      setMakerFirstEntries: (enabled: boolean) => {
+        set({ makerFirstEntries: enabled })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerFirst: enabled }))
+      },
+
+      setSignalRecordingOnly: (enabled: boolean) => set({ signalRecordingOnly: enabled }),
+
+      setPauseEntriesWhenFeedDown: (enabled: boolean) => {
+        set({ pauseEntriesWhenFeedDown: enabled })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ pauseEntriesWhenFeedDown: enabled }))
+      },
+
+      setMakerExpiryTakerFallback: (enabled: boolean) => {
+        set({ makerExpiryTakerFallback: enabled })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerExpiryTakerFallback: enabled }))
+      },
+
+      setMakerMaxChaseCents: (cents: number) => {
+        set({ makerMaxChaseCents: cents })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerMaxChase: cents / 100 }))
+      },
+
+      setMakerFirstForStrategy: (strategy: string, enabled: boolean) => {
+        const current = new Set(useSettingsStore.getState().makerFirstDisabledStrategies ?? [])
+        if (enabled) current.delete(strategy)
+        else current.add(strategy)
+        const next = [...current].sort()
+        set({ makerFirstDisabledStrategies: next })
+        import('@/services/trading/TradingService').then(m => m.tradingService.setConfig({ makerFirstDisabledStrategies: next }))
       },
 
       setGtcExpiryMinutes: (minutes: number) => {
@@ -578,17 +605,6 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ mrMaxHoldMs: ms })
         import('@/services/strategies/MeanReversionStrategy').then(m => m.meanReversionStrategy.setMrConfig({ maxHoldMs: ms }))
       },
-
-      setFollowedAddress: (address: string) => {
-        set({ followedAddress: address.toLowerCase().trim() })
-      },
-
-      setCopyTradeSize: (size: number) => set({ copyTradeSize: size }),
-      setCopyMaxConcurrent: (max: number) => set({ copyMaxConcurrent: max }),
-      setCopyPollIntervalMs: (ms: number) => set({ copyPollIntervalMs: ms }),
-      setCopyStopLossPercent: (percent: number) => set({ copyStopLossPercent: percent }),
-      setCopyTakeProfitPercent: (percent: number) => set({ copyTakeProfitPercent: percent }),
-      setCopyBuysOnly: (enabled: boolean) => set({ copyBuysOnly: enabled }),
 
       setLlmPremiumModel: (model: string) => {
         set({ llmPremiumModel: model })
@@ -922,14 +938,10 @@ export const useSettingsStore = create<SettingsStore>()(
           // v22→v23: Add LLM confirmation gate for BTC Up/Down strategy
           if (state.btcUseLLMConfirmation === undefined) state.btcUseLLMConfirmation = false
         }
-        if (version < 24) {
-          // v23→v24: Add copy-trading settings
-          if (state.copyTradeSize === undefined) state.copyTradeSize = 5
-          if (state.copyMaxConcurrent === undefined) state.copyMaxConcurrent = 5
-          if (state.copyPollIntervalMs === undefined) state.copyPollIntervalMs = 15_000
-          if (state.copyStopLossPercent === undefined) state.copyStopLossPercent = 0.30
-          if (state.copyTakeProfitPercent === undefined) state.copyTakeProfitPercent = 0.50
-          if (state.copyBuysOnly === undefined) state.copyBuysOnly = true
+        // v23→v24 added copy-trading settings; Copy Trading was retired with the
+        // Polymarket US migration (no public wallets to mirror), so stale keys are dropped.
+        for (const key of ['followedAddress', 'copyTradeSize', 'copyMaxConcurrent', 'copyPollIntervalMs', 'copyStopLossPercent', 'copyTakeProfitPercent', 'copyBuysOnly']) {
+          delete state[key]
         }
         if (version < 25) {
           // v24→v25: LLM premium model tiering + crypto LLM mode
@@ -980,7 +992,7 @@ export const useSettingsStore = create<SettingsStore>()(
           if (state.minBalanceForTrade === 1.50) state.minBalanceForTrade = 1.00
           if (state.kellyFraction === 0.25) state.kellyFraction = 0.15
         }
-        return state as AppSettingsState
+        return state as unknown as AppSettingsState
       },
       partialize: (state) => ({
         dryRun: state.dryRun,
@@ -997,6 +1009,12 @@ export const useSettingsStore = create<SettingsStore>()(
         riskManagementEnabled: state.riskManagementEnabled,
         gtcFallbackEnabled: state.gtcFallbackEnabled,
         gtcExpiryMinutes: state.gtcExpiryMinutes,
+        makerFirstEntries: state.makerFirstEntries,
+        makerExpiryTakerFallback: state.makerExpiryTakerFallback,
+        pauseEntriesWhenFeedDown: state.pauseEntriesWhenFeedDown,
+        signalRecordingOnly: state.signalRecordingOnly,
+        makerMaxChaseCents: state.makerMaxChaseCents,
+        makerFirstDisabledStrategies: state.makerFirstDisabledStrategies,
         kellyFraction: state.kellyFraction,
         fwTradeSize: state.fwTradeSize,
         fwMinProfitBps: state.fwMinProfitBps,
@@ -1033,13 +1051,6 @@ export const useSettingsStore = create<SettingsStore>()(
         microTradeSize: state.microTradeSize,
         microStopLossPercent: state.microStopLossPercent,
         microTakeProfitPercent: state.microTakeProfitPercent,
-        followedAddress: state.followedAddress,
-        copyTradeSize: state.copyTradeSize,
-        copyMaxConcurrent: state.copyMaxConcurrent,
-        copyPollIntervalMs: state.copyPollIntervalMs,
-        copyStopLossPercent: state.copyStopLossPercent,
-        copyTakeProfitPercent: state.copyTakeProfitPercent,
-        copyBuysOnly: state.copyBuysOnly,
         llmPremiumModel: state.llmPremiumModel,
         llmPremiumThreshold: state.llmPremiumThreshold,
         llmPremiumBudgetUSD: state.llmPremiumBudgetUSD,

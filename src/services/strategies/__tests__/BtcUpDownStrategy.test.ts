@@ -52,12 +52,17 @@ vi.mock('@/services/trading/TradingService', () => ({
   },
 }))
 
-vi.mock('@/services/api', () => ({
-  polymarketUSClient: {
-    getEventBySlug: vi.fn().mockResolvedValue(null),
-  },
-  normalizeEventToMarkets: vi.fn().mockReturnValue([]),
-}))
+vi.mock('@/services/api', async () => {
+  const wire = await vi.importActual<typeof import('@/services/api/pmusWire')>('@/services/api/pmusWire')
+  return {
+    polymarketUSClient: {
+      getEventBySlug: vi.fn().mockResolvedValue(null),
+    },
+    normalizeEventToMarkets: vi.fn().mockReturnValue([]),
+    priceForOutcome: wire.priceForOutcome,
+    upDownEventSlugs: wire.upDownEventSlugs,
+  }
+})
 
 vi.mock('@/services/api/PriceOracleService', () => ({
   priceOracle: {
@@ -137,6 +142,7 @@ vi.mock('@/services/trading/MicrostructureAnalyzer', () => ({
 
 // Import after all mocks are set up
 import { parseReferencePrice, BtcUpDownStrategy } from '../BtcUpDownStrategy'
+import { computeVolatility, computeRSI } from '../btcupdown/signalEngine'
 
 // ==========================================
 // TESTS
@@ -294,11 +300,9 @@ describe('Volatility and RSI helpers (via strategy internals)', () => {
     strategy = new BtcUpDownStrategy()
   })
 
-  // Access private methods via type cast for testing
-  const getPrivate = (s: BtcUpDownStrategy) => s as unknown as {
-    computeVolatility: (prices: Array<{ price: number; timestamp: number }>) => number
-    computeRSI: (prices: Array<{ price: number; timestamp: number }>, period?: number) => number
-  }
+  // Volatility/RSI live in btcupdown/signalEngine (the strategy no longer wraps them);
+  // keep the call-site shape so the cases below read unchanged.
+  const getPrivate = (_s: BtcUpDownStrategy) => ({ computeVolatility, computeRSI })
 
   describe('computeVolatility', () => {
     const mkPrices = (values: number[]): Array<{ price: number; timestamp: number }> =>
@@ -363,5 +367,42 @@ describe('Volatility and RSI helpers (via strategy internals)', () => {
       const rsi = getPrivate(strategy).computeRSI(mkPrices(values), 14)
       expect(rsi).toBeLessThan(30)
     })
+  })
+})
+
+describe('upDownSlugsFor (Polymarket US slug format)', () => {
+  it('maps strategy durations to PM US horizons', async () => {
+    const { upDownSlugsFor } = await import('../BtcUpDownStrategy')
+    const now = new Date('2026-11-08T01:41:10Z')
+    expect(upDownSlugsFor('BTC', '15m', now)[0]).toBe('btc-updown-15m-2026-11-08-0130z')
+    expect(upDownSlugsFor('ETH', 'hourly', now)[0]).toBe('eth-updown-1h-2026-11-08-0100z')
+    expect(upDownSlugsFor('SOL', 'daily', now)[0]).toBe('sol-updown-1d-2026-11-07-2200z')
+    expect(upDownSlugsFor('XRP', '9pm', now)).toEqual([]) // no 9PM series on PM US
+  })
+})
+
+describe('needsUpDownDiscovery (rollover pre-fetch)', () => {
+  it('runs when nothing is tracked or only an expired window is', async () => {
+    const { needsUpDownDiscovery } = await import('../BtcUpDownStrategy')
+    expect(needsUpDownDiscovery([], 0, 15 * 60_000)).toBe(true)
+    expect(needsUpDownDiscovery([-1], 0, 15 * 60_000)).toBe(true)
+  })
+
+  it('waits while the current window has more than the lead left, then pre-fetches', async () => {
+    const { needsUpDownDiscovery } = await import('../BtcUpDownStrategy')
+    const end = 15 * 60_000
+    // 15m window: lead = min(90s, max(30s, 180s)) = 90s
+    expect(needsUpDownDiscovery([end], end - 120_000, 15 * 60_000)).toBe(false)
+    expect(needsUpDownDiscovery([end], end - 60_000, 15 * 60_000)).toBe(true)
+    // once the next window is tracked, stop again
+    expect(needsUpDownDiscovery([end, end + 15 * 60_000], end - 60_000, 15 * 60_000)).toBe(false)
+  })
+
+  it('staggers assets by 5s', async () => {
+    const { needsUpDownDiscovery } = await import('../BtcUpDownStrategy')
+    const end = 5 * 60_000
+    // 5m window: lead = 60s; asset 0 at 62s left waits, asset 1 (lead 65s) fetches
+    expect(needsUpDownDiscovery([end], end - 62_000, 5 * 60_000, 0)).toBe(false)
+    expect(needsUpDownDiscovery([end], end - 62_000, 5 * 60_000, 1)).toBe(true)
   })
 })

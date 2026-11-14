@@ -366,11 +366,11 @@ const MarketAnalysisPanel: React.FC<{ isActive: boolean; entries: ActivityItem[]
                   </span>
                 </div>
               )}
-              {entry.data.reasoning && (
+              {entry.data.reasoning ? (
                 <p className="text-xs text-matrix-text-secondary line-clamp-2 font-sans">
                   {String(entry.data.reasoning)}
                 </p>
-              )}
+              ) : null}
             </div>
           )}
 
@@ -381,14 +381,14 @@ const MarketAnalysisPanel: React.FC<{ isActive: boolean; entries: ActivityItem[]
                 <span>Scanned: {String(entry.data.total ?? 0)}</span>
                 <span className="text-matrix-primary">Eligible: {String(entry.data.eligible)}</span>
               </div>
-              {entry.data.rejections && (
+              {entry.data.rejections ? (
                 <div className="text-[10px] font-mono text-matrix-text-secondary/70">
                   {Object.entries(entry.data.rejections as Record<string, number>)
                     .filter(([, v]) => v > 0)
                     .map(([k, v]) => `${k}: ${v}`)
                     .join(' · ')}
                 </div>
-              )}
+              ) : null}
             </div>
           )}
         </motion.div>

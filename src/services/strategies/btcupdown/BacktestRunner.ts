@@ -371,23 +371,22 @@ export class BacktestRunner {
   }
 
   private buildStubMarket(pbt: PolyBacktestMarket): Market {
-    // Minimal Market stub for SignalInput type compatibility.
-    // Only clobTokenIds, outcomes, and question are accessed inside computeSignal
-    // (for flow factor), but the extracted signalEngine accepts imbalanceScore directly,
-    // so these fields are never actually read.
+    // Minimal Market stub for SignalInput type compatibility. The extracted
+    // signalEngine takes imbalanceScore directly, so market fields are never read.
     return {
       id: pbt.market_id,
       question: `Will BTC go up or down? (${pbt.slug})`,
-      conditionId: pbt.condition_id ?? '',
       slug: pbt.slug,
+      eventSlug: pbt.event_id,
       outcomes: ['Up', 'Down'],
-      outcomePrices: ['0.5', '0.5'],
-      clobTokenIds: [pbt.clob_token_up ?? '', pbt.clob_token_down ?? ''],
+      outcomePrices: [0.5, 0.5],
       active: false,
       closed: true,
+      endDate: pbt.end_time,
+      createdAt: pbt.start_time,
       volume: pbt.final_volume ?? 0,
       liquidity: pbt.final_liquidity ?? 0,
-    } as Market
+    }
   }
 
   private emptyResult(

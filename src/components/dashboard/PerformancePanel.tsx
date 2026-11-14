@@ -124,7 +124,7 @@ export const PerformancePanel: React.FC = () => {
                   <Tooltip
                     contentStyle={{ background: 'rgba(10, 15, 10, 0.8)', backdropFilter: 'blur(16px)', border: '1px solid rgba(34, 197, 94, 0.1)', borderRadius: '12px', fontSize: 11, fontFamily: 'monospace' }}
                     labelStyle={{ color: '#6ee7b7' }}
-                    formatter={(v: number) => [`$${v.toFixed(2)}`, 'P&L']}
+                    formatter={(v) => [`$${Number(v).toFixed(2)}`, 'P&L']}
                   />
                   <Line
                     type="monotone"

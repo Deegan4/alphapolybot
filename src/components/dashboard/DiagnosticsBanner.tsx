@@ -3,6 +3,7 @@ import { useSettingsStore, useWalletStore } from '@/stores'
 import { riskManager, rejectionTracker, readinessChecker, positionLifecycleManager } from '@/services/trading'
 import { polymarketUSClient } from '@/services/api'
 import { realtimeService } from '@/services/realtime/RealtimeService'
+import { userChannelService } from '@/services/realtime/UserChannelService'
 import { strategyManager, type StrategyState } from '@/services/strategies'
 import type { RejectionSummary } from '@/services/trading/RejectionTracker'
 
@@ -27,11 +28,14 @@ interface BannerState {
  */
 export const DiagnosticsBanner: React.FC = () => {
   const dryRun = useSettingsStore((s) => s.dryRun)
+  const recordingOnly = useSettingsStore((s) => s.signalRecordingOnly)
   const isConnected = useWalletStore((s) => s.isConnected)
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [rejections, setRejections] = useState<RejectionSummary>(rejectionTracker.getSummary())
   const [emergencyStopped, setEmergencyStopped] = useState(false)
   const [wsConnected, setWsConnected] = useState(realtimeService.isConnected())
+  const [userFeedGaveUp, setUserFeedGaveUp] = useState(userChannelService.hasGivenUp())
+  const [marketFeedGaveUp, setMarketFeedGaveUp] = useState(realtimeService.hasGivenUp())
 
   useEffect(() => {
     return strategyManager.subscribe(setStrategies)
@@ -43,6 +47,8 @@ export const DiagnosticsBanner: React.FC = () => {
       setRejections(rejectionTracker.getSummary())
       setEmergencyStopped(riskManager.getStatus().emergencyStopped)
       setWsConnected(realtimeService.isConnected())
+      setUserFeedGaveUp(userChannelService.hasGivenUp())
+      setMarketFeedGaveUp(realtimeService.hasGivenUp())
     }
     tick()
     const id = setInterval(tick, 3000)
@@ -58,6 +64,9 @@ export const DiagnosticsBanner: React.FC = () => {
     rejections,
     pmCredentials: polymarketUSClient.hasCredentials(),
     wsConnected,
+    userFeedGaveUp,
+    marketFeedGaveUp,
+    recordingOnly: recordingOnly ?? false,
   })
 
   if (!banner) return null
@@ -75,13 +84,14 @@ export const DiagnosticsBanner: React.FC = () => {
   }[banner.severity]
 
   return (
-    <div className={`mx-4 mt-3 px-4 py-2 rounded border-l-4 ${borderColor} flex items-center justify-between`}>
-      <div className="flex items-center gap-3 min-w-0">
+    <div className={`mx-4 mt-3 px-4 py-2 rounded border-l-4 ${borderColor} flex items-center justify-between gap-3`}>
+      {/* Phones: the detail wraps under the title instead of being cut to a few letters */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-x-3 gap-y-0.5 min-w-0">
         <span className={`text-xs font-mono font-bold ${textColor} shrink-0`}>
           {banner.message}
         </span>
         {banner.detail && (
-          <span className="text-[10px] font-mono text-agent-text-muted truncate">
+          <span className="text-[10px] font-mono text-agent-text-muted sm:truncate">
             {banner.detail}
           </span>
         )}
@@ -106,6 +116,9 @@ function computeBanner(ctx: {
   rejections: RejectionSummary
   pmCredentials: boolean
   wsConnected: boolean
+  userFeedGaveUp?: boolean
+  marketFeedGaveUp?: boolean
+  recordingOnly?: boolean
 }): BannerState | null {
   // 1. Emergency stop (most critical)
   if (ctx.emergencyStopped) {
@@ -166,6 +179,15 @@ function computeBanner(ctx: {
     }
   }
 
+  // 3b. Recording-only: Momentum and Up/Down are running but will not trade
+  if (ctx.recordingOnly && ctx.strategies.some(s => s.status === 'running' && (s.id === 'micro-momentum' || s.id === 'btc-updown'))) {
+    return {
+      severity: 'cyan',
+      message: 'RECORDING SIGNALS ONLY',
+      detail: 'Momentum and Crypto Up/Down are logging signals and placing no trades. Turn off in Settings → Trading.',
+    }
+  }
+
   // 4. Dry run mode (informational, not blocking)
   if (ctx.dryRun) {
     return {
@@ -187,11 +209,30 @@ function computeBanner(ctx: {
       },
     }
   }
+  if (ctx.pmCredentials && !ctx.wsConnected && ctx.marketFeedGaveUp) {
+    return {
+      severity: 'yellow',
+      message: 'MARKET DATA FEED OFFLINE',
+      detail: 'Stopped reconnecting after repeated failures — live prices and order books fell back to REST.',
+      action: { label: 'Retry', onClick: () => { void realtimeService.retry() } },
+    }
+  }
   if (ctx.pmCredentials && !ctx.wsConnected) {
     return {
       severity: 'yellow',
       message: 'PM WS DISCONNECTED',
       detail: 'Polymarket WebSocket offline — showing Binance spot prices as fallback.',
+    }
+  }
+
+  // 5b. Private feed stopped reconnecting — fills, balance and order updates
+  // now arrive only through slower REST polling
+  if (ctx.userFeedGaveUp) {
+    return {
+      severity: 'yellow',
+      message: 'PRIVATE FEED OFFLINE',
+      detail: 'Fill, order and balance updates fell back to REST polling (up to 60s behind).',
+      action: { label: 'Retry', onClick: () => { void userChannelService.retry() } },
     }
   }
 
@@ -213,7 +254,7 @@ function computeBanner(ctx: {
           label: `Clean ${stalePositions.length} Stale`,
           onClick: () => {
             for (const p of stalePositions) {
-              positionLifecycleManager.abandonPosition(p.tokenId)
+              positionLifecycleManager.abandonPosition(p.marketSlug)
             }
           },
         }

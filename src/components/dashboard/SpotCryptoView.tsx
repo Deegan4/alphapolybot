@@ -236,7 +236,7 @@ export const SpotCryptoView: React.FC = () => {
         <div className="flex-1 overflow-y-auto min-h-0">
           {positions.length === 0 ? (
             /* Empty State */
-            <div className="h-full flex flex-col items-center justify-center gap-3 p-8">
+            <div className="sticky left-0 w-screen max-w-full h-full flex flex-col items-center justify-center gap-3 p-8">
               <div className="text-6xl opacity-30">📈</div>
               <div className="text-agent-text font-mono text-sm">No open spot positions</div>
               <div className="text-agent-text-muted text-xs text-center max-w-xs">

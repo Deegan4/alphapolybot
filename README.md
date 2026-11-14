@@ -8,12 +8,12 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://reactjs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/tests-557_passing-00C853)](#testing)
+[![Tests](https://img.shields.io/badge/tests-624_passing-00C853)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <br/>
 
-*A browser-based trading bot running eight independent strategies on [Polymarket](https://polymarket.com) prediction markets — from AI-powered LLM analysis to microstructure momentum, Frank-Wolfe optimized arbitrage, dual-side maker hedging, and whale copy trading.*
+*A browser-based trading bot for [Polymarket US](https://polymarket.us) prediction markets running four live strategies — AI-powered LLM analysis, a 5-factor BTC Up/Down signal with dual-side maker hedging, microstructure momentum, and spot-crypto mean reversion — with the two arbitrage strategies shelved (see [migration status](#strategies)).*
 
 <br/>
 
@@ -21,16 +21,15 @@
  ╔══════════════════════════════════════════════════════════════╗
  ║  ░▒▓ ALPHA POLY BOT ▓▒░                                    ║
  ║                                                              ║
- ║  strategies: 8 ■■■■■■■■  positions: 3    P&L: +$12.47      ║
+ ║  strategies: 4 live · 2 shelved  positions: 3  P&L: +$12.47 ║
  ║  uptime: 4h 23m          risk: NOMINAL   mode: LIVE         ║
  ║                                                              ║
  ║  [LLM] scanning 847 markets...  confidence: 0.72  ████░     ║
- ║  [DIP] watching 12 tokens       last dip: -6.2%   ███░░     ║
- ║  [F-W] 3 arb candidates         spread: 1.8%      ██░░░     ║
+ ║  [DIP] shelved — no exclusivity flag on PM US events        ║
+ ║  [F-W] shelved — pending Polymarket US port                 ║
  ║  [BTC] 5-factor signal          score: 0.46       ████░     ║
  ║  [MIC] flow toxicity: 0.23      imbalance: +0.31  ███░░     ║
  ║  [MRV] BTC Z-score: -2.14      entry: SHORT       ████░     ║
- ║  [CPY] 3 whales tracked         last copy: 2m ago  ██░░░     ║
  ║  [DSH] YES@0.52 NO@0.51        maker spread: 0.03 ███░░     ║
  ╚══════════════════════════════════════════════════════════════╝
 ```
@@ -93,7 +92,7 @@ A standalone project landing page lives at [`public/landing/index.html`](public/
 npm run dev        # then open http://localhost:4000/landing/
 ```
 
-It covers the eight strategies, the layered architecture, the risk stack, the test suite breakdown, and quick start — with an animated Matrix rain hero, a live boot-log terminal, and a screenshot lightbox. Content stays fully visible without JavaScript, and all motion respects `prefers-reduced-motion`.
+It covers the strategies, the layered architecture, the risk stack, the test suite breakdown, and quick start — with an animated Matrix rain hero, a live boot-log terminal, and a screenshot lightbox. Content stays fully visible without JavaScript, and all motion respects `prefers-reduced-motion`.
 
 ## Architecture
 
@@ -109,39 +108,49 @@ It covers the eight strategies, the layered architecture, the risk stack, the te
 │        settings (v32) · wallet · notifications · backtest       │
 ├─────────────────────────────────────────────────────────────────┤
 │                     Strategy Manager                            │
-│ ┌──────┐ ┌─────┐ ┌──────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐│
-│ │ LLM  │ │ Dip │ │Frank-│ │ BTC │ │Micro│ │Mean │ │Copy │ │Dual ││
-│ │Predct│ │ Arb │ │Wolfe │ │Up/Dn│ │Struc│ │Revrt│ │Trade│ │Side ││
-│ └──┬───┘ └──┬──┘ └──┬───┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘│
-├─────┴─────────┴────────┴────────┴────────┴────────┴────────┴────┤
+│ Live: LLM · BTC Up/Down (+Dual) · Micro · Mean Rev              │
+│ Shelved: Dip Arb · Frank-Wolfe Arb                              │
+├─────────────────────────────────────────────────────────────────┤
 │                      Trading Service                           │
 │ Kelly Sizer · Gas Oracle · Order Book Depth · Trade Logger     │
 │ Edge Tracker · Calibration · Rejection Tracker · Market Scanner│
 ├─────────────────────────────────────────────────────────────────┤
 │                      Risk Manager                               │
 │ Circuit Breaker · Position Lifecycle · SL/TP · Crash Recovery  │
-├───────────┬───────────┬────────────┬───────────────────────────┤
-│CLOB Client│Gamma/Data │  Realtime  │     Coinbase Client       │
-│(order sign│(markets)  │ Market/User│     (spot crypto)         │
-│ + US SDK) │           │ WS + RTDS  │                           │
-├───────────┴───────────┴────────────┴───────────────────────────┤
-│               Polygon Network (Ethers.js v6)                   │
-│        USDC.e · CTF Exchange · NegRisk Adapter                 │
+├─────────────────────────────────────────────────────────────────┤
+│ PolymarketUSClient (polymarket-us SDK: REST + Ed25519 auth)     │
+│ Realtime: markets WS (prices/books) · private WS (fills)        │
+│ Coinbase Client (spot crypto) · PolyBacktest (BTC history)      │
+├─────────────────────────────────────────────────────────────────┤
+│   Polymarket US — api.polymarket.us / gateway.polymarket.us     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Strategies
 
-| # | Strategy | Signal Source | Edge | Frequency |
-|:-:|:---------|:-------------|:-----|:----------|
-| 1 | **LLM Prediction** | OpenRouter multi-model analysis with Brier-score calibration tracking | AI identifies mispriced markets | Adaptive (accelerates near close) |
-| 2 | **Dip Arbitrage** | WebSocket price monitoring + order book spread scan, GTD orders with ask premium | Buys temporary dips on binary outcomes | 60s market / 30s spread |
-| 3 | **Frank-Wolfe Arb** | Bregman projection optimizer on CLOB books with cross-market mutex validation | Exploits ask-sum < $1.00 across outcomes | 15s full scan |
-| 4 | **BTC Up/Down** | 5-factor vol-normalized signal (momentum, velocity, time decay, value, flow) with regime detection + RSI filter | Trades crypto direction markets at resolution | Per 15-min window |
-| 5 | **Microstructure Momentum** | Bid/ask imbalance, spread volatility, trade flow toxicity via MicrostructureAnalyzer | Exploits informed flow signals | Continuous |
-| 6 | **Mean Reversion** | Z-score mean reversion on Coinbase spot crypto (BTC/ETH/SOL) via BinanceWS live feed | Fades extreme Z-score deviations | Continuous |
-| 7 | **Copy Trading** | Mirrors trades from tracked Polymarket whale wallets with configurable position sizing | Piggybacks on whale alpha | Event-driven |
-| 8 | **Dual-Side Hedge** | Maker-only YES+NO orders with 70/30 directional bias, driven by BTC signal engine + DynamicFeeService EV gate | Captures spread on both sides while maintaining directional exposure | Event-driven (signal-gated) |
+| # | Strategy | Status | Signal Source | Edge | Frequency |
+|:-:|:---------|:-------|:-------------|:-----|:----------|
+| 1 | **LLM Prediction** | Live | OpenRouter multi-model analysis with Brier-score calibration tracking | AI identifies mispriced markets | Adaptive (accelerates near close) |
+| 2 | **BTC Up/Down** | Live | 5-factor vol-normalized signal (momentum, velocity, time decay, value, flow) with regime detection + RSI filter | Trades crypto direction markets at resolution | Per 15-min window |
+| 3 | **Dual-Side Hedge** | Live (inside BTC Up/Down) | Maker-only YES+NO orders with 70/30 directional bias, driven by BTC signal engine + DynamicFeeService EV gate | Captures spread on both sides while maintaining directional exposure | Event-driven (signal-gated) |
+| 4 | **Microstructure Momentum** | Live | Bid/ask imbalance, spread volatility, trade flow toxicity via MicrostructureAnalyzer on each market's order book | Exploits informed flow signals | Continuous |
+| 5 | **Mean Reversion** | Live | Z-score mean reversion on Coinbase spot crypto (BTC/ETH/SOL) via BinanceWS live feed | Fades extreme Z-score deviations | Continuous |
+| 6 | **Dip Arbitrage** | Shelved | Two-leg arb below $1 | Needs outcome sets known to be complete and mutually exclusive | — |
+| 7 | **Frank-Wolfe Arb** | Shelved | Bregman projection optimizer with cross-market mutex validation | Exploits ask-sum < $1.00 across outcomes | — |
+
+**Polymarket US migration status.** The engine targets Polymarket US (slug-based REST + WebSocket via the official `polymarket-us` SDK; no wallets, no on-chain settlement). The market model was checked against the live gateway (`src/services/api/pmusWire.ts`, tested on captured fixtures):
+
+- **Every market is one binary order book on one slug, quoted YES-side.** NO prices are derived (NO ask = 1 − YES bid). An event's markets are separate candidates (teams, price ranges, dates), each its own Yes/No market.
+- **BBO and book responses are wrapped in `marketData`**, markets carry inline quotes, tick size and fee coefficient, and expose no volume or liquidity. Volume and liquidity are USD proxies from each market's BBO (shares traded and open interest).
+- **WebSockets from the browser**: the exchange authenticates WebSockets with request headers, which a browser cannot send, and the SDK refuses to open one in a browser. The app therefore uses its own client (`pmusBrowserSocket.ts`) that connects to a bridge on the dev server (`/ws/pm-us`, in `vite.config.ts`) with the signed handshake in the query string (key id, timestamp, signature; never the secret). The bridge opens the real connection with those as headers. The live feeds therefore need the app to be served by `npm run dev`; a static build has no bridge and falls back to REST polling. In dev, public market-data paths are proxied to the gateway and everything else to the authenticated host, and the dev server honours `HTTPS_PROXY`.
+- **Microstructure signal inputs**: the imbalance signal uses real resting size — the top 5 levels per side from the full book, which Microstructure Momentum now streams for every market it tracks (the lite feed's level counts, `bidDepth`/`askDepth`, are the fallback elsewhere). Before this it was fed a size of 1 per side, so it compared prices rather than depth and could never read bullish. The trade stream adds net aggressive flow over the last minute; Microstructure Momentum skips an entry when that flow runs 0.3 or more against the book signal. Dashboard → Analytics shows each tracked market's live signal, imbalance and trade flow against the entry threshold. The strategy also records every signal with the price 5 minutes later (in dry run too, last 5,000 samples kept in the browser), and the same panel reports what entering at each threshold from 0.1 to 0.5 would have returned after spread and taker fees. Samples overlap, so that view is a guide rather than a backtest. The default view instead replays the strategy's own exits (stop-loss, take-profit, hold limit, cooldown) over the recorded prices, one non-overlapping trade per market at a time. The threshold suggestion is chosen on the first two-thirds of the recorded period (at least 30 simulated trades, positive after fees) and only offered for one-click apply if it is also positive on at least 10 trades in the last third, which played no part in choosing it. The panel also compares the replay with the strategy's logged trades over the same period, and shows a stop-loss × take-profit grid at the current threshold. A simulated trade still open at the last reading is closed at that price. BTC Up/Down records its signals the same way: each signal's direction, confidence and outcome price, settled by the exchange's own settlement when it posts (a provisional result from the bot's spot price fills in until then), with a report of win rate and held-to-resolution return per confidence level (one entry per window, inside the entry-price limits). A confidence level is suggested for one-click apply only if it was chosen on the first two-thirds of windows and is still profitable on the rest. Samples can be exported as CSV.
+- **Rate limit: 25 requests per second per IP**, shared by every key on that IP. On the public gateway a burst also draws a Cloudflare ban (HTTP 429, error 1015) that lasts minutes. Every SDK call goes through a shared token bucket (`requestThrottle.ts`): 5 requests per second for the gateway and 15 for the authenticated API, with a pause after a 429 that starts at 2 seconds and doubles while the ban lasts. A rate-limited read (GET) is retried once after the pause; orders and cancels are never resent. Per-market stats lookups are budgeted and cached on top of that (in the MCP server too: `get_markets` reads bid/ask inline from the event list, fetches volume and liquidity for about twice the requested number of markets, and reuses them for 15 minutes). A request that would wait more than 15s (gateway) or 10s (API) in the queue, as during a long ban, is dropped with `RequestDroppedError` instead of firing late on stale prices; cancels are never dropped. Balance comes from the private WebSocket's balance stream when it is live (also used for the pre-order buying-power check), with REST every 2 minutes as a safety net. Likewise the open-order poll for resting GTD orders only hits REST every 3 minutes while the private feed is live (every 60s otherwise), and if the private feed stops reconnecting the dashboard shows a PRIVATE FEED OFFLINE banner with a Retry button. BTC Up/Down also streams the full order book for the windows it is tracking, so the depth check before an entry reads it from memory (when under 5s old) instead of calling REST. Microstructure Momentum does the same for all its tracked markets. If the market-data feed stops reconnecting, the dashboard shows a MARKET DATA FEED OFFLINE banner with Retry, and Settings → API lists both live feeds with their state, last message time and how many streamed order books are fresh. Each feed has a watchdog: once the server's heartbeat interval is known, silence longer than 3 intervals (60s minimum) reopens the connection. Settings → Trading → Order Execution has an optional switch that blocks new entries while the market-data feed is down (exits still go out). A second switch, Record Signals Only, keeps Momentum and Crypto Up/Down scanning and recording for the Analytics reports while placing no trades at all, simulated ones included. Settings → API shows live request rates, 429 counts, dropped requests and any active pause per host. BTC Up/Down fetches the next window shortly before rollover (staggered per asset) instead of every asset at once after it.
+- **Fees are Θ × contracts × p × (1 − p)** (Θ = 0.095 at tier 1, published per market as `feeCoefficient`): about 4.75% of the stake at 50¢. Kelly sizing and take-profit / time-exit decisions use it (`pmusFees.ts`).
+- **Orders need whole contracts** unless a market's `minimumTradeQty` is below 1, so order sizes are rounded down to that step.
+- **Maker-first entries (opt-in, Settings → Trading → Order Execution).** Makers pay no fee at tier 1, so buys can rest as post-only GTD orders one cent inside the spread instead of paying the taker fee. A one-sided book or a post-only rejection falls back to the normal taker order. The Settings panel shows the maker fill rate, average time to fill and the taker fees avoided (`MakerFillTracker.ts`), so you can judge whether the savings beat the missed fills, overall and per strategy. Maker-first can then be switched off for individual strategies (LLM, BTC Up/Down, Micro) while staying on for the rest. When a maker entry expires, any partial fill is tracked as a position, and the remainder is bought with a normal order if the ask is within the chase limit (default 2¢) of the maker price. In the last 5 minutes of a market window the limit widens linearly to 2.5× (capped at 5¢); after the window closes there is no chase, and maker-first is skipped entirely when a resting order would outlive the window.
+- **Crypto Up/Down events** use slugs like `btc-updown-15m-2026-11-08-0130z` and publish the window and price to beat in `assetPriceTerms`. There is no 9PM series.
+
+**Dip Arbitrage is shelved.** YES + NO on one market can never cost less than $1. Buying YES across an event's markets is riskless only when they form a complete, mutually exclusive set, and the gateway does not say which events do. Live events include nested markets ("BTC hits $150k before December" and "before January"). The two-leg implementation is kept at `git show f614500:src/services/strategies/DipArbStrategy.ts`. **Frank-Wolfe Arb** is shelved for the same reason plus its international-CLOB code (`git show 9eb00b9:src/services/strategies/`). Shelved strategies keep their settings, are hidden from the dashboard toggles and refuse to start. Copy Trading mirrored public Polygon wallets, which do not exist on Polymarket US, and was removed.
 
 ## Risk Infrastructure
 
@@ -188,56 +197,92 @@ npm run dev        # Dev server on :4000
 npm run dev            # Vite dev server on :4000
 npm run dev:strict-csp # Dev with strict CSP (no Fast Refresh)
 npm run build          # Production build (Vite 7 + esbuild)
-npm test               # 511 tests (Vitest)
+npm test               # 624 tests (Vitest)
+npm run preflight      # install, smoke-test the API, start the app (dry-run checklist steps 0-2)
+npm run test:ci        # everything CI runs: lint, typecheck, tests, build, MCP server build and tests
+npm run test:mobile    # phone-size layout check on the built app (run `npm run build` first; CI runs it too)
+npm run backtest       # replay the Crypto Up/Down signal on the last 24h of finished windows (free public data, no key)
+                       #   e.g. npm run backtest -- --asset BTC,ETH,SOL --hours 72 --out results.json
 npm run test:watch     # Watch mode
 npm run lint           # ESLint
+npm run typecheck      # TypeScript (tsc --noEmit) — also runs in CI
 npm run preview        # Preview production build
 ```
 
 ## Testing
 
-557 tests across 23 suites covering all critical paths:
+624 tests across 35 suites (`npm test`), plus `npm run typecheck` (strict TypeScript) and `npm run lint` — all three run in CI:
 
 | Suite | Tests | Coverage |
 |:------|------:|:---------|
-| RiskManager | 32 | Circuit breaker, emergency stop, daily limits |
-| PositionLifecycleManager | 25 | SL/TP enforcement, partial exits, crash recovery |
+| MeanReversion | 53 | Z-score computation, Coinbase integration, position tracking, RiskManager gate |
+| signalEngine | 51 | Stateless 5-factor signal extraction, 5m profile, volatility/RSI helpers |
+| BtcUpDownStrategy | 38 | 5-factor signal, regime detection, RSI filter, PM US Up/Down slugs |
 | KellySizer | 33 | Fractional Kelly, drawdown adjustment, edge cases |
+| RiskManager | 32 | Circuit breaker, emergency stop, daily limits |
 | FrankWolfeOptimizer | 31 | Bregman projection, convergence, fee handling |
-| ProjectFWStrategy | 17 | Scan lifecycle, trade execution, merge retry |
-| DipArbStrategy | 21 | Dip detection, spread scan, GTD orders |
-| BtcUpDownStrategy | 34 | 5-factor signal, regime detection, RSI filter |
-| MeanReversion | 53 | Z-score computation, Coinbase integration, position tracking |
-| CopyTrading | 21 | Whale tracking, position mirroring, risk limits |
+| PositionLifecycleManager | 28 | SL/TP enforcement (YES and NO positions), partial exits, crash recovery |
+| EdgeTracker | 24 | Realized vs. predicted edge, decay tracking |
 | CrossMarket | 23 | Event analysis, dependency classification, mutex |
 | OpenRouterService | 21 | Budget tracking, model selection, signal fusion |
-| EdgeTracker | 24 | Realized vs. predicted edge, decay tracking |
-| signalEngine | 57 | Stateless 5-factor signal extraction, 5m profile |
-| BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
+| secureStorage | 19 | Encryption, key derivation, migration |
+| settingsStore | 18 | Persistence, version migration, setter isolation |
+| encryptedStorage | 15 | AES-GCM device key, legacy plaintext migration |
 | PolyBacktestClient | 15 | API pagination, auth, data transforms |
-| ArbitrageProfitFormula | 30 | Profit calculation, fee deduction, edge cases |
-| DynamicFeeService | 26 | Quadratic fee curve, trade EV, dual-side EV, Kelly |
-| DualSideHedgeStrategy | 14 | Maker YES+NO, bias logic, signal-gated entry |
-| secureStorage | 17 | Encryption, key derivation, migration |
-| settingsStore | 18 | Persistence, version migration (v32), setter isolation |
-| MCP Tools | 12 | Tool execution, parameter validation |
+| pmusWire | 15 | Live wire shapes: `marketData` envelope, per-market normalization, NO-side price/book views, Up/Down slugs, stats budget ranking |
+| ShelvedStrategies | 13 | Dip Arb and FW Arb shells: refuse to start, preserve settings surface |
+| OrderBookDepth | 3 | YES and NO depth walks on a YES-quoted book |
+| requestThrottle | 16 | Token bucket pacing, separate gateway/API buckets, escalating 429 cooldown, request metrics, stale-request dropping (cancels exempt), one retry for rate-limited reads (never orders) |
+| LiveFeeds | 15 | Pushed order books for watched markets (freshness, disconnect), slow REST order poll while the feed is live, feed give-up, retry and status for both feeds, stall watchdog, depth imbalance from real sizes, trade flow and its entry veto |
+| SignalRecorder | 20 | Signal samples resolved at the 5-minute horizon, return after spread and fees for YES and NO entries, per-threshold report, exit-rule replay (stop-loss, take-profit, hold limit, cooldown, data gaps), held-out threshold suggestion, stop-loss/take-profit grid, logged-trade summary, CSV export |
+| BtcSignalRecorder | 13 | Up/Down signals settled from spot after the window ends (grace period, ties), held-to-resolution return after the entry fee, per-confidence report with one entry per window, exchange settlement overriding spot, held-out confidence suggestion |
+| WalletLiveBalance | 3 | Pushed balance applied while connected; REST balance only as a 2-min fallback while the private feed is live |
+| pmusFees | 6 | Documented taker fee Θ·C·p(1−p), round-trip fee, fee-aware Kelly |
+| pmusOrders | 15 | Quantity step rounding, decimal position fields, USD balance, latency-reject detection, 100-market WS chunks, maker entry price |
+| TradingService maker-first | 11 | Post-only entry inside the spread (YES and NO), taker fallback without tripping the circuit breaker, expiry follow-up (partial fill kept, remainder taken within the chase limit), opt-in |
+| MakerFillTracker | 8 | Fill rate, time to fill, taker fees avoided, per-strategy split, v1 migration, persistence and reset |
+| GtcOrderManager maker | 2 | Maker orders report placement, fill, expiry and cancel; fallback orders do not |
+| BacktestRunner | 12 | Historical replay, P&L/Sharpe/drawdown |
+| MicrostructureMomentum | 9 | Polymarket US market selection, signal slug, config |
+| MCP Orders | 19 | Intent/price mapping (NO → YES-side), order params, book summary, event flattening, live wire fixtures |
+| MCP PriceHistory | 9 | Interval/fidelity profiles, custom-range validation, normalization |
+| MCP Tools | 12 | Kelly sizing, opportunity scoring |
 | MCP Rounding | 11 | Tick-size compliance, decimal precision |
-| MCP Auth | 8 | API key handling, HMAC signing |
 
 ```bash
-npm test    # Runs all 557 tests in ~3s
+npm test    # Runs all 624 tests in ~5s
 ```
 
 ## MCP Server
 
-The `mcp-server/` directory contains a standalone [Model Context Protocol](https://modelcontextprotocol.io) server for AI-assisted trading operations. It exposes tools for market analysis, position management, and trade execution to LLM agents.
+The `mcp-server/` directory contains a standalone [Model Context Protocol](https://modelcontextprotocol.io) server that exposes Polymarket US to LLM agents (Claude Code, Claude Desktop) over stdio. It uses the official `polymarket-us` SDK — API key + Ed25519 signing, slug-based markets — with no wallet or on-chain code.
+
+| Tool | Auth | What it does |
+|:-----|:----:|:-------------|
+| `get_markets` | – | Browse/search markets: one row per tradeable slug with event, outcome, best bid/ask, tick, and volume/liquidity proxies |
+| `get_market_detail` | – | Order book summary for a market slug, or every market in an event |
+| `get_price_history` | – | YES/NO display-price history (fixed 1H…ALL/LIVE profiles or a ≤24h custom range), summarized + down-sampled |
+| `get_crypto_prices` | – | BTC/ETH/SOL/XRP spot with 24h change (Binance → CoinGecko) |
+| `compute_kelly`, `score_opportunities` | – | Pure analysis helpers |
+| `get_balance`, `get_positions`, `get_open_orders` | key | Account state |
+| `place_order` | key | Limit orders; **dry-run by default** (local validation + exchange preview). NO prices are converted to YES-side for you |
+| `cancel_order`, `cancel_all_orders`, `close_position` | key | Writes that require `confirm: true` |
 
 ```bash
 cd mcp-server
 npm install
-npm test       # 31 tests
+npm test       # 51 tests
 npm run build
+npm run smoke  # live read-only checks against the gateway; add `-- --auth` for account + order preview
+# credentials (optional — read-only without them), in the repo-root .env:
+#   POLYMARKET_KEY_ID=...  POLYMARKET_SECRET_KEY=...
 ```
+
+Register with Claude Code: `claude mcp add polymarket-us -- node /path/to/alphapolybot/mcp-server/bootstrap.js`.
+
+Behind an HTTPS proxy, Node's `fetch` needs `NODE_USE_ENV_PROXY=1` (Node 22.21+ or 24). The smoke test never places a live order: its `place_order` check is a dry run at 1¢.
+
+Before running the bot live, work through [docs/DRY_RUN_CHECKLIST.md](docs/DRY_RUN_CHECKLIST.md).
 
 ## Tech Stack
 
@@ -261,21 +306,21 @@ npm run build
 src/
 ├── components/
 │   ├── charts/         # MatrixLineChart, AreaChart, BarChart, PieChart, Gauge, Sparkline
-│   ├── dashboard/      # 22 components: BacktestView, ActivePositions, PerformancePanel,
-│   │                   # FollowTraderPanel, SpotCryptoView, DiagnosticsBanner, etc.
+│   ├── dashboard/      # BacktestView, ActivePositions, PerformancePanel, StrategyDropdown,
+│   │                   # SpotCryptoView, DiagnosticsBanner, AssetCards, etc.
 │   ├── layout/         # AppLayout, DashboardLayout, SettingsLayout, Header, Sidebar, MatrixRain
 │   └── ui/             # 18 Matrix-themed components (Button, Card, Modal, Toast, etc.)
 ├── hooks/              # useWallet, useBalanceHistory, useCryptoPrices, usePolymarketPrices
 ├── services/
-│   ├── api/            # CLOBClient, GammaClient, DataClient, CoinbaseClient,
-│   │                   # PolyBacktestClient, PolymarketUSClient, PriceOracleService
+│   ├── api/            # PolymarketUSClient (official SDK wrapper), pmusWire (wire shapes), CoinbaseClient,
+│   │                   # PolyBacktestClient, PriceOracleService
 │   ├── llm/            # OpenRouterService (multi-model, budget-bucketed)
 │   ├── notifications/  # Toast + Browser + Web Audio
 │   ├── realtime/       # RealtimeService, RTDSService, UserChannelService, BinanceWSService
 │   ├── storage/        # IndexedDB v4 (6 object stores)
-│   ├── strategies/     # 8 strategies + optimizers + cross-market + signal engine
+│   ├── strategies/     # 4 live + 2 shelved strategies, ShelvedStrategy base, signal engine
 │   │   ├── btcupdown/  # signalEngine, BacktestRunner, HistoricalEnrichment
-│   │   └── projectfw/  # FrankWolfeOptimizer, ArbitrageScanner
+│   │   └── projectfw/  # FrankWolfeOptimizer, crossmarket/ (exchange-agnostic, kept for the port)
 │   ├── trading/        # TradingService, RiskManager, PLM, KellySizer, GasOracle,
 │   │                   # OrderBookDepth, TradeLogger, EdgeTracker, CalibrationTracker,
 │   │                   # MicrostructureAnalyzer, ReadinessChecker, RejectionTracker
@@ -296,8 +341,9 @@ Configured for Netlify with GitHub Actions CI:
 # CI runs on every push/PR to main:
 # 1. npm ci
 # 2. npm run lint
-# 3. npm test (511 tests)
-# 4. npm run build
+# 3. npm run typecheck
+# 4. npm test (624 tests)
+# 5. npm run build
 ```
 
 Netlify config in `netlify.toml` handles SPA routing and API proxy paths.

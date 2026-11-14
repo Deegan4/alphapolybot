@@ -2,6 +2,7 @@ import type { PendingGtcOrder } from '@/types'
 import { polymarketUSClient } from '@/services/api'
 import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
+import { makerFillTracker } from './MakerFillTracker'
 
 type OrderChangeCallback = (orders: PendingGtcOrder[]) => void
 
@@ -14,6 +15,18 @@ type OrderChangeCallback = (orders: PendingGtcOrder[]) => void
  *
  * Lifecycle: initialize() once from App.tsx, destroy() on teardown.
  */
+/** REST open-order poll interval while the private feed is delivering order events */
+export const ORDER_POLL_FALLBACK_MS = 3 * 60_000
+
+/**
+ * Whether the safety-net poll should hit REST. While the private WebSocket is
+ * live it pushes every fill/cancel/expiry, so REST only needs to catch a
+ * silently stalled feed; when the feed is down, poll on every tick.
+ */
+export function shouldPollOrdersRest(feedLive: boolean, lastPollMs: number, nowMs: number, fallbackMs = ORDER_POLL_FALLBACK_MS): boolean {
+  return !feedLive || nowMs - lastPollMs >= fallbackMs
+}
+
 export class GtcOrderManager {
   private orders = new Map<string, PendingGtcOrder>()
   private pollInterval: number | null = null
@@ -23,6 +36,7 @@ export class GtcOrderManager {
   // Config — poll interval increased to 60s because user channel push handles real-time fills
   private pollIntervalMs = 60_000
   private userChannelUnsubs: (() => void)[] = []
+  private lastRestPollMs = 0
 
   initialize(): void {
     if (this.initialized) return
@@ -68,27 +82,46 @@ export class GtcOrderManager {
         return
       }
 
-      // Listen for trade fills
+      // Listen for fills. onTrade only fires for FILL / PARTIAL_FILL executions.
+      // US executions report per-execution `lastShares`; the embedded order carries
+      // `leavesQuantity`, which is the reliable "fully filled" signal.
       const unsubTrade = userChannelService.onTrade((msg) => {
-        if (msg.status !== 'CONFIRMED') return
-        // Check if any of our tracked orders were filled
-        for (const makerOrder of msg.maker_orders || []) {
-          const pending = this.orders.get(makerOrder.order_id)
-          if (pending && pending.status === 'pending') {
-            console.log(`[GtcOrderManager] Order ${makerOrder.order_id} filled via user channel`)
-            this.handleFill(pending)
-          }
+        const pending = this.orders.get(msg.orderId)
+        if (!pending || pending.status !== 'pending') return
+
+        const fullyFilled =
+          msg.type === 'EXECUTION_TYPE_FILL' ||
+          (msg.leavesQuantity !== undefined && msg.leavesQuantity <= 0)
+
+        if (fullyFilled) {
+          console.log(`[GtcOrderManager] Order ${msg.orderId} filled via user channel`)
+          void this.handleFill(pending)
+        } else {
+          if (msg.cumQuantity !== undefined) pending.filledSize = msg.cumQuantity
+          console.log(`[GtcOrderManager] Order ${msg.orderId} partial fill (${msg.lastShares ?? '?'} shares) — waiting for completion`)
         }
       })
 
-      // Listen for order cancellations
+      // Listen for terminal non-fill executions (cancel / reject / expire)
       const unsubOrder = userChannelService.onOrder((msg) => {
-        if (msg.event_type !== 'CANCELLATION') return
-        const pending = this.orders.get(msg.order_id)
-        if (pending && pending.status === 'pending') {
-          console.log(`[GtcOrderManager] Order ${msg.order_id} cancelled via user channel`)
-          pending.status = 'cancelled'
-          this.removeOrder(msg.order_id)
+        const pending = this.orders.get(msg.orderId)
+        if (!pending || pending.status !== 'pending') return
+
+        switch (msg.type) {
+          case 'EXECUTION_TYPE_CANCELED':
+          case 'EXECUTION_TYPE_REJECTED':
+            console.warn(`[GtcOrderManager] Order ${msg.orderId} ${msg.type === 'EXECUTION_TYPE_REJECTED' ? 'rejected' : 'cancelled'} via user channel`)
+            pending.status = 'cancelled'
+            this.removeOrder(msg.orderId)
+            break
+          case 'EXECUTION_TYPE_EXPIRED':
+          case 'EXECUTION_TYPE_DONE_FOR_DAY':
+            console.log(`[GtcOrderManager] Order ${msg.orderId} expired via user channel`)
+            this.handleExpiry(pending)
+            break
+          default:
+            // FILL / PARTIAL_FILL handled by onTrade; REPLACE needs no action
+            break
         }
       })
 
@@ -105,6 +138,7 @@ export class GtcOrderManager {
    */
   trackOrder(order: PendingGtcOrder): void {
     this.orders.set(order.orderId, order)
+    if (order.entryKind === 'maker') makerFillTracker.recordPlaced(order.strategy)
 
     activityLogger.logInfo(
       `GTD order pending: ${order.question.substring(0, 40)}...`,
@@ -128,6 +162,12 @@ export class GtcOrderManager {
    */
   private async pollOrders(): Promise<void> {
     if (this.orders.size === 0) return
+    const feedLive = await import('@/services/realtime')
+      .then(m => m.userChannelService?.isConnected?.() ?? false)
+      .catch(() => false)
+    const now = Date.now()
+    if (!shouldPollOrdersRest(feedLive, this.lastRestPollMs, now)) return
+    this.lastRestPollMs = now
 
     try {
       // Collect slugs for efficient batch query
@@ -147,9 +187,12 @@ export class GtcOrderManager {
           }
           // Otherwise still waiting — nothing to do
         } else {
-          // Order is no longer open — it either filled or expired/cancelled
-          const nowSec = Math.floor(Date.now() / 1000)
-          if (pending.expiresAt > 0 && nowSec >= pending.expiresAt) {
+          // Order is no longer open — it either filled or expired/cancelled.
+          // expiresAt is ms; orders persisted by older builds stored seconds, so normalize.
+          const expiresAtMs = pending.expiresAt > 0 && pending.expiresAt < 1e12
+            ? pending.expiresAt * 1000
+            : pending.expiresAt
+          if (expiresAtMs > 0 && Date.now() >= expiresAtMs) {
             this.handleExpiry(pending)
           } else {
             // Disappeared before expiry — assume filled (exchange filled + removed)
@@ -195,7 +238,6 @@ export class GtcOrderManager {
         stopLossPercent: order.stopLossPercent,
         takeProfitPercent: order.takeProfitPercent,
         strategy: order.strategy,
-        takerFeeBps: 10, // Flat 10bps on PM US
       })
     } catch (err) {
       console.warn('[GtcOrderManager] Failed to hand off to PLM:', err)
@@ -209,6 +251,13 @@ export class GtcOrderManager {
    */
   private handleExpiry(order: PendingGtcOrder): void {
     order.status = 'expired'
+
+    // Maker-first: keep any partial fill and optionally take the remainder
+    if (order.entryKind === 'maker') {
+      import('./TradingService')
+        .then(({ tradingService }) => tradingService.completeExpiredMakerEntry(order))
+        .catch(err => console.warn('[GtcOrderManager] Maker expiry follow-up failed:', err))
+    }
 
     activityLogger.logInfo(
       `GTD expired: ${order.question.substring(0, 40)}...`,
@@ -303,6 +352,11 @@ export class GtcOrderManager {
   // ==========================================
 
   private removeOrder(orderId: string): void {
+    // Every terminal path (fill / expiry / cancel / reject) passes through here
+    const order = this.orders.get(orderId)
+    if (order?.entryKind === 'maker' && order.status !== 'pending') {
+      makerFillTracker.recordResolved(order.status, order)
+    }
     this.orders.delete(orderId)
 
     import('@/services/storage').then(({ indexedDBService }) => {

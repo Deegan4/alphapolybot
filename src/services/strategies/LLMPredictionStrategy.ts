@@ -1,5 +1,5 @@
 import { BaseStrategy } from './BaseStrategy'
-import type { StrategyStats, LLMPredictionConfig, Market } from '@/types'
+import type { LLMPredictionConfig, Market } from '@/types'
 import { marketScanner } from '@/services/trading/MarketScanner'
 import { tradingService } from '@/services/trading/TradingService'
 import { openRouterService, OpenRouterService } from '@/services/llm'
@@ -184,7 +184,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
       if (!tradeCheck.allowed) {
         this.log(`EdgeTracker blocked: ${tradeCheck.reason}`)
         activityLogger.logWarning(`LLM scan blocked by EdgeTracker: ${tradeCheck.reason}`)
-        rejectionTracker.record('edge_tracker', 'llm', tradeCheck.reason)
+        rejectionTracker.record('edge_tracker', 'llm', tradeCheck.reason ?? 'negative empirical edge')
         return
       }
 
@@ -276,7 +276,6 @@ export class LLMPredictionStrategy extends BaseStrategy {
       activityLogger.logAnalysis(`Analyzing: ${market.question.substring(0, 50)}...`)
 
       // Gather enrichment context from in-memory singletons (synchronous, no API calls)
-      const outcomeIdx0 = 0
       const slugForContext = market.slug
       let context = gatherMarketContext(market, slugForContext, 'llm')
 
@@ -408,7 +407,6 @@ export class LLMPredictionStrategy extends BaseStrategy {
           activityLogger.logTrade(`BUY ${prediction.predictedOutcome.toUpperCase()} $${positionSize.toFixed(2)}`, {
             marketId: market.id,
             orderId: result.orderId,
-            txHash: result.txHash,
           })
 
           // Track position for stop-loss / take-profit enforcement
@@ -489,7 +487,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
     }
 
     const adaptiveProb = edgeTracker.getAdaptiveModelProb('llm', confidence)
-    const fStar = KellySizer.polymarketKelly(adaptiveProb, marketPrice)
+    const fStar = KellySizer.pmusKelly(adaptiveProb, marketPrice)
     let size = KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar })
 
     // Enforce hard dollar cap per trade (only in non-penny mode)
@@ -640,9 +638,7 @@ export class LLMPredictionStrategy extends BaseStrategy {
             continue
           }
 
-          this.updateStats({
-            totalTrades: this._stats.totalTrades + 1,
-          })
+          this._stats = { ...this._stats, totalTrades: this._stats.totalTrades + 1 }
 
           // Track position with PLM for SL/TP enforcement
           if (!result.pending) {

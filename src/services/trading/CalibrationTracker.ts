@@ -212,10 +212,11 @@ export class CalibrationTracker {
   async hydrate(): Promise<void> {
     try {
       const { indexedDBService } = await import('@/services/storage')
-      const stored = await indexedDBService.loadCalibrationData?.() ?? []
+      // Storage persists outcomes as plain strings; they were written from this type, so narrow back.
+      const stored = ((await indexedDBService.loadCalibrationData?.()) ?? []) as PredictionRecord[]
       if (stored.length > 0) {
         const existingIds = new Set(this.predictions.map(p => p.marketId))
-        const newFromStorage = stored.filter((p: PredictionRecord) => !existingIds.has(p.marketId))
+        const newFromStorage = stored.filter(p => !existingIds.has(p.marketId))
         this.predictions = [...this.predictions, ...newFromStorage].slice(-this.maxPredictions)
         console.log(`[CalibrationTracker] Hydrated ${newFromStorage.length} prediction records`)
       }

@@ -1,0 +1,41 @@
+name: API smoke test
+
+# Read-only check that the public Polymarket US API still has the shape the
+# bot expects. Runs daily, not on pushes: it calls a live third-party API, so
+# a failure means "the API changed or rate-limited this runner", not "this
+# commit is broken". It uses no credentials and never places an order.
+on:
+  schedule:
+    - cron: '17 14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mcp-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Public smoke test
+        run: npm run smoke

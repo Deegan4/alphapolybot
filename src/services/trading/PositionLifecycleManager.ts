@@ -1,14 +1,27 @@
 import type { PriceData } from '@/types'
+import { PMUS_DEFAULT_TAKER_THETA, roundTripFeeFraction } from './pmusFees'
 import { realtimeService } from '@/services/realtime'
 import { tradingService } from './TradingService'
 import { riskManager } from './RiskManager'
 import { activityLogger } from './ActivityLogger'
 import { tradeLogger } from './TradeLogger'
 
-// Default Polymarket US taker fee (flat 10 bps = 0.1%)
-// Used to adjust take-profit threshold so NET profit matches user's configured percentage.
-// SL doesn't need adjustment (a loss is a loss regardless of fee).
-const DEFAULT_TAKER_FEE_PERCENT = 0.001
+/** Mid price in the position's outcome terms (PM US feeds are YES-quoted) */
+function outcomeMid(pd: PriceData, outcome: 'yes' | 'no'): number {
+  if (!(pd.mid > 0)) return 0
+  return outcome === 'no' ? 1 - pd.mid : pd.mid
+}
+
+/**
+ * Fees as a fraction of entry notional, used to make take-profit and time-exit
+ * decisions on NET P&L. Without an explicit per-position override this is the
+ * Polymarket US round-trip taker fee Θ·p·(1−p) on entry and exit (pmusFees).
+ * SL doesn't need adjustment (a loss is a loss regardless of fee).
+ */
+function feeFraction(position: { entryPrice: number; takerFeeBps?: number; feeCoefficient?: number }, currentPrice: number): number {
+  if (position.takerFeeBps != null) return position.takerFeeBps / 10000
+  return roundTripFeeFraction(position.entryPrice, currentPrice, position.feeCoefficient ?? PMUS_DEFAULT_TAKER_THETA)
+}
 
 // ==========================================
 // TYPES
@@ -25,7 +38,8 @@ export interface TrackedPosition {
   stopLossPercent: number     // e.g. 0.15 = 15%
   takeProfitPercent: number   // e.g. 0.30 = 30%
   strategy: 'llm' | 'dip' | 'fw' | 'btc' | 'micro' | 'meanrev' | 'copy'
-  takerFeeBps?: number        // per-position taker fee in bps (default 10 for PM US). Falls back to DEFAULT_TAKER_FEE_PERCENT if absent.
+  takerFeeBps?: number        // flat fee override in bps; when absent the PM US round-trip taker fee is used
+  feeCoefficient?: number     // market taker coefficient Θ (default 0.095)
   // Trailing stop-loss fields
   trailingStopPercent?: number  // e.g. 0.10 = 10% trail from peak
   peakPrice?: number            // highest price seen while in profit
@@ -146,7 +160,7 @@ export class PositionLifecycleManager {
           const matchingPos = positions.find(p =>
             p.marketSlug === position.marketSlug && p.outcome === position.outcome
           )
-          if (!matchingPos || (matchingPos.netPosition ?? 0) <= 0) {
+          if (!matchingPos || matchingPos.size <= 0) {
             console.log(`[PLM] Hydration: zero position for ${position.question.substring(0, 40)}... — skipping`)
             indexedDBService.removePosition(position.marketSlug).catch(() => {})
             // Close TradeLogger record if still open
@@ -217,18 +231,19 @@ export class PositionLifecycleManager {
    */
   private subscribeToUserChannel(): void {
     import('@/services/realtime/UserChannelService').then(({ userChannelService }) => {
+      // onTrade only fires for FILL / PARTIAL_FILL executions
       this.unsubscribeUserChannel = userChannelService.onTrade((msg) => {
-        // Only care about confirmed BUY fills
-        if (msg.side !== 'BUY' || msg.status !== 'CONFIRMED') return
+        // Only care about BUY fills (entries). US side values are 'ORDER_SIDE_BUY' / 'ORDER_SIDE_SELL'.
+        if (msg.side !== 'ORDER_SIDE_BUY' && msg.side !== 'BUY') return
 
-        // US user channel uses market_slug (not asset_id)
-        const slug = msg.market_slug ?? msg.asset_id
+        const slug = msg.marketSlug
         if (!slug) return
 
         const position = this.positions.get(slug)
         if (!position) return
 
-        const actualSize = parseFloat(msg.size)
+        // Prefer the order's cumulative filled quantity; fall back to this execution's shares
+        const actualSize = msg.cumQuantity ?? parseFloat(msg.lastShares ?? '')
         if (!actualSize || isNaN(actualSize) || actualSize <= 0) return
 
         // Only update if the size actually differs (avoids unnecessary writes)
@@ -447,7 +462,7 @@ export class PositionLifecycleManager {
 
     return Array.from(this.positions.values()).map(pos => {
       const priceData = realtimeService.getPrice(pos.marketSlug)
-      const currentPrice = priceData?.mid ?? pos.entryPrice
+      const currentPrice = priceData ? outcomeMid(priceData, pos.outcome) : pos.entryPrice
       // Show GROSS unrealized P&L (matches Polymarket display).
       // Fees are only deducted at sell time — pre-subtracting them makes
       // dashboard numbers look wrong compared to Polymarket's portfolio page.
@@ -472,7 +487,7 @@ export class PositionLifecycleManager {
     let totalUsd = 0
     for (const pos of this.positions.values()) {
       const priceData = realtimeService.getPrice(pos.marketSlug)
-      const currentPrice = priceData?.mid ?? pos.entryPrice
+      const currentPrice = priceData ? outcomeMid(priceData, pos.outcome) : pos.entryPrice
       totalUsd += pos.size * (currentPrice - pos.entryPrice)
     }
     return { totalUsd, positionCount: this.positions.size }
@@ -515,7 +530,8 @@ export class PositionLifecycleManager {
       return
     }
 
-    const currentPrice = priceData.mid
+    // The feed is YES-quoted; a NO position is worth 1 - YES mid
+    const currentPrice = outcomeMid(priceData, position.outcome)
     // Guard: ignore zero/near-zero prices from empty order books.
     if (currentPrice <= 0.001) return
 
@@ -548,7 +564,7 @@ export class PositionLifecycleManager {
     const maxHold = position.maxHoldMs ?? 4 * 60 * 60 * 1000 // default 4 hours
     if (maxHold > 0 && Date.now() - position.entryTime > maxHold) {
       const holdHours = ((Date.now() - position.entryTime) / 3_600_000).toFixed(1)
-      const takerFeePercent = position.takerFeeBps != null ? position.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+      const takerFeePercent = feeFraction(position, currentPrice)
       const netPnlPercent = pnlPercent - takerFeePercent
 
       if (netPnlPercent > 0) {
@@ -663,7 +679,7 @@ export class PositionLifecycleManager {
     }
 
     // Check TAKE-PROFIT: price rose above fee-adjusted threshold.
-    const takerFeePercent = position.takerFeeBps != null ? position.takerFeeBps / 10000 : DEFAULT_TAKER_FEE_PERCENT
+    const takerFeePercent = feeFraction(position, currentPrice)
     const adjustedTP = position.takeProfitPercent + takerFeePercent
     if (pnlPercent >= adjustedTP) {
       const netPnl = pnlPercent - takerFeePercent
@@ -709,7 +725,7 @@ export class PositionLifecycleManager {
 
       if (result.success) {
         const priceData = realtimeService.getPrice(marketSlug)
-        const exitPrice = priceData?.mid ?? position.entryPrice
+        const exitPrice = priceData ? outcomeMid(priceData, outcome) : position.entryPrice
         const pnlUsd = (exitPrice - position.entryPrice) * size
 
         activityLogger.logSell(
@@ -809,7 +825,7 @@ export class PositionLifecycleManager {
 
       if (result.success) {
         const priceData = realtimeService.getPrice(marketSlug)
-        const exitPrice = priceData?.mid ?? position.entryPrice
+        const exitPrice = priceData ? outcomeMid(priceData, outcome) : position.entryPrice
         const pnlUsd = (exitPrice - position.entryPrice) * size
 
         activityLogger.logSell(

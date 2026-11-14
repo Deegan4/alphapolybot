@@ -37,6 +37,11 @@ const App: React.FC = () => {
   const dryRun = useSettingsStore((s) => s.dryRun)
   const openRouterApiKey = useSettingsStore((s) => s.openRouterApiKey)
   const gtcFallbackEnabled = useSettingsStore((s) => s.gtcFallbackEnabled)
+  const makerFirstEntries = useSettingsStore((s) => s.makerFirstEntries)
+  const makerExpiryTakerFallback = useSettingsStore((s) => s.makerExpiryTakerFallback)
+  const pauseEntriesWhenFeedDown = useSettingsStore((s) => s.pauseEntriesWhenFeedDown)
+  const makerMaxChaseCents = useSettingsStore((s) => s.makerMaxChaseCents)
+  const makerFirstDisabledStrategies = useSettingsStore((s) => s.makerFirstDisabledStrategies)
   const gtcExpiryMinutes = useSettingsStore((s) => s.gtcExpiryMinutes)
   const initialized = useRef(false)
 
@@ -142,38 +147,23 @@ const App: React.FC = () => {
       }, PRUNE_INTERVAL_MS)
       console.log('[App] Auto-pruning scheduled (every 6h)')
 
-      // Auto-reconnect wallet if seed phrase is available in env
-      // walletStore persists address but NOT the live ethers.Wallet instance,
-      // so on page refresh we need to re-call connect() to restore balances.
-      const seedPhrase = import.meta.env.VITE_WALLET_SEED_PHRASE
-      if (seedPhrase && seedPhrase !== 'word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12') {
-        // Auto-reconnect using PM US credentials from env
+      // Auto-reconnect the Polymarket US session on page refresh.
+      // walletStore persists keyId but never the secret; the (encrypted) settings
+      // store holds both, so re-run connect() to restore balances + user channel.
+      const { pmUsKeyId, pmUsSecretKey } = useSettingsStore.getState()
+      if (pmUsKeyId && pmUsSecretKey) {
         if (!useWalletStore.getState().isConnected) {
-          console.log('[App] Auto-reconnecting wallet from env seed phrase...')
+          console.log('[App] Auto-reconnecting Polymarket US session from saved credentials...')
           try {
-            const success = await useWalletStore.getState().connect(seedPhrase)
+            const success = await useWalletStore.getState().connect(pmUsKeyId, pmUsSecretKey)
             if (success) {
-              console.log('[App] Wallet auto-reconnected — balances synced')
-
-              // Start balance polling globally — previously lived in Header.tsx
-              // which isn't rendered on the Dashboard route (DashboardLayout has no Header).
-              // Services (RiskManager, strategies) read balance from any route.
-              useWalletStore.getState().startPolling()
-
-              // Connect user channel WebSocket after wallet is ready
-              // Uses polymarketUSClient credentials (Ed25519, set during wallet connect)
-              import('@/services/realtime').then(({ userChannelService }) => {
-                userChannelService.connect().then(connected => {
-                  if (connected) {
-                    console.log('[App] User channel connected — push-based order updates active')
-                  }
-                })
-              }).catch(() => {})
+              // walletStore.connect() starts balance polling and the user-channel WebSocket
+              console.log('[App] Polymarket US session restored — balances synced')
             } else {
-              console.warn('[App] Wallet auto-reconnect failed — check RPC or seed phrase')
+              console.warn('[App] Auto-reconnect failed — check PM US credentials in Settings → Wallet')
             }
           } catch (err) {
-            console.error('[App] Wallet auto-reconnect error:', err)
+            console.error('[App] Auto-reconnect error:', err)
           }
         }
       }
@@ -220,9 +210,14 @@ const App: React.FC = () => {
       dryRun,
       gtcFallbackEnabled,
       gtcExpiryMs: gtcExpiryMinutes * 60 * 1000,
+      makerFirst: makerFirstEntries,
+      makerExpiryTakerFallback,
+      pauseEntriesWhenFeedDown: pauseEntriesWhenFeedDown ?? false,
+      makerMaxChase: makerMaxChaseCents / 100,
+      makerFirstDisabledStrategies: makerFirstDisabledStrategies ?? [],
     })
-    console.log(`[App] Trading mode: ${dryRun ? 'DRY RUN' : 'LIVE'}, GTD fallback: ${gtcFallbackEnabled ? 'ON' : 'OFF'}`)
-  }, [dryRun, gtcFallbackEnabled, gtcExpiryMinutes])
+    console.log(`[App] Trading mode: ${dryRun ? 'DRY RUN' : 'LIVE'}, GTD fallback: ${gtcFallbackEnabled ? 'ON' : 'OFF'}, maker-first: ${makerFirstEntries ? 'ON' : 'OFF'}`)
+  }, [dryRun, gtcFallbackEnabled, gtcExpiryMinutes, makerFirstEntries, makerExpiryTakerFallback, pauseEntriesWhenFeedDown, makerMaxChaseCents, makerFirstDisabledStrategies])
 
   // Sync OpenRouter API key when changed in settings
   useEffect(() => {

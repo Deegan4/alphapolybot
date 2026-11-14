@@ -11,17 +11,18 @@
  *   onConnectionChange(), isConnected()
  */
 
-import {
-  PrivateWebSocket,
-  type OrderUpdate,
-  type OrderSnapshot,
-  type PositionUpdate,
-  type PositionSnapshot,
-  type AccountBalanceUpdate,
-  type AccountBalanceSnapshot,
+import type {
+  OrderUpdate,
+  OrderSnapshot,
+  PositionUpdate,
+  PositionSnapshot,
+  AccountBalanceUpdate,
+  AccountBalanceSnapshot,
 } from 'polymarket-us'
 import type { USOrderExecution, USPositionUpdate } from '@/types'
+import { HeartbeatClock, isFeedStalled, WATCHDOG_INTERVAL_MS } from './feedWatchdog'
 import { polymarketUSClient } from '@/services/api'
+import { BrowserPrivateWebSocket } from './pmusBrowserSocket'
 
 /** Mapped from SDK OrderUpdate execution data */
 type TradeCallback = (exec: USOrderExecution) => void
@@ -32,7 +33,7 @@ type BalanceCallback = (balance: number, buyingPower: number) => void
 type ConnectionCallback = (status: 'connected' | 'disconnected' | 'error') => void
 
 export class UserChannelService {
-  private ws: PrivateWebSocket | null = null
+  private ws: BrowserPrivateWebSocket | null = null
   private subscribedSlugs = new Set<string>()
   private reconnectAttempts = 0
   private maxReconnectAttempts = 10
@@ -40,6 +41,17 @@ export class UserChannelService {
   private reconnectTimeout: number | null = null
   private requestIdCounter = 0
   private messageCount = 0
+  /** Set by disconnect() so the resulting close does not schedule a reconnect */
+  private closingIntentionally = false
+  /** True after max reconnect attempts failed; cleared by a successful open */
+  private gaveUp = false
+  private everConnected = false
+  private lastMessageTime = 0
+  private heartbeats = new HeartbeatClock()
+  private watchdogInterval: number | null = null
+  private stallReconnects = 0
+  /** Latest pushed balance; null until the first snapshot or after the socket closes */
+  private latestBalance: { balance: number; buyingPower: number; at: number } | null = null
 
   private tradeCallbacks = new Set<TradeCallback>()
   private orderCallbacks = new Set<OrderCallback>()
@@ -54,6 +66,7 @@ export class UserChannelService {
    */
   async connect(): Promise<boolean> {
     if (this.ws?.isConnected) return true
+    this.closingIntentionally = false
 
     const wsOpts = polymarketUSClient.getWebSocketOptions()
     if (!wsOpts) {
@@ -63,15 +76,18 @@ export class UserChannelService {
 
     return new Promise((resolve) => {
       try {
-        this.ws = new PrivateWebSocket({
-          keyId: wsOpts.keyId,
-          secretKey: wsOpts.secretKey,
-          baseUrl: wsOpts.baseUrl,
-        })
+        // Browser-safe client: connects through the dev server's bridge,
+        // which adds the auth headers a browser WebSocket cannot send
+        this.ws = new BrowserPrivateWebSocket({ keyId: wsOpts.keyId, secretKey: wsOpts.secretKey })
 
         this.ws.on('open', () => {
           console.log('[UserChannel] Private WebSocket connected')
           this.reconnectAttempts = 0
+          this.gaveUp = false
+          this.everConnected = true
+          this.lastMessageTime = Date.now()
+          this.heartbeats.reset()
+          this.startWatchdog()
           this.messageCount = 0
           this.notifyConnectionCallbacks('connected')
 
@@ -92,6 +108,7 @@ export class UserChannelService {
         // ─── Order Events ──────────────────────────────────
         this.ws.on('orderSnapshot', (data: OrderSnapshot) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           if (this.messageCount === 1) {
             console.log('[UserChannel] First message received — pipeline active')
           }
@@ -101,6 +118,7 @@ export class UserChannelService {
 
         this.ws.on('orderUpdate', (data: OrderUpdate) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const exec = data.orderSubscriptionUpdate.execution
           const mapped = this.mapExecution(exec)
 
@@ -120,12 +138,14 @@ export class UserChannelService {
         // ─── Position Events ───────────────────────────────
         this.ws.on('positionSnapshot', (data: PositionSnapshot) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const positions = data.positionSubscriptionSnapshot.positions || {}
           console.log(`[UserChannel] Position snapshot: ${Object.keys(positions).length} positions`)
         })
 
         this.ws.on('positionUpdate', (data: PositionUpdate) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const update = data.positionSubscriptionUpdate
           const mapped: USPositionUpdate = {
             marketSlug: update.marketSlug,
@@ -142,6 +162,7 @@ export class UserChannelService {
         // ─── Balance Events ────────────────────────────────
         this.ws.on('accountBalanceSnapshot', (data: AccountBalanceSnapshot) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const snap = data.accountBalanceSubscriptionSnapshot
           console.log(`[UserChannel] Balance snapshot: $${snap.balance} (buying power: $${snap.buyingPower})`)
           this.notifyBalanceCallbacks(snap.balance, snap.buyingPower)
@@ -149,15 +170,18 @@ export class UserChannelService {
 
         this.ws.on('accountBalanceUpdate', (data: AccountBalanceUpdate) => {
           this.messageCount++
+          this.lastMessageTime = Date.now()
           const update = data.accountBalanceSubscriptionUpdate
           this.notifyBalanceCallbacks(update.balance, update.buyingPower)
         })
 
         this.ws.on('heartbeat', () => {
+          this.lastMessageTime = Date.now()
+          this.heartbeats.beat(this.lastMessageTime)
           // SDK handles keepalive internally
         })
 
-        this.ws.on('error', (err) => {
+        this.ws.on('error', (err: unknown) => {
           console.error('[UserChannel] WebSocket error:', err)
           this.notifyConnectionCallbacks('error')
           resolve(false)
@@ -165,11 +189,14 @@ export class UserChannelService {
 
         this.ws.on('close', () => {
           console.log('[UserChannel] WebSocket disconnected')
+          // Balance pushes stop with the socket: callers fall back to REST
+          this.latestBalance = null
           this.notifyConnectionCallbacks('disconnected')
+          if (this.closingIntentionally) return
           this.attemptReconnect()
         })
 
-        this.ws.connect()
+        void this.ws.connect()
       } catch (error) {
         console.error('[UserChannel] Failed to connect:', error)
         resolve(false)
@@ -178,6 +205,11 @@ export class UserChannelService {
   }
 
   disconnect(): void {
+    this.closingIntentionally = true
+    this.stopWatchdog()
+    this.everConnected = false
+    this.gaveUp = false
+    this.latestBalance = null
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
@@ -252,13 +284,73 @@ export class UserChannelService {
     return this.ws?.isConnected ?? false
   }
 
+  /** Whether reconnecting stopped after the maximum attempts (REST fallback only) */
+  hasGivenUp(): boolean {
+    return this.gaveUp && !this.isConnected()
+  }
+
+  getStatus(): { state: 'connected' | 'reconnecting' | 'offline' | 'idle'; lastMessageAt: number; hasBalance: boolean; stallReconnects: number } {
+    return {
+      stallReconnects: this.stallReconnects,
+      state: this.isConnected() ? 'connected' : this.hasGivenUp() ? 'offline' : this.everConnected ? 'reconnecting' : 'idle',
+      lastMessageAt: this.lastMessageTime,
+      hasBalance: this.getLatestBalance() !== null,
+    }
+  }
+
+  /** Manual retry after giving up: start a fresh round of reconnect attempts */
+  async retry(): Promise<boolean> {
+    this.reconnectAttempts = 0
+    this.gaveUp = false
+    return this.connect()
+  }
+
+  /**
+   * Balance and buying power pushed by the private feed (snapshot on
+   * subscribe, then an update on every change). Null when the socket is down
+   * or has not sent a snapshot yet, so callers know to use REST instead.
+   */
+  getLatestBalance(): { balance: number; buyingPower: number; at: number } | null {
+    return this.isConnected() ? this.latestBalance : null
+  }
+
   // ─── Private ────────────────────────────────────────────
+
+  /** Reopen the socket when it has gone silent for several heartbeat intervals */
+  private startWatchdog(): void {
+    if (this.watchdogInterval) return
+    this.watchdogInterval = window.setInterval(() => {
+      if (!this.ws?.isConnected) return
+      if (!isFeedStalled({ nowMs: Date.now(), lastActivityMs: this.lastMessageTime, heartbeatIntervalMs: this.heartbeats.intervalMs })) return
+      console.warn('[UserChannel] No messages or heartbeats — reopening the connection')
+      this.stallReconnects++
+      this.heartbeats.reset()
+      this.lastMessageTime = 0
+      this.ws.close() // the close handler schedules the reconnect
+    }, WATCHDOG_INTERVAL_MS)
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval)
+      this.watchdogInterval = null
+    }
+  }
 
   private nextRequestId(): string {
     return `priv-${++this.requestIdCounter}-${Date.now()}`
   }
 
-  private mapExecution(exec: { id: string; order: { id: string; marketSlug: string; side: string; intent: string }; lastShares?: string; lastPx?: { value: string }; type: string }): USOrderExecution {
+  private mapExecution(exec: {
+    id: string
+    order: { id: string; marketSlug: string; side: string; intent: string; quantity?: number; cumQuantity?: number; leavesQuantity?: number; state?: string }
+    lastShares?: string
+    lastPx?: { value: string }
+    type: string
+    transactTime?: string
+    tradeId?: string
+    aggressor?: boolean
+  }): USOrderExecution {
     return {
       id: exec.id,
       orderId: exec.order.id,
@@ -268,10 +360,20 @@ export class UserChannelService {
       lastShares: exec.lastShares,
       lastPx: exec.lastPx ? parseFloat(exec.lastPx.value) : undefined,
       type: exec.type,
+      transactTime: exec.transactTime,
+      tradeId: exec.tradeId,
+      aggressor: exec.aggressor,
+      orderQuantity: exec.order.quantity,
+      cumQuantity: exec.order.cumQuantity,
+      leavesQuantity: exec.order.leavesQuantity,
+      orderState: exec.order.state,
     }
   }
 
   private notifyBalanceCallbacks(balance: number, buyingPower: number): void {
+    if (Number.isFinite(balance) && Number.isFinite(buyingPower)) {
+      this.latestBalance = { balance, buyingPower, at: Date.now() }
+    }
     for (const cb of this.balanceCallbacks) {
       try { cb(balance, buyingPower) } catch (e) { console.error('[UserChannel] Balance callback error:', e) }
     }
@@ -286,6 +388,7 @@ export class UserChannelService {
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('[UserChannel] Max reconnect attempts reached')
+      this.gaveUp = true
       return
     }
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts)

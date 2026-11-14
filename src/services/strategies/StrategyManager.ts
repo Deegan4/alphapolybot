@@ -5,7 +5,6 @@ import { ProjectFWStrategy, projectFWStrategy } from './ProjectFWStrategy'
 import { BtcUpDownStrategy, btcUpDownStrategy } from './BtcUpDownStrategy'
 import { MicrostructureMomentumStrategy, microMomentumStrategy } from './MicrostructureMomentumStrategy'
 import { MeanReversionStrategy, meanReversionStrategy } from './MeanReversionStrategy'
-import { CopyTradingStrategy, copyTradingStrategy } from './CopyTradingStrategy'
 import { activityLogger } from '@/services/trading/ActivityLogger'
 import type { StrategyStats } from '@/types'
 
@@ -15,6 +14,8 @@ export interface StrategyState {
   enabled: boolean
   status: 'idle' | 'running' | 'paused' | 'error'
   stats: StrategyStats
+  /** False for strategies not yet runnable on Polymarket US (hidden from toggles) */
+  available: boolean
 }
 
 /**
@@ -35,7 +36,6 @@ export class StrategyManager {
     this.registerStrategy('btc-updown', btcUpDownStrategy)
     this.registerStrategy('micro-momentum', microMomentumStrategy)
     this.registerStrategy('mean-reversion', meanReversionStrategy)
-    this.registerStrategy('copy-trading', copyTradingStrategy)
   }
 
   /**
@@ -123,13 +123,6 @@ export class StrategyManager {
   }
 
   /**
-   * Get Copy Trading strategy (typed)
-   */
-  getCopyTradingStrategy(): CopyTradingStrategy {
-    return copyTradingStrategy
-  }
-
-  /**
    * Enable a strategy
    */
   async enableStrategy(id: string): Promise<void> {
@@ -195,6 +188,7 @@ export class StrategyManager {
       enabled: strategy.enabled,
       status: strategy.status,
       stats: strategy.getStats(),
+      available: strategy.available,
     }))
   }
 
@@ -211,6 +205,7 @@ export class StrategyManager {
       enabled: strategy.enabled,
       status: strategy.status,
       stats: strategy.getStats(),
+      available: strategy.available,
     }
   }
 

@@ -1,5 +1,5 @@
-import type { Market, OrderRequest, OrderResult, Order, PendingGtcOrder } from '@/types'
-import { polymarketUSClient } from '@/services/api'
+import type { Market, Order, OrderRequest, OrderResult, PendingGtcOrder } from '@/types'
+import { polymarketUSClient, priceForOutcome, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject, makerEntryPrice, takerAfterExpiryPlan, urgencyAdjustedChase, makerOrderOutlivesWindow } from '@/services/api'
 import { realtimeService } from '@/services/realtime'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { riskManager } from './RiskManager'
@@ -16,6 +16,22 @@ export interface TradingConfig {
   dryRun: boolean
   gtcFallbackEnabled: boolean  // When FOK is killed, resubmit as GTD limit order
   gtcExpiryMs: number          // GTD server-side expiry (default: 5 minutes)
+  /**
+   * Maker-first entries: buys rest as post-only GTD orders one tick inside the
+   * spread (no taker fee at tier 1, vs Θ·p·(1−p) as taker) and fall back to the
+   * normal taker path if the post-only order is rejected or the book is one-sided.
+   * Applies only where the GTD fallback could (gtdMeta present, no explicit orderType).
+   */
+  makerFirst: boolean
+  /** When a maker-first order expires unfilled, take the remainder if the ask
+   *  is within `makerMaxChase` of the maker price */
+  makerExpiryTakerFallback: boolean
+  /** Max price (outcome terms, dollars) the taker fallback may pay above the maker limit */
+  makerMaxChase: number
+  /** Strategies that skip maker-first even when it is on (e.g. short BTC windows) */
+  makerFirstDisabledStrategies: string[]
+  /** Block new entries while the market-data WebSocket is down (exits still go out) */
+  pauseEntriesWhenFeedDown: boolean
 }
 
 const DEFAULT_CONFIG: TradingConfig = {
@@ -26,16 +42,28 @@ const DEFAULT_CONFIG: TradingConfig = {
   dryRun: true, // SAFE DEFAULT: Always start in dry run mode
   gtcFallbackEnabled: true,  // ON by default — saves wasted analysis on illiquid markets
   gtcExpiryMs: 5 * 60 * 1000, // 5 minutes
+  makerFirst: false,           // opt-in (Settings → Trading → Order Execution)
+  makerExpiryTakerFallback: true,
+  makerMaxChase: 0.02,
+  makerFirstDisabledStrategies: [],
+  pauseEntriesWhenFeedDown: false,
 }
 
 /**
  * Trading Service
  * Handles order execution with FOK orders and risk management
  */
+/** End of a market's trading window in ms: Up/Down window end, else market end date */
+function marketWindowEndMs(market: Market): number | undefined {
+  const raw = market.windowEnd || market.endDate
+  if (!raw) return undefined
+  const ms = Date.parse(raw)
+  return Number.isFinite(ms) ? ms : undefined
+}
+
 export class TradingService {
   private config: TradingConfig
   private lastOrderTime = 0
-  private pendingOrders = new Map<string, Order>()
   private inFlightTrades = new Map<string, number>() // tradeId → USD amount
 
   constructor(config: Partial<TradingConfig> = {}) {
@@ -77,11 +105,18 @@ export class TradingService {
     amount: number,
     options?: { skipGtcFallback?: boolean; stopLossPercent?: number; takeProfitPercent?: number; outcomeIndex?: number; strategy?: string; orderType?: 'FOK' | 'GTC' | 'GTD'; gtdExpiryMs?: number }
   ): Promise<OrderResult> {
+    // Optional: no new entries on REST-only prices while the live feed is down
+    if (this.config.pauseEntriesWhenFeedDown && !this.config.dryRun && realtimeService.isConnected?.() === false) {
+      const msg = 'Market-data feed offline — new entries paused'
+      rejectionTracker.record('risk', 'system', msg)
+      return { success: false, error: msg }
+    }
+
     // Risk management gate (pass marketSlug for per-market concentration check)
     const riskCheck = riskManager.validateTrade(amount, market.slug)
     if (!riskCheck.allowed) {
       console.warn(`[TradingService] BLOCKED by risk check: ${riskCheck.reason}`)
-      rejectionTracker.record('risk', 'system', riskCheck.reason)
+      rejectionTracker.record('risk', 'system', riskCheck.reason ?? 'risk check failed')
       activityLogger.logWarning(`Trade blocked by risk manager: ${riskCheck.reason}`)
       return { success: false, error: `Risk check failed: ${riskCheck.reason}` }
     }
@@ -99,7 +134,7 @@ export class TradingService {
 
     // Order book depth check — cap order size to available liquidity
     try {
-      const depthCheck = await orderBookDepth.checkBuyDepth(market.slug, amount, this.config.maxSlippage)
+      const depthCheck = await orderBookDepth.checkBuyDepth(market.slug, amount, this.config.maxSlippage, outcome)
       if (!depthCheck.sufficient && depthCheck.maxFillableUSD > 0) {
         const capped = Math.min(amount, depthCheck.maxFillableUSD * 0.9) // 10% safety margin
         if (capped < 1.00) {
@@ -112,16 +147,21 @@ export class TradingService {
       // Depth check is best-effort — proceed if it fails
     }
 
-    // Calculate shares (amount / price)
-    const shares = amount / currentPrice
+    // Calculate shares (amount / price), rounded down to the market's step:
+    // whole contracts unless minimumTradeQty < 1, or the exchange rejects it
+    const shares = roundOrderQuantity(amount / currentPrice, market.orderMinSize)
+    if (shares <= 0) {
+      return { success: false, error: `Order too small: $${amount.toFixed(2)} at ${currentPrice.toFixed(3)} is under one contract` }
+    }
 
     // Apply slippage tolerance
     const maxPrice = currentPrice * (1 + this.config.maxSlippage)
 
     // Determine order type: caller can override (e.g., DipArb uses GTD), otherwise use config default
     const resolvedOrderType = options?.orderType ?? (this.config.fokOnly ? 'FOK' : 'GTC')
+    // PM US `goodTillTime` is an ISO-8601 timestamp (not unix seconds)
     const gtdExpiration = resolvedOrderType === 'GTD'
-      ? Math.floor((Date.now() + (options?.gtdExpiryMs ?? this.config.gtcExpiryMs)) / 1000)
+      ? new Date(Date.now() + (options?.gtdExpiryMs ?? this.config.gtcExpiryMs)).toISOString()
       : undefined
 
     const orderRequest: OrderRequest = {
@@ -145,7 +185,200 @@ export class TradingService {
       strategy: options?.strategy ?? 'llm',
     } : undefined
 
+    // Maker-first: try a resting post-only order before crossing the spread
+    if (
+      this.makerFirstAppliesTo(gtdMeta?.strategy) && gtdMeta && !options?.orderType &&
+      !makerOrderOutlivesWindow(Date.now(), this.config.gtcExpiryMs, marketWindowEndMs(market))
+    ) {
+      const maker = await this.tryMakerEntry(market, outcome, amount, gtdMeta)
+      if (maker) return maker
+    }
+
     return this.executeOrder(orderRequest, gtdMeta)
+  }
+
+  /** Maker-first is on and not switched off for this strategy */
+  makerFirstAppliesTo(strategy?: string): boolean {
+    if (!this.config.makerFirst) return false
+    return !this.config.makerFirstDisabledStrategies.includes(strategy ?? 'llm')
+  }
+
+  /**
+   * Place a post-only GTD buy one tick inside the spread and hand it to
+   * GtcOrderManager. Returns null (caller falls back to taker) when the book
+   * is not two-sided, the size rounds to zero, or the exchange rejects it.
+   */
+  private async tryMakerEntry(
+    market: Market,
+    outcome: 'yes' | 'no',
+    amount: number,
+    gtdMeta: NonNullable<Parameters<TradingService['executeOrder']>[1]>,
+  ): Promise<OrderResult | null> {
+    const live = realtimeService.getPrice(market.slug) ?? await polymarketUSClient.getBestPrices(market.slug)
+    if (!live) return null
+    const book = priceForOutcome(live, outcome)
+    // Orders are sent on the 1¢ grid (adjustForTickSize), valid on every market
+    const price = makerEntryPrice(book.bid, book.ask, 0.01)
+    if (price === null) return null
+    const size = roundOrderQuantity(amount / price, market.orderMinSize)
+    if (size <= 0) return null
+
+    const expiresAtMs = Date.now() + this.config.gtcExpiryMs
+    const request: OrderRequest = {
+      marketSlug: market.slug,
+      outcome,
+      side: 'BUY',
+      price,
+      size,
+      type: 'GTD',
+      expiration: new Date(expiresAtMs).toISOString(),
+      postOnly: true,
+    }
+    const result = await this.executeOrder(request, undefined, { countFailure: false })
+    if (!result.success) {
+      console.log(`[TradingService] Maker entry not placed (${result.error}) — falling back to taker`)
+      import('./MakerFillTracker').then(m => m.makerFillTracker.recordRejected(gtdMeta.strategy)).catch(() => {})
+      return null
+    }
+    if (result.orderId && !result.filledSize && !this.config.dryRun) {
+      this.trackRestingOrder(result.orderId, request, gtdMeta, expiresAtMs, {
+        entryKind: 'maker', feeCoefficient: market.feeCoefficient, orderMinSize: market.orderMinSize,
+        windowEndMs: marketWindowEndMs(market),
+      })
+      return { ...result, pending: true }
+    }
+    return result
+  }
+
+  /**
+   * A maker-first order expired. Track any partial fill as a position, then —
+   * if enabled and the ask hasn't run more than `makerMaxChase` above the
+   * maker price — buy the unfilled remainder as an FOK taker order through
+   * placeBet (risk gate, depth check, dry run all apply) and track that fill.
+   */
+  async completeExpiredMakerEntry(order: PendingGtcOrder): Promise<OrderResult | null> {
+    let filled = order.filledSize ?? 0
+    if (!this.config.dryRun) {
+      try {
+        const details = await polymarketUSClient.getOrder(order.orderId)
+        if (details?.filledSize !== undefined) filled = Math.max(filled, details.filledSize)
+      } catch {
+        // fall back to what the user channel reported
+      }
+    }
+
+    const { positionLifecycleManager } = await import('./PositionLifecycleManager')
+    if (filled > 0) {
+      // GTD expired after a partial fill: those shares are a real position
+      positionLifecycleManager.trackPosition({
+        marketSlug: order.marketSlug,
+        outcome: order.outcome,
+        question: order.question,
+        entryPrice: order.price,
+        size: filled,
+        costBasis: filled * order.price,
+        entryTime: Date.now(),
+        stopLossPercent: order.stopLossPercent,
+        takeProfitPercent: order.takeProfitPercent,
+        strategy: order.strategy,
+      })
+    }
+
+    if (!this.config.makerFirst || !this.config.makerExpiryTakerFallback) return null
+
+    const live = realtimeService.getPrice(order.marketSlug) ?? await polymarketUSClient.getBestPrices(order.marketSlug)
+    const ask = live ? priceForOutcome(live, order.outcome).ask : null
+    const msToEnd = order.windowEndMs != null ? order.windowEndMs - Date.now() : null
+    const maxChase = urgencyAdjustedChase(this.config.makerMaxChase, msToEnd)
+    if (maxChase <= 0) {
+      console.log('[TradingService] Maker entry expired — market window has closed, no taker fallback')
+      return null
+    }
+    const plan = takerAfterExpiryPlan({
+      makerPrice: order.price,
+      size: order.size,
+      filled,
+      ask,
+      maxChase,
+      minimumTradeQty: order.orderMinSize,
+    })
+    if ('skip' in plan) {
+      console.log(`[TradingService] Maker entry expired — no taker fallback: ${plan.skip}`)
+      return null
+    }
+
+    const market: Market = {
+      id: order.marketSlug,
+      slug: order.marketSlug,
+      question: order.question,
+      outcomes: ['Yes', 'No'],
+      outcomeSlugs: [order.marketSlug, order.marketSlug],
+      outcomePrices: order.outcome === 'yes' ? [plan.price, 1 - plan.price] : [1 - plan.price, plan.price],
+      active: true,
+      closed: false,
+      endDate: '',
+      createdAt: '',
+      volume: 0,
+      liquidity: 0,
+      orderMinSize: order.orderMinSize,
+      feeCoefficient: order.feeCoefficient,
+    }
+    console.log(`[TradingService] Maker entry expired — taking ${plan.take} at ${plan.price.toFixed(3)}`)
+    // Exact quantity: amount sized so placeBet's shares round back to plan.take
+    const amount = plan.take * plan.price * 1.000001
+    const result = await this.placeBet(market, order.outcome, amount, {
+      orderType: 'FOK',
+      skipGtcFallback: true,
+      strategy: order.strategy,
+      stopLossPercent: order.stopLossPercent,
+      takeProfitPercent: order.takeProfitPercent,
+    })
+    import('./MakerFillTracker').then(m => m.makerFillTracker.recordTakerFallback(result.success, order.strategy)).catch(() => {})
+
+    if (result.success && (result.filledSize ?? 0) > 0) {
+      positionLifecycleManager.trackPosition({
+        marketSlug: order.marketSlug,
+        outcome: order.outcome,
+        question: order.question,
+        entryPrice: result.avgPrice ?? plan.price,
+        size: result.filledSize!,
+        costBasis: result.filledSize! * (result.avgPrice ?? plan.price),
+        entryTime: Date.now(),
+        stopLossPercent: order.stopLossPercent,
+        takeProfitPercent: order.takeProfitPercent,
+        strategy: order.strategy,
+      })
+    }
+    return result
+  }
+
+  /** Hand a resting GTD buy to GtcOrderManager for fill / expiry tracking */
+  private trackRestingOrder(
+    orderId: string,
+    request: OrderRequest,
+    meta: NonNullable<Parameters<TradingService['executeOrder']>[1]>,
+    expiresAtMs: number,
+    extra: Pick<PendingGtcOrder, 'entryKind' | 'feeCoefficient' | 'orderMinSize' | 'windowEndMs'> = {},
+  ): void {
+    import('./GtcOrderManager').then(({ gtcOrderManager }) => {
+      gtcOrderManager.trackOrder({
+        orderId,
+        marketSlug: request.marketSlug,
+        outcome: meta.outcome,
+        question: meta.question,
+        side: request.side,
+        price: request.price,
+        size: request.size,
+        costBasis: meta.costBasis,
+        strategy: meta.strategy as PendingGtcOrder['strategy'],
+        stopLossPercent: meta.stopLossPercent,
+        takeProfitPercent: meta.takeProfitPercent,
+        placedAt: Date.now(),
+        expiresAt: expiresAtMs,
+        status: 'pending',
+        ...extra,
+      })
+    }).catch(err => console.warn('[TradingService] Failed to track resting order:', err))
   }
 
   /**
@@ -161,14 +394,17 @@ export class TradingService {
     // Apply execution cooldown
     await this.waitForCooldown()
 
-    // Get current price if not provided — use best bid
+    // Get current price if not provided — best bid in the outcome's terms
+    // (the book is YES-quoted: the NO bid is 1 - YES ask)
     let sellPrice = price
     if (!sellPrice) {
-      const priceData = realtimeService.getPrice(slug)
+      const live = realtimeService.getPrice(slug)
+      const priceData = live ? priceForOutcome(live, outcome) : null
       if (priceData?.bid && priceData.bid > 0.01) {
         sellPrice = priceData.bid
       } else {
-        const bestPrices = await polymarketUSClient.getBestPrices(slug)
+        const best = await polymarketUSClient.getBestPrices(slug)
+        const bestPrices = best ? priceForOutcome(best, outcome) : null
         if (bestPrices?.bid && bestPrices.bid > 0.01) {
           sellPrice = bestPrices.bid
         } else {
@@ -207,7 +443,9 @@ export class TradingService {
     }
 
     try {
-      return await polymarketUSClient.closePosition(slug, slippageBips)
+      // Reference price for the exchange's slippage tolerance (YES terms)
+      const mid = realtimeService.getPrice(slug)?.mid
+      return await polymarketUSClient.closePosition(slug, slippageBips, mid)
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Close position failed' }
     }
@@ -235,6 +473,9 @@ export class TradingService {
       takeProfitPercent: number
       strategy?: string
     },
+    /** countFailure=false: a failed attempt that the caller will retry another way
+     *  (maker-first → taker) must not count toward the circuit breaker */
+    opts: { countFailure?: boolean } = {},
   ): Promise<OrderResult> {
     // Pre-flight: PM US requires $1 minimum for marketable orders.
     const orderDollarValue = request.price * request.size
@@ -311,7 +552,12 @@ export class TradingService {
     // Pre-flight: check buying power before submitting
     if (request.side === 'BUY') {
       try {
-        const balances = await polymarketUSClient.getBalances()
+        // Buying power pushed by the private feed when live (saves a REST
+        // round-trip before every order); REST otherwise
+        const live = await import('@/services/realtime')
+          .then(m => m.userChannelService?.getLatestBalance?.() ?? null)
+          .catch(() => null)
+        const balances = live ?? await polymarketUSClient.getBalances()
         const requiredAmount = request.price * request.size
         if (balances.buyingPower < requiredAmount) {
           const msg = `Insufficient buying power: $${balances.buyingPower.toFixed(2)} (need $${requiredAmount.toFixed(2)})`
@@ -334,8 +580,13 @@ export class TradingService {
         // Adjust for tick size
         request.price = this.adjustForTickSize(request.price)
 
-        // Place the order
-        const result = await polymarketUSClient.placeOrder(request)
+        // Place the order. A latency stopgap reject ("Order Processing Max
+        // Delay Exceeded") is transient and may be resubmitted once.
+        let result = await polymarketUSClient.placeOrder(request)
+        if (!result.success && isTransientLatencyReject(result.error)) {
+          console.warn(`[TradingService] Exchange latency reject — resubmitting once: ${result.error}`)
+          result = await polymarketUSClient.placeOrder(request)
+        }
 
         if (result.success) {
           this.lastOrderTime = Date.now()
@@ -352,7 +603,9 @@ export class TradingService {
               const orderDetails = await polymarketUSClient.getOrder(result.orderId)
               if (orderDetails) {
                 result.filledSize = orderDetails.filledSize ?? result.filledSize
-                result.avgPrice = orderDetails.price ?? result.avgPrice
+                result.avgPrice = orderDetails.price
+                  ? reportedPriceForOutcome(orderDetails.price, request.outcome, request.price)
+                  : result.avgPrice
               }
             } catch {
               // Best-effort
@@ -443,11 +696,11 @@ export class TradingService {
       request.side === 'BUY'
     ) {
       try {
-        const expirationSec = Math.floor((Date.now() + this.config.gtcExpiryMs) / 1000)
+        const expiresAtMs = Date.now() + this.config.gtcExpiryMs
         const gtdRequest: OrderRequest = {
           ...request,
           type: 'GTD',
-          expiration: expirationSec,
+          expiration: new Date(expiresAtMs).toISOString(),  // PM US goodTillTime is ISO-8601
         }
 
         console.log(`[TradingService] FOK killed → submitting GTD fallback (expires in ${this.config.gtcExpiryMs / 60000}m)`)
@@ -458,24 +711,7 @@ export class TradingService {
           this.inFlightTrades.delete(tradeId)
 
           // Hand off to GtcOrderManager for fill tracking (dynamic import avoids circular dep)
-          import('./GtcOrderManager').then(({ gtcOrderManager }) => {
-            gtcOrderManager.trackOrder({
-              orderId: gtdResult.orderId!,
-              marketSlug: request.marketSlug,
-              outcome: gtdMeta.outcome,
-              question: gtdMeta.question,
-              side: request.side,
-              price: request.price,
-              size: request.size,
-              costBasis: gtdMeta.costBasis,
-              strategy: gtdMeta.strategy as PendingGtcOrder['strategy'],
-              stopLossPercent: gtdMeta.stopLossPercent,
-              takeProfitPercent: gtdMeta.takeProfitPercent,
-              placedAt: Date.now(),
-              expiresAt: expirationSec,
-              status: 'pending',
-            })
-          }).catch(err => console.warn('[TradingService] Failed to track GTD order:', err))
+          this.trackRestingOrder(gtdResult.orderId, request, gtdMeta, expiresAtMs)
 
           return {
             success: true,
@@ -491,7 +727,9 @@ export class TradingService {
     }
 
     this.inFlightTrades.delete(tradeId)
-    riskManager.recordTradeResult(false, 0, failureReason)
+    if (opts.countFailure !== false) {
+      riskManager.recordTradeResult(false, 0, failureReason)
+    }
 
     return {
       success: false,
@@ -569,28 +807,26 @@ export class TradingService {
         unsubOrder()
       }
 
+      // onTrade only fires for FILL / PARTIAL_FILL — either means the order matched
       const unsubTrade = userChannelService.onTrade((msg) => {
         if (resolved) return
-        const matchesMaker = msg.maker_orders?.some(o => o.order_id === orderId)
-        if (!matchesMaker) return
+        if (msg.orderId !== orderId) return
 
-        if (msg.status === 'CONFIRMED') {
-          console.log(`[TradingService] Order ${orderId} confirmed via user channel`)
-          cleanup()
-          resolve(true)
-        } else if (msg.status === 'FAILED') {
-          console.warn(`[TradingService] Order ${orderId} FAILED via user channel`)
-          cleanup()
-          resolve(false)
-        }
+        console.log(`[TradingService] Order ${orderId} ${msg.type === 'EXECUTION_TYPE_FILL' ? 'filled' : 'partially filled'} via user channel`)
+        cleanup()
+        resolve(true)
       })
 
       const unsubOrder = userChannelService.onOrder((msg) => {
         if (resolved) return
-        if (msg.order_id !== orderId) return
+        if (msg.orderId !== orderId) return
 
-        if (msg.event_type === 'CANCELLATION') {
-          console.warn(`[TradingService] Order ${orderId} cancelled via user channel`)
+        if (
+          msg.type === 'EXECUTION_TYPE_CANCELED' ||
+          msg.type === 'EXECUTION_TYPE_REJECTED' ||
+          msg.type === 'EXECUTION_TYPE_EXPIRED'
+        ) {
+          console.warn(`[TradingService] Order ${orderId} ${msg.type.replace('EXECUTION_TYPE_', '').toLowerCase()} via user channel`)
           cleanup()
           resolve(false)
         }

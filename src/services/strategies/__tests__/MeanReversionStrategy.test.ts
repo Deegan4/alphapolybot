@@ -51,7 +51,7 @@ vi.mock('@/services/trading/TradeLogger', () => ({
 }))
 
 // Mock BinanceWSService
-const mockOnPriceUpdate = vi.fn(() => () => {})
+const mockOnPriceUpdate = vi.fn((..._args: unknown[]) => () => {})
 vi.mock('@/services/realtime/BinanceWSService', () => ({
   binanceWSService: {
     connect: vi.fn().mockResolvedValue(undefined),
@@ -80,7 +80,8 @@ vi.mock('@/services/api/CoinbaseClient', () => ({
 }))
 
 // Mock RiskManager
-const mockValidateTrade = vi.fn().mockResolvedValue({ approved: true })
+// RiskCheckResult uses `allowed` (the strategy once read a nonexistent `approved` and never traded)
+const mockValidateTrade = vi.fn().mockResolvedValue({ allowed: true })
 const mockRecordTradeResult = vi.fn()
 vi.mock('@/services/trading/RiskManager', () => ({
   riskManager: {
@@ -101,29 +102,6 @@ import { MeanReversionStrategy } from '../MeanReversionStrategy'
 /** Create a fresh strategy instance for each test */
 function createStrategy(config?: Partial<MeanRevConfig>): MeanReversionStrategy {
   return new MeanReversionStrategy(config)
-}
-
-/**
- * Generate prices centered around a mean with a known standard deviation.
- * The last price is the outlier we want to test signal generation with.
- */
-function generatePriceBuffer(
-  mean: number,
-  stdDev: number,
-  count: number,
-  lastPrice?: number,
-): number[] {
-  // Create a uniform set of prices that have the desired mean/stdDev
-  // Simple approach: alternate above/below mean by exactly stdDev
-  const prices: number[] = []
-  for (let i = 0; i < count - 1; i++) {
-    // Alternate +/- to keep mean stable
-    const offset = (i % 2 === 0 ? 1 : -1) * stdDev * 0.5
-    prices.push(mean + offset)
-  }
-  // Add the last price (the current price being evaluated)
-  prices.push(lastPrice ?? mean)
-  return prices
 }
 
 /** Feed prices into strategy's buffer via the price update handler */
@@ -759,7 +737,7 @@ describe('MeanReversionStrategy', () => {
   describe('RiskManager integration', () => {
     it('skips buy when RiskManager rejects', async () => {
       mockSettingsState.dryRun = true
-      mockValidateTrade.mockResolvedValueOnce({ approved: false, reason: 'Daily loss limit' })
+      mockValidateTrade.mockResolvedValueOnce({ allowed: false, reason: 'Daily loss limit' })
 
       strategy = createStrategy({ enableBtc: true })
       await strategy.enable()

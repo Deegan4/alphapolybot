@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { MatrixCard, MatrixStatsGrid, MatrixBadge, MatrixLoading, MatrixButton, AnimatedCounter } from '@/components/ui'
+import { MatrixCard, MatrixStatsGrid, MatrixBadge, MatrixLoading, MatrixButton } from '@/components/ui'
 import { useWalletStore } from '@/stores'
-import { dataClient } from '@/services/api/DataClient'
+import { polymarketUSClient } from '@/services/api'
 import { positionLifecycleManager, type PositionStatus } from '@/services/trading'
 import type { Position, Trade } from '@/types'
 import { cn } from '@/utils/cn'
+import type { SpotPosition } from '@/types/api'
 
 const containerVariants = {
   hidden: {},
@@ -44,8 +45,8 @@ export const PortfolioView: React.FC = () => {
       setError(null)
       try {
         const [positionsData, tradesData] = await Promise.all([
-          dataClient.getPositions(),
-          dataClient.getTradeHistory({ limit: 10 }),
+          polymarketUSClient.getPositions(),
+          polymarketUSClient.getRecentTrades(10),
         ])
         setPositions(positionsData)
         setRecentTrades(tradesData)
@@ -69,7 +70,7 @@ export const PortfolioView: React.FC = () => {
     const fetchClosed = async () => {
       setClosedLoading(true)
       try {
-        const data = await dataClient.getClosedPositions({ limit: 50 })
+        const data = await polymarketUSClient.getClosedPositions(50)
         setClosedPositions(data)
         setClosedFetched(true)
       } catch (err) {
@@ -120,8 +121,7 @@ export const PortfolioView: React.FC = () => {
   const handleCloseAll = useCallback(async () => {
     setConfirmCloseAll(false)
     const positions = positionLifecycleManager.getPositions()
-    const tokenIds = positions.map(p => p.tokenId)
-    setClosingPositions(new Set(tokenIds))
+    setClosingPositions(new Set(positions.map(p => p.marketSlug)))
 
     try {
       await positionLifecycleManager.forceCloseAll()
@@ -269,21 +269,21 @@ export const PortfolioView: React.FC = () => {
               >
                 {/* Locally tracked positions (PLM) — with close buttons */}
                 {trackedPositions.map((pos) => (
-                  <motion.div key={pos.tokenId} variants={itemVariants}>
+                  <motion.div key={pos.marketSlug} variants={itemVariants}>
                     <TrackedPositionCard
                       position={pos}
-                      isClosing={closingPositions.has(pos.tokenId)}
-                      showConfirm={confirmClose === pos.tokenId}
-                      onRequestClose={() => setConfirmClose(pos.tokenId)}
-                      onConfirmClose={() => handleClosePosition(pos.tokenId)}
+                      isClosing={closingPositions.has(pos.marketSlug)}
+                      showConfirm={confirmClose === pos.marketSlug}
+                      onRequestClose={() => setConfirmClose(pos.marketSlug)}
+                      onConfirmClose={() => handleClosePosition(pos.marketSlug)}
                       onCancelClose={() => setConfirmClose(null)}
                     />
                   </motion.div>
                 ))}
 
-                {/* API positions (from Polymarket data API) */}
+                {/* Account positions (from Polymarket US portfolio API) */}
                 {positions.map((position) => (
-                  <motion.div key={position.tokenId} variants={itemVariants}>
+                  <motion.div key={`${position.marketSlug}-${position.outcome}`} variants={itemVariants}>
                     <PositionCard position={position} />
                   </motion.div>
                 ))}
@@ -345,7 +345,7 @@ export const PortfolioView: React.FC = () => {
                   animate="show"
                 >
                   {closedPositions.map((position) => (
-                    <motion.div key={position.tokenId} variants={itemVariants}>
+                    <motion.div key={position.marketSlug} variants={itemVariants}>
                       <PositionCard position={position} />
                     </motion.div>
                   ))}
@@ -363,7 +363,7 @@ export const PortfolioView: React.FC = () => {
  * Spot Portfolio View - Coinbase spot crypto positions
  */
 const SpotPortfolioView: React.FC = () => {
-  const [spotPositions, setSpotPositions] = useState<any[]>([])
+  const [spotPositions, setSpotPositions] = useState<SpotPosition[]>([])
 
   useEffect(() => {
     const updatePositions = async () => {
@@ -425,11 +425,11 @@ const SpotPortfolioView: React.FC = () => {
 /**
  * Spot Position Card Component
  */
-const SpotPositionCard: React.FC<{ position: any }> = ({ position }) => {
+const SpotPositionCard: React.FC<{ position: SpotPosition }> = ({ position }) => {
   const pnlUsd = position.currentPrice * position.quantity - position.costBasis
   const pnlPercent = (pnlUsd / position.costBasis) * 100
   const isProfit = pnlUsd >= 0
-  const holdTimeMs = Date.now() - position.entryTimestamp
+  const holdTimeMs = Date.now() - position.entryTime
   const holdTimeStr = formatHoldTime(holdTimeMs)
 
   return (
@@ -672,21 +672,23 @@ const TrackedPositionCard: React.FC<{
  * Trade Card Component
  */
 const TradeCard: React.FC<{ trade: Trade }> = ({ trade }) => {
-  const isBuy = trade.side === 'BUY'
   const total = trade.price * trade.size
+  // PM US account history doesn't report side; a realized P&L implies a closing fill
+  const label = trade.side ?? (trade.realizedPnl !== undefined && trade.realizedPnl !== 0 ? 'CLOSE' : 'FILL')
+  const variant = trade.side === 'BUY' ? 'success' : trade.side === 'SELL' ? 'warning' : 'info'
 
   return (
     <div className="bg-matrix-bg/60 border border-matrix-border/50 rounded-lg p-3">
       <div className="flex items-center justify-between mb-1">
-        <MatrixBadge variant={isBuy ? 'success' : 'warning'} size="sm">
-          {trade.side}
+        <MatrixBadge variant={variant} size="sm">
+          {label}
         </MatrixBadge>
         <span className="text-matrix-text-secondary text-xs font-sans">
           {new Date(trade.timestamp).toLocaleString()}
         </span>
       </div>
       <p className="text-matrix-text-primary text-sm font-mono truncate mb-2">
-        {trade.marketId}
+        {trade.marketSlug}
       </p>
       <div className="flex items-center justify-between text-xs font-mono">
         <span className="text-matrix-text-secondary">

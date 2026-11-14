@@ -99,16 +99,21 @@ export class RiskManager {
 
   constructor(config?: Partial<RiskManagerConfig>) {
     const settings = useSettingsStore.getState()
+    // These limits have no Settings UI yet; read them loosely so a future setting is picked up,
+    // otherwise fall back to defaults.
+    const extra = settings as unknown as Partial<
+      Pick<RiskManagerConfig, 'minMaticForGas' | 'maxDrawdownPercent' | 'maxPerMarketExposure' | 'maxCategoryExposure'>
+    >
     this.config = {
       dailyLossLimit: settings.dailyLossLimit ?? DEFAULT_CONFIG.dailyLossLimit,
       weeklyLossLimit: settings.weeklyLossLimit ?? DEFAULT_CONFIG.weeklyLossLimit,
       maxTradesPerHour: settings.maxTradesPerHour ?? DEFAULT_CONFIG.maxTradesPerHour,
       consecutiveFailureLimit: settings.consecutiveFailureLimit ?? DEFAULT_CONFIG.consecutiveFailureLimit,
       minBalanceForTrade: settings.minBalanceForTrade ?? DEFAULT_CONFIG.minBalanceForTrade,
-      minMaticForGas: settings.minMaticForGas ?? DEFAULT_CONFIG.minMaticForGas,
-      maxDrawdownPercent: settings.maxDrawdownPercent ?? DEFAULT_CONFIG.maxDrawdownPercent,
-      maxPerMarketExposure: settings.maxPerMarketExposure ?? DEFAULT_CONFIG.maxPerMarketExposure,
-      maxCategoryExposure: (settings as Record<string, unknown>).maxCategoryExposure as number ?? DEFAULT_CONFIG.maxCategoryExposure,
+      minMaticForGas: extra.minMaticForGas ?? DEFAULT_CONFIG.minMaticForGas,
+      maxDrawdownPercent: extra.maxDrawdownPercent ?? DEFAULT_CONFIG.maxDrawdownPercent,
+      maxPerMarketExposure: extra.maxPerMarketExposure ?? DEFAULT_CONFIG.maxPerMarketExposure,
+      maxCategoryExposure: extra.maxCategoryExposure ?? DEFAULT_CONFIG.maxCategoryExposure,
       enabled: settings.riskManagementEnabled ?? DEFAULT_CONFIG.enabled,
       ...config,
     }

@@ -7,7 +7,7 @@ export interface Market {
   slug: string           // primary identifier for US API (e.g. "btc-100k-2025")
   question: string       // mapped from title
   description?: string
-  outcomes: string[]     // derived from event's markets (e.g. ['Yes', 'No'])
+  outcomes: string[]     // ['Yes', 'No'] (or ['Up', 'Down']) — both trade on `slug`
   active: boolean
   closed: boolean
   endDate: string
@@ -23,12 +23,20 @@ export interface Market {
   tags?: string[]
   // US-specific
   eventSlug?: string
-  outcomeSlugs?: string[]   // per-outcome SDK market slugs (for BBO lookups)
+  /** Slug per outcome for price feeds. On PM US both outcomes share `slug`
+   *  (one YES-quoted book); kept as an array for consumer compatibility. */
+  outcomeSlugs?: string[]
   bestBid?: number
   bestAsk?: number
   spread?: number
   orderPriceMinTickSize?: number
   orderMinSize?: number
+  /** Exchange fee coefficient (from the market listing) */
+  feeCoefficient?: number
+  /** Crypto Up/Down: trading window and reference price from assetPriceTerms */
+  windowStart?: string
+  windowEnd?: string
+  priceToBeat?: number
 }
 
 export interface OrderBook {
@@ -134,16 +142,28 @@ export interface PendingGtcOrder {
   placedAt: number            // Date.now() at placement
   expiresAt: number           // Unix timestamp (ms) — matches goodTillTime
   status: 'pending' | 'filled' | 'cancelled' | 'expired'
+  /** 'maker' = maker-first post-only entry; absent = FOK→GTD fallback */
+  entryKind?: 'maker'
+  /** Market taker coefficient Θ, for fee-savings accounting */
+  feeCoefficient?: number
+  /** Cumulative filled shares seen so far (partial fills) */
+  filledSize?: number
+  /** Market's minimum trade quantity step (1 = whole contracts) */
+  orderMinSize?: number
+  /** End of the market's trading window (ms), when known (Up/Down windows) */
+  windowEndMs?: number
 }
 
 export interface Trade {
   id: string
   marketSlug: string
-  side: 'BUY' | 'SELL'
+  /** PM US account trade history does not report side; undefined when unknown */
+  side?: 'BUY' | 'SELL'
   price: number
   size: number
   fee?: number
   timestamp: Date
+  realizedPnl?: number
 }
 
 // ==========================================
@@ -270,6 +290,7 @@ export interface DipArbConfig {
   spreadScanEnabled?: boolean  // Enable periodic order book spread scan (default true)
   spreadScanIntervalMs?: number // Spread scan interval in ms (default 30000)
   spreadScanBatchSize?: number  // Max markets to check per spread scan (default 30)
+  askPremium?: number           // Added to each leg's best ask to improve FOK fill odds (default 0.01)
 }
 
 export interface DipSignal {
@@ -622,19 +643,34 @@ export interface SpreadData {
 // WEBSOCKET PRIVATE CHANNEL TYPES (US API)
 // ==========================================
 
+/** US WebSocket execution types (SDK `ExecutionType` string enum) */
+export type USExecutionType =
+  | 'EXECUTION_TYPE_FILL'
+  | 'EXECUTION_TYPE_PARTIAL_FILL'
+  | 'EXECUTION_TYPE_CANCELED'
+  | 'EXECUTION_TYPE_REPLACE'
+  | 'EXECUTION_TYPE_REJECTED'
+  | 'EXECUTION_TYPE_EXPIRED'
+  | 'EXECUTION_TYPE_DONE_FOR_DAY'
+
 /** US WebSocket order execution event */
 export interface USOrderExecution {
   id: string
   orderId: string
   marketSlug: string
-  side: string
+  side: string         // 'ORDER_SIDE_BUY' | 'ORDER_SIDE_SELL'
   intent: USOrderIntent
-  lastShares?: string
+  lastShares?: string  // shares in THIS execution (not cumulative)
   lastPx?: number
-  type: string         // ExecutionType
+  type: USExecutionType | string
   transactTime?: string
   tradeId?: string
   aggressor?: boolean
+  // Order-level quantities from the embedded order object, when present
+  orderQuantity?: number
+  cumQuantity?: number     // cumulative filled shares
+  leavesQuantity?: number  // remaining unfilled shares
+  orderState?: string      // 'ORDER_STATE_FILLED' etc.
 }
 
 /** US WebSocket position update */
