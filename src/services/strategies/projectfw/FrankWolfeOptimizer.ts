@@ -478,7 +478,7 @@ export class FrankWolfeOptimizer {
    *   Buy with proportion based on the divergence.
    */
   muToTradeLegs(
-    mu: number[],
+    _mu: number[],
     theta: number[],
     snapshot: MarketSnapshot
   ): TradeLeg[] {

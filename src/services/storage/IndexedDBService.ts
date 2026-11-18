@@ -291,7 +291,7 @@ export class IndexedDBService {
     try {
       const stored: StoredArbRound = {
         ...round,
-        id: `arb-${round.marketId}-${Date.now()}`,
+        id: `arb-${round.marketSlug}-${Date.now()}`,
         _storedAt: Date.now(),
       }
       await this.db.put('arbRounds', stored)
@@ -311,7 +311,7 @@ export class IndexedDBService {
       return stored
         .reverse()
         .slice(0, limit)
-        .map(({ id, _storedAt, ...round }) => round)
+        .map(({ id: _id, _storedAt, ...round }) => round)
     } catch (error) {
       console.warn('[IndexedDB] Failed to load arb rounds:', error)
       return []

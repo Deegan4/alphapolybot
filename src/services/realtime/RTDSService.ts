@@ -1,5 +1,3 @@
-import type { RTDSMessage, RTDSCryptoPricePayload } from '@/types'
-
 /**
  * Re-export the AssetPrice shape so consumers don't need to import from PriceOracleService.
  * Mirrors the interface exactly.
@@ -129,11 +127,6 @@ export class RTDSService {
     BTC: 'BTCUSDT', ETH: 'ETHUSDT', SOL: 'SOLUSDT', XRP: 'XRPUSDT',
   }
 
-  /** Reverse map: BTCUSDT -> BTC */
-  private static PAIR_TO_SYMBOL: Record<string, 'BTC' | 'ETH' | 'SOL' | 'XRP'> = {
-    BTCUSDT: 'BTC', ETHUSDT: 'ETH', SOLUSDT: 'SOL', XRPUSDT: 'XRP',
-  }
-
   subscribeCryptoPrices(symbols: ('BTC' | 'ETH' | 'SOL' | 'XRP')[]): void {
     if (this.ws?.readyState !== WebSocket.OPEN) {
       console.warn('[RTDS] Cannot subscribe — not connected')
@@ -221,7 +214,7 @@ export class RTDSService {
 
       // Try structured format: { topic: 'crypto_prices', payload: { symbol, price } }
       if (msg.topic === 'crypto_prices' && msg.payload) {
-        this.handleCryptoPriceUpdate(msg.payload as RTDSCryptoPricePayload)
+        this.handleCryptoPriceUpdate(msg.payload as Record<string, unknown>)
         return
       }
 

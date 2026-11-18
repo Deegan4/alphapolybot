@@ -320,10 +320,11 @@ body {
 /* Full viewport height that respects iOS Safari chrome + notch/home indicator */
 .app-viewport {
   box-sizing: border-box;
-  min-height: 100vh;
-  min-height: 100dvh;
-  height: 100vh;
-  height: 100dvh;
+  /* --install-hint-h: space taken by the iOS install tip while it is showing (else 0) */
+  min-height: calc(100vh - var(--install-hint-h, 0px));
+  min-height: calc(100dvh - var(--install-hint-h, 0px));
+  height: calc(100vh - var(--install-hint-h, 0px));
+  height: calc(100dvh - var(--install-hint-h, 0px));
   padding-top: env(safe-area-inset-top, 0px);
   padding-right: env(safe-area-inset-right, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);

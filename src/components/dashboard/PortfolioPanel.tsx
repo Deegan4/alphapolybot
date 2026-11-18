@@ -142,14 +142,14 @@ export const PortfolioPanel: React.FC = () => {
                       fontFamily: 'JetBrains Mono, monospace',
                       fontSize: '11px',
                     }}
-                    labelFormatter={(ts: number) => {
-                      const d = new Date(ts)
+                    labelFormatter={(ts) => {
+                      const d = new Date(Number(ts))
                       return d.toLocaleString(undefined, {
                         month: 'short', day: 'numeric',
                         hour: '2-digit', minute: '2-digit', hour12: false,
                       })
                     }}
-                    formatter={(value: number) => [`$${value.toFixed(2)}`, 'Balance']}
+                    formatter={(value) => [`$${Number(value).toFixed(2)}`, 'Balance']}
                     labelStyle={{ color: '#8b949e' }}
                     itemStyle={{ color: '#22c55e' }}
                   />

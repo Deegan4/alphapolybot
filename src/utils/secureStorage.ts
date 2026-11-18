@@ -119,7 +119,7 @@ class SecureStorage {
    * Retrieve a value from local storage (optionally decrypted)
    * Handles both legacy XOR and new AES-GCM formats transparently.
    */
-  async get<T>(key: string, encrypted = false): Promise<T | null> {
+  async get<T>(key: string, _encrypted = false): Promise<T | null> {
     const storageKey = STORAGE_PREFIX + key
 
     try {

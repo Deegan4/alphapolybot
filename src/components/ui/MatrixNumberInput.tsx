@@ -48,7 +48,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
 
     const currentValue = value !== undefined ? value.toString() : internalValue
 
-    const clampValue = (val: number): number => {
+    const clampValue = useCallback((val: number): number => {
       let clamped = val
       if (min !== undefined) clamped = Math.max(min, clamped)
       if (max !== undefined) clamped = Math.min(max, clamped)
@@ -56,7 +56,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
         clamped = Number(clamped.toFixed(precision))
       }
       return clamped
-    }
+    }, [min, max, precision])
 
     const updateValue = useCallback(
       (newValue: number | undefined) => {
@@ -69,7 +69,7 @@ export const MatrixNumberInput = forwardRef<HTMLInputElement, MatrixNumberInputP
           onChange?.(clamped)
         }
       },
-      [onChange, min, max, precision]
+      [onChange, clampValue]
     )
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {

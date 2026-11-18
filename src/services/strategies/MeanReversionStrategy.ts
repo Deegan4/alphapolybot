@@ -59,7 +59,6 @@ export class MeanReversionStrategy extends BaseStrategy {
   private scanInterval: number | null = null
   private unsubBinance: (() => void) | null = null
   private restPollInterval: number | null = null
-  private binanceConnected = false
 
   // Rolling price buffers — keyed by symbol
   private priceBuffers = new Map<MrSymbol, number[]>()
@@ -117,7 +116,6 @@ export class MeanReversionStrategy extends BaseStrategy {
       const { binanceWSService } = await import('@/services/realtime/BinanceWSService')
       const connected = await binanceWSService.connect()
       if (connected) {
-        this.binanceConnected = true
         this.unsubBinance = binanceWSService.onPriceUpdate((update) => {
           this.handlePriceUpdate(update)
         })
@@ -159,7 +157,6 @@ export class MeanReversionStrategy extends BaseStrategy {
       this.unsubBinance = null
     }
 
-    this.binanceConnected = false
     this.priceBuffers.clear()
     this.lastTradeTimes.clear()
     this._lastSignals.clear()
@@ -429,7 +426,7 @@ export class MeanReversionStrategy extends BaseStrategy {
       const { riskManager } = await import('@/services/trading/RiskManager')
       const productId = `${symbol}-USD`
       const validation = await riskManager.validateTrade(this.mrConfig.tradeSize, productId, 'Crypto Spot')
-      if (!validation.approved) {
+      if (!validation.allowed) {
         this.log(`RiskManager rejected ${symbol} buy: ${validation.reason}`)
         return
       }
@@ -512,6 +509,8 @@ export class MeanReversionStrategy extends BaseStrategy {
         side: 'BUY',
         outcome: 'LONG',
         marketPrice: fillPrice,
+        kellyFraction: 0,                       // fixed-size spot entries, no Kelly
+        kellyBetSize: this.mrConfig.tradeSize,
         actualBetSize: this.mrConfig.tradeSize,
         orderId: result.orderId,
         orderType: 'MARKET',
@@ -591,6 +590,8 @@ export class MeanReversionStrategy extends BaseStrategy {
         side: 'SELL',
         outcome: 'FLAT',
         marketPrice: exitPrice,
+        kellyFraction: 0,
+        kellyBetSize: pos.costBasis,
         actualBetSize: pos.costBasis,
         orderId: result.orderId,
         orderType: 'MARKET',
@@ -598,7 +599,7 @@ export class MeanReversionStrategy extends BaseStrategy {
         filledSize: pos.quantity,
         success: true,
         modelProbability: signal.confidence,
-        pnl: realizedPnl,
+        pnlUSD: realizedPnl,
       })
 
       // Record with RiskManager

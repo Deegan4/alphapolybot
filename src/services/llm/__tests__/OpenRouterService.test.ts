@@ -17,13 +17,13 @@ vi.hoisted(() => {
     get length() { return store.size },
     key: (_index: number) => null as string | null,
   }
-  // @ts-expect-error — globalThis.localStorage is read-only in types
   globalThis.localStorage = localStorageMock
 })
 
 // OpenRouterService class (not the singleton) — we construct our own instances.
 // The module-level singleton will call localStorage during import; the mock above covers it.
 import { OpenRouterService } from '../OpenRouterService'
+import type { Market } from '@/types'
 
 // Mock fetch globally
 const mockFetch = vi.fn()
@@ -37,18 +37,17 @@ function makeService(apiKey = 'test-api-key'): OpenRouterService {
   return new OpenRouterService(apiKey)
 }
 
-function makeMarket(overrides = {}) {
+function makeMarket(overrides: Partial<Market> = {}): Market {
   return {
     id: 'market-1',
     question: 'Will BTC exceed $100k?',
     outcomes: ['Yes', 'No'],
     outcomePrices: [0.65, 0.35],
-    clobTokenIds: ['token-yes', 'token-no'],
-    conditionId: 'cond-1',
     slug: 'btc-100k',
     volume: 50000,
     liquidity: 10000,
     createdAt: '2024-01-01',
+    endDate: '2025-12-31',
     active: true,
     closed: false,
     ...overrides,

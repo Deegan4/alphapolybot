@@ -20,16 +20,16 @@ import type { Market } from '@/types'
 const stubMarket: Market = {
   id: 'test-market',
   question: 'Will BTC go up or down?',
-  conditionId: '0x123',
   slug: 'btc-updown-15m-test',
   outcomes: ['Up', 'Down'],
-  outcomePrices: ['0.50', '0.50'],
-  clobTokenIds: ['tok-up', 'tok-down'],
+  outcomePrices: [0.5, 0.5],
   active: true,
   closed: false,
+  endDate: '2024-02-14T20:15:00Z',
+  createdAt: '2024-02-14T20:00:00Z',
   volume: 10000,
   liquidity: 5000,
-} as Market
+}
 
 const defaultConfig: SignalEngineConfig = {
   regimeFilterEnabled: false,

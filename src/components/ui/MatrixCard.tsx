@@ -25,7 +25,6 @@ export const MatrixCard: React.FC<MatrixCardProps> = ({
   headerClassName,
   bodyClassName,
   children,
-  glow = false,
   hover = false,
   variant = 'default',
 }) => {

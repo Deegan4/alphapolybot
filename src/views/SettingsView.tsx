@@ -2,11 +2,14 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixInput, MatrixButton, MatrixToggle, MatrixSelect, MatrixBadge, MatrixNumberInput, AnimatedCounter, MatrixSlider } from '@/components/ui'
 import { useWalletStore, useSettingsStore } from '@/stores'
+import { getRequestMetrics, type BucketMetrics } from '@/services/api'
+import { realtimeService, userChannelService } from '@/services/realtime'
+import { makerFillTracker, type MakerFillStats } from '@/services/trading/MakerFillTracker'
 import { strategyManager } from '@/services/strategies'
 import { tradingService, riskManager } from '@/services/trading'
 import { openRouterService } from '@/services/llm'
 import { notificationService } from '@/services/notifications/NotificationService'
-import type { AppSettings, LLMPredictionConfig, DipArbConfig, ProjectFWConfig, WalletEntry } from '@/types'
+import type { LLMPredictionConfig, DipArbConfig, ProjectFWConfig, WalletEntry } from '@/types'
 import type { RiskManagerStatus } from '@/services/trading'
 import { cn } from '@/utils/cn'
 
@@ -17,28 +20,42 @@ const tabContentVariants = {
 }
 
 /**
+ * Banner shown on settings panels of strategies that are not yet runnable on
+ * Polymarket US (see ShelvedStrategy). Settings are kept so they survive the port.
+ */
+const ShelvedStrategyNotice: React.FC<{ reason?: string }> = ({ reason }) => (
+  <div className="bg-agent-orange/10 border border-agent-orange/40 rounded-lg p-4">
+    <h4 className="text-agent-orange text-sm font-bold mb-1 font-mono">Not available on Polymarket US</h4>
+    <p className="text-agent-text-muted text-xs font-sans">
+      {reason ?? "This strategy's implementation targeted the international Polymarket CLOB and has not been ported to Polymarket US yet."}{' '}
+      It is hidden from the dashboard toggles and will not trade. Your settings are saved.
+    </p>
+  </div>
+)
+
+/**
  * SettingsView - Application settings and configuration
  */
+const SETTINGS_TABS = [
+  { id: 'trading', label: 'Trading Mode' },
+  { id: 'risk', label: 'Risk Management' },
+  { id: 'wallet', label: 'Wallet' },
+  { id: 'llm', label: 'LLM Strategy' },
+  { id: 'dip', label: 'Dip Arbitrage' },
+  { id: 'projectfw', label: 'ProjectFW Arb' },
+  { id: 'btcupdown', label: 'BTC Up/Down' },
+  { id: 'micro', label: 'Micro Momentum' },
+  { id: 'meanrev', label: 'Mean Reversion' },
+  { id: 'alerts', label: 'Alerts' },
+  { id: 'api', label: 'API Keys' },
+]
+
 export const SettingsView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'trading' | 'risk' | 'wallet' | 'llm' | 'dip' | 'projectfw' | 'btcupdown' | 'micro' | 'meanrev' | 'alerts' | 'api'>('trading')
 
-  const tabs = [
-    { id: 'trading', label: 'Trading Mode' },
-    { id: 'risk', label: 'Risk Management' },
-    { id: 'wallet', label: 'Wallet' },
-    { id: 'llm', label: 'LLM Strategy' },
-    { id: 'dip', label: 'Dip Arbitrage' },
-    { id: 'projectfw', label: 'ProjectFW Arb' },
-    { id: 'btcupdown', label: 'BTC Up/Down' },
-    { id: 'micro', label: 'Micro Momentum' },
-    { id: 'meanrev', label: 'Mean Reversion' },
-    { id: 'copytrading', label: 'Copy Trading' },
-    { id: 'alerts', label: 'Alerts' },
-    { id: 'api', label: 'API Keys' },
-  ]
 
   const handleTabKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const tabIds = tabs.map(t => t.id)
+    const tabIds = SETTINGS_TABS.map(t => t.id)
     const currentIndex = tabIds.indexOf(activeTab)
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
       e.preventDefault()
@@ -49,7 +66,7 @@ export const SettingsView: React.FC = () => {
       const prev = tabIds[(currentIndex - 1 + tabIds.length) % tabIds.length]
       setActiveTab(prev as typeof activeTab)
     }
-  }, [activeTab, tabs])
+  }, [activeTab])
 
   return (
     <div className="h-full flex flex-col md:flex-row gap-4">
@@ -60,7 +77,7 @@ export const SettingsView: React.FC = () => {
         aria-label="Settings sections"
         onKeyDown={handleTabKeyDown}
       >
-        {tabs.map(tab => (
+        {SETTINGS_TABS.map(tab => (
           <button
             key={tab.id}
             role="tab"
@@ -87,7 +104,7 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {/* Content — animated tab transitions */}
-      <div className="flex-1 min-h-0 overflow-auto" role="tabpanel" aria-label={tabs.find(t => t.id === activeTab)?.label}>
+      <div className="flex-1 min-h-0 overflow-auto" role="tabpanel" aria-label={SETTINGS_TABS.find(t => t.id === activeTab)?.label}>
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -105,7 +122,6 @@ export const SettingsView: React.FC = () => {
             {activeTab === 'btcupdown' && <BtcUpDownSettings />}
             {activeTab === 'micro' && <MicroMomentumSettings />}
             {activeTab === 'meanrev' && <MeanReversionSettings />}
-            {activeTab === 'copytrading' && <CopyTradingSettings />}
             {activeTab === 'alerts' && <AlertSettings />}
             {activeTab === 'api' && <APISettings />}
           </motion.div>
@@ -551,8 +567,8 @@ const WalletSettings: React.FC = () => {
  * Wallet Registry — manage multiple PM US wallets
  */
 const WalletRegistryPanel: React.FC = () => {
-  const { wallets, activeWalletId, addWallet, removeWallet, setActiveWallet, renameWallet } = useSettingsStore()
-  const { connect, disconnect } = useWalletStore()
+  const { wallets, activeWalletId, addWallet, removeWallet, setActiveWallet } = useSettingsStore()
+  const { disconnect } = useWalletStore()
   const [showAdd, setShowAdd] = useState(false)
   const [newLabel, setNewLabel] = useState('')
   const [newKeyId, setNewKeyId] = useState('')
@@ -687,10 +703,113 @@ const WalletRegistryPanel: React.FC = () => {
 }
 
 /**
+ * Maker-first fill statistics — shows whether fee savings outweigh missed fills
+ */
+const STRATEGY_LABELS: Record<string, string> = {
+  llm: 'LLM', btc: 'BTC Up/Down', micro: 'Micro', meanrev: 'Mean Rev', dip: 'Dip Arb', fw: 'FW Arb', other: 'Other',
+}
+
+/** Strategies that place buys through TradingService.placeBet (maker-first eligible) */
+const MAKER_FIRST_STRATEGIES = ['llm', 'btc', 'micro'] as const
+
+/**
+ * Per-strategy maker-first switches, each with its own observed fill rate,
+ * so maker-first can stay on where it pays and off where fills are missed.
+ */
+const MakerFirstStrategyPicker: React.FC<{ disabled: string[]; onToggle: (s: string, enabled: boolean) => void }> = ({ disabled, onToggle }) => {
+  const [, force] = useState(0)
+  useEffect(() => makerFillTracker.onChange(() => force(n => n + 1)), [])
+  return (
+    <div>
+      <div className="text-agent-text-muted text-xs font-sans mb-1">Use maker-first for:</div>
+      <div className="grid grid-cols-2 gap-1 text-xs font-mono">
+        {MAKER_FIRST_STRATEGIES.map(strategy => {
+          const on = !disabled.includes(strategy)
+          const s = makerFillTracker.getStats(strategy)
+          const resolved = s.filled + s.expired + s.cancelled
+          return (
+            <label key={strategy} className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={on} onChange={e => onToggle(strategy, e.target.checked)} />
+              <span>{STRATEGY_LABELS[strategy]}</span>
+              <span className="text-agent-text-muted">
+                {resolved > 0 ? `${Math.round((s.fillRate ?? 0) * 100)}% of ${resolved}` : 'no data'}
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+const MakerFillStatsPanel: React.FC = () => {
+  const [stats, setStats] = useState<MakerFillStats>(() => makerFillTracker.getStats())
+  const [perStrategy, setPerStrategy] = useState(() => makerFillTracker.getStrategyStats())
+  useEffect(() => makerFillTracker.onChange(s => {
+    setStats(s)
+    setPerStrategy(makerFillTracker.getStrategyStats())
+  }), [])
+
+  const resolved = stats.filled + stats.expired + stats.cancelled
+  if (stats.placed === 0 && stats.rejected === 0) {
+    return (
+      <p className="text-agent-text-muted text-xs font-sans">
+        No maker-first orders yet. Fill rate and fees saved will appear here.
+      </p>
+    )
+  }
+  const pct = (x: number | null) => (x === null ? '—' : `${Math.round(x * 100)}%`)
+  const secs = (ms: number | null) => (ms === null ? '—' : ms < 120_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`)
+
+  return (
+    <div className="bg-agent-green/5 border border-agent-green/20 rounded-lg p-3 text-xs font-mono space-y-1">
+      <div className="flex justify-between"><span className="text-agent-text-muted">Fill rate</span><span>{pct(stats.fillRate)} ({stats.filled}/{resolved})</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Expired · cancelled · rejected</span><span>{stats.expired} · {stats.cancelled} · {stats.rejected}</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Expired → taker fills</span><span>{stats.takerFallbackFilled}/{stats.takerFallbackAttempted}</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Avg time to fill</span><span>{secs(stats.avgTimeToFillMs)}</span></div>
+      <div className="flex justify-between"><span className="text-agent-text-muted">Taker fees avoided</span><span>${stats.feesSavedUSD.toFixed(2)} on ${stats.filledNotionalUSD.toFixed(2)}</span></div>
+      {perStrategy.length > 1 && (
+        <table className="w-full mt-2 border-t border-agent-green/20 pt-1">
+          <thead>
+            <tr className="text-agent-text-muted text-left">
+              <th className="font-normal py-1">Strategy</th>
+              <th className="font-normal text-right">Fill</th>
+              <th className="font-normal text-right">Avg</th>
+              <th className="font-normal text-right">Saved</th>
+            </tr>
+          </thead>
+          <tbody>
+            {perStrategy.map(({ strategy, stats: s }) => (
+              <tr key={strategy}>
+                <td className="py-0.5">{STRATEGY_LABELS[strategy] ?? strategy}</td>
+                <td className="text-right">{pct(s.fillRate)} ({s.filled}/{s.filled + s.expired + s.cancelled})</td>
+                <td className="text-right">{secs(s.avgTimeToFillMs)}</td>
+                <td className="text-right">${s.feesSavedUSD.toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="flex justify-between items-center pt-1">
+        <span className="text-agent-text-muted">Since {new Date(stats.since).toLocaleDateString()}</span>
+        <button type="button" className="text-agent-orange hover:underline" onClick={() => makerFillTracker.reset()}>Reset</button>
+      </div>
+    </div>
+  )
+}
+
+/**
  * GTD Fallback Settings — write-through to settingsStore (no Save button needed)
  */
 const GtdFallbackSettings: React.FC = () => {
-  const { gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes } = useSettingsStore()
+  const {
+    gtcFallbackEnabled, gtcExpiryMinutes, setGtcFallbackEnabled, setGtcExpiryMinutes,
+    makerFirstEntries, setMakerFirstEntries,
+    makerExpiryTakerFallback, setMakerExpiryTakerFallback, makerMaxChaseCents, setMakerMaxChaseCents,
+    pauseEntriesWhenFeedDown, setPauseEntriesWhenFeedDown,
+    signalRecordingOnly, setSignalRecordingOnly,
+    makerFirstDisabledStrategies, setMakerFirstForStrategy,
+  } = useSettingsStore()
 
   return (
     <div>
@@ -702,7 +821,51 @@ const GtdFallbackSettings: React.FC = () => {
           enabled={gtcFallbackEnabled}
           onChange={setGtcFallbackEnabled}
         />
-        {gtcFallbackEnabled && (
+        <MatrixToggle
+          label="Maker-First Entries"
+          description="Rest buys as post-only orders one cent inside the spread (no taker fee, about 4.75% of the stake at 50¢). Falls back to a normal order if the book is one-sided or the exchange rejects it. Fills are slower and may not happen."
+          enabled={makerFirstEntries}
+          onChange={setMakerFirstEntries}
+        />
+        <MatrixToggle
+          label="Record Signals Only"
+          description="Momentum and Crypto Up/Down keep scanning and recording signals for the Analytics reports, but place no trades at all, not even simulated ones. Use it to gather evidence for days. Other strategies are not affected."
+          enabled={signalRecordingOnly ?? false}
+          onChange={setSignalRecordingOnly}
+        />
+        <MatrixToggle
+          label="Pause Entries When Price Feed Is Down"
+          description="Block new entries while the live market-data feed is disconnected, instead of trading on slower REST prices. Exits and stop-losses still go out."
+          enabled={pauseEntriesWhenFeedDown ?? false}
+          onChange={setPauseEntriesWhenFeedDown}
+        />
+        {makerFirstEntries && (
+          <>
+            <MakerFirstStrategyPicker
+              disabled={makerFirstDisabledStrategies ?? []}
+              onToggle={setMakerFirstForStrategy}
+            />
+            <MatrixToggle
+              label="Taker Fallback on Expiry"
+              description="If a maker entry expires unfilled, buy the rest with a normal order, but only if the price has not run away. Any partial fill is kept as a position either way."
+              enabled={makerExpiryTakerFallback}
+              onChange={setMakerExpiryTakerFallback}
+            />
+            {makerExpiryTakerFallback && (
+              <MatrixSlider
+                label="Max Chase Above Maker Price"
+                min={0}
+                max={5}
+                step={1}
+                value={makerMaxChaseCents}
+                onChange={setMakerMaxChaseCents}
+                valueFormat={(v) => `${v}¢`}
+              />
+            )}
+          </>
+        )}
+        <MakerFillStatsPanel />
+        {(gtcFallbackEnabled || makerFirstEntries) && (
           <MatrixSlider
             label="GTD Expiry"
             min={1}
@@ -1040,6 +1203,7 @@ const ProjectFWSettings: React.FC = () => {
   return (
     <MatrixCard title="PROJECTFW ARBITRAGE" subtitle="Frank-Wolfe optimized spread arbitrage" variant="glass">
       <div className="space-y-6">
+        <ShelvedStrategyNotice />
         <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
           <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Bregman Projection Arbitrage</h4>
           <p className="text-agent-text-muted text-xs font-sans">
@@ -1375,14 +1539,9 @@ const DipSettings: React.FC = () => {
   }
 
   return (
-    <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Configure dip buying parameters" variant="glass">
+    <MatrixCard title="DIP ARBITRAGE SETTINGS" subtitle="Two-leg arbitrage below $1" variant="glass">
       <div className="space-y-6">
-        <div className="bg-agent-green/10 border border-agent-green/30 rounded-lg p-4">
-          <h4 className="text-agent-green text-sm font-bold mb-2 font-mono">Proven Configuration</h4>
-          <p className="text-agent-text-muted text-xs font-sans">
-            These settings achieved 86% ROI in backtesting. Adjust with caution.
-          </p>
-        </div>
+        <ShelvedStrategyNotice reason="Each Polymarket US market is one YES-quoted book, so YES + NO never costs less than $1. Buying YES across an event's markets is only riskless when those markets are a complete, mutually exclusive set, and the exchange does not mark which events are (live events include nested and partial lists)." />
 
         {/* Core Settings */}
         <div>
@@ -1856,23 +2015,19 @@ const BtcUpDownSettings: React.FC = () => {
               try {
                 const { polymarketUSClient } = await import('@/services/api')
                 // Use the same slug-based discovery the actual strategy uses
-                const nowSec = Math.floor(Date.now() / 1000)
-                const window15m = Math.floor(nowSec / 900) * 900
-                const slugs = [
-                  { asset: 'BTC', slug: `btc-updown-15m-${window15m}`, dur: '15m' },
-                  { asset: 'ETH', slug: `eth-updown-15m-${window15m}`, dur: '15m' },
-                  { asset: 'SOL', slug: `sol-updown-15m-${window15m}`, dur: '15m' },
-                  { asset: 'XRP', slug: `xrp-updown-15m-${window15m}`, dur: '15m' },
-                ]
+                const { upDownEventSlugs, normalizeEventToMarkets } = await import('@/services/api')
                 const results: string[] = []
-                for (const { asset, slug, dur } of slugs) {
+                for (const asset of ['BTC', 'ETH', 'SOL', 'XRP']) {
+                  const [slug] = upDownEventSlugs(asset, '15m')
+                  if (!slug) continue
                   try {
                     const event = await polymarketUSClient.getEventBySlug(slug)
-                    const activeMarkets = event?.markets?.filter((m: { active: boolean; closed: boolean }) => m.active && !m.closed) || []
-                    if (activeMarkets.length > 0) {
-                      // US API: each market in event is a single outcome with its own price
-                      const prices = activeMarkets.map((m: any) => m.lastTradePrice || m.outcomePrices?.[0] || 0)
-                      results.push(`${asset} ${dur}: ${activeMarkets.length} mkt (${prices.map((p: number) => `${(Number(p) * 100).toFixed(0)}c`).join('/')})`)
+                    if (!event) continue
+                    const active = normalizeEventToMarkets(event as unknown as Parameters<typeof normalizeEventToMarkets>[0])
+                      .filter(m => m.active && !m.closed)
+                    for (const m of active) {
+                      const [up, down] = m.outcomePrices
+                      results.push(`${asset} 15m: Up ${(up * 100).toFixed(0)}c / Down ${(down * 100).toFixed(0)}c`)
                     }
                   } catch { /* skip failed lookups */ }
                 }
@@ -2103,145 +2258,6 @@ const MeanReversionSettings: React.FC = () => {
 }
 
 /**
- * Copy Trading Settings Panel
- */
-const CopyTradingSettings: React.FC = () => {
-  const {
-    followedAddress,
-    copyTradeSize, setCopyTradeSize,
-    copyMaxConcurrent, setCopyMaxConcurrent,
-    copyPollIntervalMs, setCopyPollIntervalMs,
-    copyStopLossPercent, setCopyStopLossPercent,
-    copyTakeProfitPercent, setCopyTakeProfitPercent,
-    copyBuysOnly, setCopyBuysOnly,
-  } = useSettingsStore()
-
-  return (
-    <MatrixCard title="COPY TRADING" subtitle="Mirror trades from a followed Polymarket trader" variant="glass">
-      <div className="space-y-6">
-        {!followedAddress && (
-          <div className="bg-agent-bg/60 rounded-lg p-4">
-            <p className="text-agent-orange text-xs font-mono">
-              No trader followed — paste an address in the Follow Trader panel (left sidebar) first.
-            </p>
-          </div>
-        )}
-
-        {followedAddress && (
-          <div className="bg-agent-bg/60 rounded-lg p-3">
-            <p className="text-agent-text-muted text-xs font-mono">
-              Following: <span className="text-agent-cyan">{followedAddress.slice(0, 8)}...{followedAddress.slice(-4)}</span>
-            </p>
-          </div>
-        )}
-
-        {/* Position Sizing */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Position Sizing</h4>
-          <div className="space-y-4">
-            <MatrixSlider
-              label="Trade Size"
-              value={copyTradeSize}
-              onChange={setCopyTradeSize}
-              min={1}
-              max={25}
-              step={1}
-              valueFormat={(v: number) => `$${v}`}
-            />
-            <p className="text-agent-text-muted text-xs font-sans -mt-2">
-              USD amount per copied trade. RiskManager daily loss limit still applies.
-            </p>
-            <MatrixSlider
-              label="Max Concurrent Positions"
-              value={copyMaxConcurrent}
-              onChange={setCopyMaxConcurrent}
-              min={1}
-              max={20}
-              step={1}
-              valueFormat={(v: number) => `${v}`}
-            />
-          </div>
-        </div>
-
-        {/* Polling */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Polling</h4>
-          <MatrixSlider
-            label="Poll Interval"
-            value={copyPollIntervalMs / 1000}
-            onChange={(v: number) => setCopyPollIntervalMs(v * 1000)}
-            min={5}
-            max={60}
-            step={5}
-            valueFormat={(v: number) => `${v}s`}
-          />
-          <p className="text-agent-text-muted text-xs font-sans mt-1">
-            How often to check for new trades from the followed wallet. Lower = faster copies, more API calls.
-          </p>
-        </div>
-
-        {/* Risk Management */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Risk Management</h4>
-          <div className="space-y-4">
-            <MatrixSlider
-              label="Stop Loss"
-              value={copyStopLossPercent}
-              onChange={setCopyStopLossPercent}
-              min={0.10}
-              max={0.95}
-              step={0.05}
-              valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
-            />
-            <MatrixSlider
-              label="Take Profit"
-              value={copyTakeProfitPercent}
-              onChange={setCopyTakeProfitPercent}
-              min={0.10}
-              max={0.95}
-              step={0.05}
-              valueFormat={(v: number) => `${(v * 100).toFixed(0)}%`}
-            />
-          </div>
-          <p className="text-agent-text-muted text-xs mt-2 font-sans">
-            PLM monitors copied positions and auto-exits on SL/TP. These are separate from the whale's exit logic.
-          </p>
-        </div>
-
-        {/* Behavior */}
-        <div>
-          <h4 className="text-agent-green text-sm font-mono mb-3">Behavior</h4>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={copyBuysOnly}
-              onChange={(e) => setCopyBuysOnly(e.target.checked)}
-              className="accent-agent-green"
-            />
-            <span className="text-agent-text text-xs font-mono">BUYs only (exits managed by PLM)</span>
-          </label>
-          <p className="text-agent-text-muted text-xs mt-1 font-sans">
-            When enabled, only BUY trades are copied. Sell/exit decisions are handled by stop-loss and take-profit.
-          </p>
-        </div>
-
-        {/* How It Works */}
-        <div className="bg-agent-bg/60 rounded-lg p-4 space-y-2">
-          <h4 className="text-agent-green text-sm font-mono">How It Works</h4>
-          <ul className="text-agent-text-muted text-xs space-y-1 font-sans">
-            <li>Polls the followed trader's trade history every {copyPollIntervalMs / 1000}s via Data API</li>
-            <li>Detects new BUY trades and mirrors them at ${copyTradeSize} per trade</li>
-            <li>PLM tracks each position with {(copyStopLossPercent * 100).toFixed(0)}% SL / {(copyTakeProfitPercent * 100).toFixed(0)}% TP</li>
-            <li>RiskManager circuit breaker enforces daily loss limits</li>
-            <li>Max {copyMaxConcurrent} concurrent copied positions</li>
-          </ul>
-        </div>
-      </div>
-    </MatrixCard>
-  )
-}
-
-/**
  * Alert Settings — Telegram & Discord
  */
 const AlertSettings: React.FC = () => {
@@ -2371,6 +2387,95 @@ const AlertSettings: React.FC = () => {
 /**
  * API Settings
  */
+/**
+ * Live Polymarket US request usage against the client-side throttle and the
+ * documented 25 req/s per-IP limit, with 429 counts and any active pause.
+ */
+const feedStateClass = (state: string) =>
+  state === 'connected' ? 'text-agent-green' : state === 'idle' ? 'text-agent-text-muted' : 'text-agent-orange'
+
+/** "3s ago" style age for a feed's last message */
+function formatFeedAge(lastMessageAt: number, now = Date.now()): string {
+  if (!lastMessageAt) return 'never'
+  const s = Math.max(0, Math.round((now - lastMessageAt) / 1000))
+  if (s < 60) return `${s}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  return `${Math.floor(s / 3600)}h ago`
+}
+
+const ApiUsagePanel: React.FC = () => {
+  const [m, setM] = useState(() => getRequestMetrics())
+  const [feeds, setFeeds] = useState(() => ({ market: realtimeService.getStatus(), user: userChannelService.getStatus() }))
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setM(getRequestMetrics())
+      setFeeds({ market: realtimeService.getStatus(), user: userChannelService.getStatus() })
+    }, 2000)
+    return () => window.clearInterval(id)
+  }, [])
+  const row = (label: string, b: BucketMetrics) => {
+    const paused = b.pausedUntil > Date.now()
+    return (
+      <tr key={label}>
+        <td className="py-0.5">{label}</td>
+        <td className="text-right">{b.perSecond10s.toFixed(1)}/s <span className="text-agent-text-muted">of {b.ratePerSec}</span></td>
+        <td className="text-right">{b.last60s}</td>
+        <td className={cn('text-right', b.rateLimited > 0 && 'text-agent-orange')}>{b.rateLimited}</td>
+        <td className={cn('text-right', b.dropped > 0 && 'text-agent-orange')}>{b.dropped}</td>
+        <td className="text-right">{paused ? `paused ${Math.ceil((b.pausedUntil - Date.now()) / 1000)}s` : 'ok'}</td>
+      </tr>
+    )
+  }
+  return (
+    <div className="bg-agent-bg/60 rounded-lg p-4">
+      <h4 className="text-agent-green text-sm font-mono mb-2">Polymarket US API usage</h4>
+      <table className="w-full text-xs font-mono">
+        <thead>
+          <tr className="text-agent-text-muted text-left">
+            <th className="font-normal py-1">Host</th>
+            <th className="font-normal text-right">Rate (10s)</th>
+            <th className="font-normal text-right">Last 60s</th>
+            <th className="font-normal text-right">429s</th>
+            <th className="font-normal text-right">Dropped</th>
+            <th className="font-normal text-right">State</th>
+          </tr>
+        </thead>
+        <tbody>
+          {row('Gateway', m.gateway)}
+          {row('API', m.api)}
+        </tbody>
+      </table>
+      <table className="w-full text-xs font-mono mt-3">
+        <thead>
+          <tr className="text-agent-text-muted text-left">
+            <th className="font-normal py-1">Live feed</th>
+            <th className="font-normal text-right">State</th>
+            <th className="font-normal text-right">Last message</th>
+            <th className="font-normal text-right">Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td className="py-0.5">Market data</td>
+            <td className={cn('text-right', feedStateClass(feeds.market.state))}>{feeds.market.state}</td>
+            <td className="text-right">{formatFeedAge(feeds.market.lastMessageAt)}</td>
+            <td className="text-right">{feeds.market.subscriptions} markets, books {feeds.market.booksFresh}/{feeds.market.booksWatched} fresh{feeds.market.stallReconnects > 0 ? `, ${feeds.market.stallReconnects} stall restarts` : ''}</td>
+          </tr>
+          <tr>
+            <td className="py-0.5">Private (orders, balance)</td>
+            <td className={cn('text-right', feedStateClass(feeds.user.state))}>{feeds.user.state}</td>
+            <td className="text-right">{formatFeedAge(feeds.user.lastMessageAt)}</td>
+            <td className="text-right">{feeds.user.hasBalance ? 'balance live' : 'balance via REST'}{feeds.user.stallReconnects > 0 ? `, ${feeds.user.stallReconnects} stall restarts` : ''}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="text-agent-text-muted text-xs font-sans mt-2">
+        The exchange allows 25 requests per second per IP across both hosts. Any 429 here means the bot hit the limit and paused itself. Requests that would have waited out a long pause are dropped (cancels never are) instead of firing late on stale prices.
+      </p>
+    </div>
+  )
+}
+
 const APISettings: React.FC = () => {
   const {
     openRouterApiKey, setOpenRouterApiKey,
@@ -2424,6 +2529,7 @@ const APISettings: React.FC = () => {
   return (
     <MatrixCard title="API KEYS" subtitle="Configure external service API keys" variant="glass">
       <div className="space-y-6">
+        <ApiUsagePanel />
         <div className="bg-agent-bg/60 rounded-lg p-4">
           <p className="text-agent-text-muted text-sm font-sans">
             API keys are stored locally in your browser. They are never sent to any external server except the respective API providers.

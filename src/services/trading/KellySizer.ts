@@ -10,6 +10,8 @@
  *
  * For Polymarket: b = (1 - price) / price, a = 1 (lose full bet).
  */
+import { PMUS_DEFAULT_TAKER_THETA, takerCostPerContract } from './pmusFees'
+
 export class KellySizer {
   /**
    * Full Kelly fraction: f* = (b·p - q) / b
@@ -53,6 +55,22 @@ export class KellySizer {
     if (effectivePayout <= marketPrice) return 0  // No possible profit after fees
     const b = (effectivePayout - marketPrice) / marketPrice
     return KellySizer.fullKelly(modelProb, b)
+  }
+
+  /**
+   * Polymarket US Kelly for a taker buy held to resolution.
+   *
+   * The taker fee Θ·p·(1−p) per contract (docs.polymarket.us/fees) raises the
+   * cost of each contract to c = p + Θ·p·(1−p); a win pays $1 and settlement
+   * carries no fee, so the net odds are b = (1 − c) / c.
+   *
+   * @param theta market `feeCoefficient` (tier 1: 0.095)
+   */
+  static pmusKelly(modelProb: number, marketPrice: number, theta = PMUS_DEFAULT_TAKER_THETA): number {
+    if (marketPrice <= 0 || marketPrice >= 1) return 0
+    const cost = takerCostPerContract(marketPrice, theta)
+    if (cost >= 1) return 0
+    return KellySizer.fullKelly(modelProb, (1 - cost) / cost)
   }
 
   /**

@@ -62,7 +62,7 @@ export const BacktestView: React.FC = () => {
 
   const handleRun = useCallback(() => {
     runBacktest(polyBacktestApiKey)
-  }, [polyBacktestApiKey])
+  }, [polyBacktestApiKey, runBacktest])
 
   const handleSweepRun = useCallback(async () => {
     if (!polyBacktestApiKey) {

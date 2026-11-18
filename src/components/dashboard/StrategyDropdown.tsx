@@ -14,7 +14,6 @@ const SHORT_NAMES: Record<string, string> = {
   'project-fw': 'FW Arb',
   'dip-arb': 'Dip Arb',
   'mean-reversion': 'Mean Rev',
-  'copy-trading': 'Copy Trade',
 }
 
 /** Subtitle descriptions for each strategy */
@@ -25,11 +24,10 @@ const SUBTITLES: Record<string, string> = {
   'project-fw': 'Spread arb (rare)',
   'dip-arb': 'Dip arb (rare)',
   'mean-reversion': 'Spot crypto (Coinbase)',
-  'copy-trading': 'Mirror top trader',
 }
 
 /** Display order — most likely to trade first */
-const STRATEGY_ORDER = ['llm-prediction', 'btc-updown', 'copy-trading', 'mean-reversion', 'micro-momentum', 'project-fw', 'dip-arb']
+const STRATEGY_ORDER = ['llm-prediction', 'btc-updown', 'mean-reversion', 'micro-momentum', 'project-fw', 'dip-arb']
 
 const STATUS_DOT: Record<string, string> = {
   running: 'bg-agent-green',
@@ -43,6 +41,13 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
   const [strategies, setStrategies] = useState<StrategyState[]>(strategyManager.getStates())
   const [toggling, setToggling] = useState<Set<string>>(new Set())
   const dryRun = useSettingsStore((s) => s.dryRun)
+  // Crypto Up/Down trades nothing until at least one coin is switched on
+  const noCoinOn = useSettingsStore((s) => !s.btcEnableBtc && !s.btcEnableEth && !s.btcEnableSol && !s.btcEnableXrp)
+  const setBtcEnableBtc = useSettingsStore((s) => s.setBtcEnableBtc)
+  const upDownRunning = strategies.some((s) => s.id === 'btc-updown' && s.status === 'running')
+
+  // Strategies not yet runnable on Polymarket US (ShelvedStrategy) are hidden from toggles
+  const visible = strategies.filter((s) => s.available)
 
   const addToggling = (id: string) => setToggling(prev => new Set(prev).add(id))
   const removeToggling = (id: string) => setToggling(prev => { const next = new Set(prev); next.delete(id); return next })
@@ -81,7 +86,7 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
   const handleStartAll = async () => {
     addToggling('all')
     try {
-      for (const s of strategies) {
+      for (const s of visible) {
         if (!s.enabled) await strategyManager.enableStrategy(s.id)
       }
     } catch (err) {
@@ -102,8 +107,8 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
     }
   }
 
-  const anyRunning = strategies.some((s) => s.enabled)
-  const allRunning = strategies.every((s) => s.enabled)
+  const anyRunning = visible.some((s) => s.enabled)
+  const allRunning = visible.length > 0 && visible.every((s) => s.enabled)
 
   return (
     <div
@@ -130,7 +135,7 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
 
       {/* Strategy rows */}
       <div className="py-1">
-        {[...strategies].sort((a, b) => {
+        {[...visible].sort((a, b) => {
           const ai = STRATEGY_ORDER.indexOf(a.id)
           const bi = STRATEGY_ORDER.indexOf(b.id)
           return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi)
@@ -174,6 +179,22 @@ export const StrategyDropdown: React.FC<StrategyDropdownProps> = ({ onClose }) =
           </button>
         ))}
       </div>
+
+      {/* Crypto Up/Down is on but has no coin to trade: offer the one-tap fix */}
+      {upDownRunning && noCoinOn && (
+        <div className="px-3 py-2 border-t border-agent-border flex items-center justify-between gap-2">
+          <span className="text-[9px] font-mono text-yellow-400 leading-snug">
+            BTC Up/Down is running but no coin is switched on, so it will not trade.
+          </span>
+          <button
+            type="button"
+            onClick={() => setBtcEnableBtc(true)}
+            className="shrink-0 text-[10px] font-mono font-semibold px-2 py-1 rounded border border-agent-green/30 text-agent-green hover:bg-agent-green/10 transition-colors"
+          >
+            Turn on BTC
+          </button>
+        </div>
+      )}
 
       {/* Dry run notice */}
       {dryRun && (

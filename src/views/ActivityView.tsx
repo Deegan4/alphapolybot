@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MatrixCard, MatrixBadge, MatrixButton, MatrixLoading, AnimatedCounter } from '@/components/ui'
 import { activityLogger } from '@/services/trading/ActivityLogger'
-import { dataClient } from '@/services/api/DataClient'
+import { polymarketUSClient } from '@/services/api'
 import { useWalletStore } from '@/stores'
 import type { ActivityItem, ActivityType, UserActivity } from '@/types'
 import { cn } from '@/utils/cn'
@@ -46,17 +46,17 @@ export const ActivityView: React.FC = () => {
     return () => clearInterval(interval)
   }, [])
 
-  // Fetch on-chain activity from Polymarket API
+  // Fetch account activity (trades, deposits, withdrawals, resolutions) from Polymarket US
   useEffect(() => {
     if (!isConnected) return
 
     const fetchOnChain = async () => {
       setOnChainLoading(true)
       try {
-        const data = await dataClient.getActivity({ limit: 50 })
+        const data = await polymarketUSClient.getActivities(50)
         setOnChainActivity(data)
       } catch (err) {
-        console.error('Failed to fetch on-chain activity:', err)
+        console.error('Failed to fetch account activity:', err)
       } finally {
         setOnChainLoading(false)
       }
@@ -350,28 +350,28 @@ const OnChainActivityRow: React.FC<{ activity: UserActivity }> = ({ activity }) 
       case 'trade':      return { color: 'text-matrix-primary', bg: 'bg-matrix-primary/10', border: 'border-matrix-primary/30', label: 'TRADE' }
       case 'deposit':    return { color: 'text-matrix-cyan', bg: 'bg-matrix-cyan/10', border: 'border-matrix-cyan/30', label: 'DEPOSIT' }
       case 'withdrawal': return { color: 'text-matrix-secondary', bg: 'bg-matrix-secondary/10', border: 'border-matrix-secondary/30', label: 'WITHDRAW' }
-      case 'claim':      return { color: 'text-green-300', bg: 'bg-green-500/10', border: 'border-green-500/30', label: 'CLAIM' }
+      case 'resolution': return { color: 'text-green-300', bg: 'bg-green-500/10', border: 'border-green-500/30', label: 'RESOLVED' }
       default:           return { color: 'text-matrix-text-secondary', bg: 'bg-matrix-border/50', border: 'border-matrix-border', label: activity.type.toUpperCase() }
     }
   }
 
   const styles = getTypeStyles()
   const amountStr = activity.amount >= 0 ? `+$${activity.amount.toFixed(2)}` : `-$${Math.abs(activity.amount).toFixed(2)}`
-  const isPositive = activity.type === 'deposit' || activity.type === 'claim'
+  const isPositive = activity.type === 'deposit' || activity.type === 'resolution'
 
   return (
     <div className={cn('border rounded-lg p-3', styles.bg, styles.border)}>
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
           <MatrixBadge
-            variant={activity.type === 'trade' ? 'success' : activity.type === 'deposit' || activity.type === 'claim' ? 'info' : 'warning'}
+            variant={activity.type === 'trade' ? 'success' : activity.type === 'deposit' || activity.type === 'resolution' ? 'info' : 'warning'}
             size="sm"
           >
             {styles.label}
           </MatrixBadge>
           <div>
             <p className={cn('text-sm font-mono', styles.color)}>
-              {activity.market || activity.type.charAt(0).toUpperCase() + activity.type.slice(1)}
+              {activity.marketSlug || activity.type.charAt(0).toUpperCase() + activity.type.slice(1)}
             </p>
             {activity.side && (
               <span className="text-xs text-matrix-text-secondary font-sans">{activity.side}</span>

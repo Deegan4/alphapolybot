@@ -1,5 +1,6 @@
+// ArbitrageScanner (CLOB-era market scanning/execution) was retired with the
+// Polymarket US migration; see ProjectFWStrategy for the port status.
 export { FrankWolfeOptimizer } from './FrankWolfeOptimizer'
-export { ArbitrageScanner } from './ArbitrageScanner'
 export type {
   TradeVertex,
   FWOptimizationResult,
@@ -8,7 +9,6 @@ export type {
   ArbOpportunity,
   FWOptimizerConfig,
 } from './types'
-export type { ScannerConfig, ScanResult, RejectionStats } from './ArbitrageScanner'
 
 // Cross-market combinatorial arbitrage
 export { EventAnalyzer, DependencyClassifier, MutexValidator } from './crossmarket'

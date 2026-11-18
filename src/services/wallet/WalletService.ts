@@ -8,6 +8,24 @@
 import type { WalletState, WalletEntry } from '@/types'
 import { polymarketUSClient } from '@/services/api'
 
+/** REST balance fallback interval while the private feed is pushing balances */
+export const BALANCE_REST_FALLBACK_MS = 2 * 60_000
+
+/**
+ * Whether the periodic balance sync should call REST. The private WebSocket
+ * pushes a snapshot on subscribe and an update on every change, so while it
+ * is live REST is only a slow safety net (catches a silently stalled feed).
+ */
+export function shouldPollBalanceRest(opts: {
+  wsHasBalance: boolean
+  lastRestSyncMs: number | null
+  nowMs: number
+  fallbackMs?: number
+}): boolean {
+  if (!opts.wsHasBalance || opts.lastRestSyncMs == null) return true
+  return opts.nowMs - opts.lastRestSyncMs >= (opts.fallbackMs ?? BALANCE_REST_FALLBACK_MS)
+}
+
 export class WalletService {
   private state: WalletState = {
     keyId: null,
@@ -95,6 +113,13 @@ export class WalletService {
       lastSync: null,
       error: null,
     })
+  }
+
+  /** Apply a balance pushed by the private WebSocket (no REST call) */
+  applyLiveBalance(balance: number, buyingPower: number): void {
+    if (!this.state.isConnected) return
+    if (!Number.isFinite(balance) || !Number.isFinite(buyingPower)) return
+    this.updateState({ balance, buyingPower, lastSync: new Date() })
   }
 
   /**

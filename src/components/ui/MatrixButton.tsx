@@ -1,8 +1,8 @@
 import React from 'react'
-import { motion } from 'framer-motion'
+import { motion, type HTMLMotionProps } from 'framer-motion'
 import { cn } from '@/utils/cn'
 
-interface MatrixButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+interface MatrixButtonProps extends Omit<HTMLMotionProps<'button'>, 'children'> {
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost'
   size?: 'sm' | 'md' | 'lg'
   loading?: boolean
@@ -70,7 +70,7 @@ export const MatrixButton: React.FC<MatrixButtonProps> = ({
       whileTap={!isDisabled ? { scale: 0.97 } : undefined}
       whileHover={!isDisabled ? { scale: 1.02 } : undefined}
       transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-      {...(props as any)}
+      {...props}
     >
       {loading ? (
         <span className="flex items-center justify-center gap-2">

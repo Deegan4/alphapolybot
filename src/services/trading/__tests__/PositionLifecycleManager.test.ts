@@ -6,11 +6,12 @@ import { PositionLifecycleManager, type TrackedPosition } from '../PositionLifec
 // ==========================================
 
 // Mock RealtimeService
-const mockOnPriceUpdate = vi.fn(() => vi.fn()) // returns unsubscribe fn
-const mockSubscribeMarket = vi.fn()
-const mockUnsubscribeMarket = vi.fn()
-const mockGetPrice = vi.fn()
-const mockIsStale = vi.fn(() => false) // default: prices are fresh
+// Mocks take `...args: unknown[]` so the vi.mock factories below can forward arbitrary args.
+const mockOnPriceUpdate = vi.fn((..._args: unknown[]) => vi.fn()) // returns unsubscribe fn
+const mockSubscribeMarket = vi.fn((..._args: unknown[]) => undefined)
+const mockUnsubscribeMarket = vi.fn((..._args: unknown[]) => undefined)
+const mockGetPrice = vi.fn((..._args: unknown[]): unknown => undefined)
+const mockIsStale = vi.fn((..._args: unknown[]) => false) // default: prices are fresh
 
 vi.mock('@/services/realtime', () => ({
   realtimeService: {
@@ -257,6 +258,43 @@ describe('PositionLifecycleManager', () => {
       priceCallback('will-btc-exceed-100k', { mid: 0.45, timestamp: new Date() })
 
       expect(mockPlaceSell).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('NO positions (feed is YES-quoted)', () => {
+    it('stops out a NO position when the YES price rises', async () => {
+      mockPlaceSell.mockResolvedValue({ success: true, orderId: 'sell-no-1' })
+      mockGetPrice.mockReturnValue({ mid: 0.60, timestamp: new Date() })
+
+      plm.initialize()
+      plm.trackPosition(makePosition({ outcome: 'no', entryPrice: 0.50, stopLossPercent: 0.15, size: 10 }))
+
+      // YES 0.50 → 0.60 means NO 0.50 → 0.40 = -20%
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.60, timestamp: new Date() })
+
+      await vi.waitFor(() => {
+        expect(mockPlaceSell).toHaveBeenCalledWith('will-btc-exceed-100k', 'no', 10, undefined, 'GTC')
+      })
+    })
+
+    it('does NOT stop out a NO position when the YES price falls', () => {
+      plm.initialize()
+      plm.trackPosition(makePosition({ outcome: 'no', entryPrice: 0.50, stopLossPercent: 0.15, takeProfitPercent: 0.30 }))
+
+      // YES 0.50 → 0.40 means NO is up 20% — inside both thresholds
+      const priceCallback = mockOnPriceUpdate.mock.calls[0][0] as (slug: string, data: unknown) => void
+      priceCallback('will-btc-exceed-100k', { mid: 0.40, timestamp: new Date() })
+
+      expect(mockPlaceSell).not.toHaveBeenCalled()
+    })
+
+    it('reports NO P&L from 1 - YES mid', () => {
+      mockGetPrice.mockReturnValue({ mid: 0.30, timestamp: new Date() })
+      plm.trackPosition(makePosition({ outcome: 'no', entryPrice: 0.50, size: 10 }))
+      const [pos] = plm.getPositions()
+      expect(pos.currentPrice).toBeCloseTo(0.70, 10)
+      expect(pos.pnlUsd).toBeCloseTo(2.0, 10)
     })
   })
 

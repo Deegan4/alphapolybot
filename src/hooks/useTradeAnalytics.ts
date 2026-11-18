@@ -2,7 +2,9 @@ import { useEffect, useState, useMemo } from 'react'
 import { tradeLogger } from '@/services/trading'
 import type { TradeRecord } from '@/services/trading/TradeLogger'
 
-export interface EquityPoint {
+// Chart point shapes are type aliases (not interfaces) so they satisfy the
+// charts' `{ [key: string]: string | number }` index-signature data type.
+export type EquityPoint = {
   date: string
   equity: number
 }
@@ -12,17 +14,17 @@ export interface StrategyLine {
   [strategy: string]: string | number
 }
 
-export interface WinRatePoint {
+export type WinRatePoint = {
   trade: number
   winRate: number
 }
 
-export interface HourPnl {
+export type HourPnl = {
   hour: string
   pnl: number
 }
 
-export interface DayFrequency {
+export type DayFrequency = {
   day: string
   count: number
 }

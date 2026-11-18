@@ -11,6 +11,9 @@ export abstract class BaseStrategy {
   abstract description: string
   abstract strategyType: StrategyType
 
+  /** False for strategies not yet runnable on Polymarket US (see ShelvedStrategy) */
+  readonly available: boolean = true
+
   protected _enabled = false
   protected _status: StrategyStatus = 'idle'
   protected _config: StrategyConfig = { enabled: false }

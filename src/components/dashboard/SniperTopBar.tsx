@@ -77,20 +77,21 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
       {/* Row 1: brand + mode/status/settings */}
       <div className="flex items-center justify-between gap-2 min-w-0">
         <div className="flex items-center gap-2 shrink-0">
-          <span className="text-agent-green text-lg" aria-hidden>&#9889;</span>
+          <span className="hidden sm:inline text-agent-green text-lg" aria-hidden>&#9889;</span>
           <span className="hidden sm:inline text-base font-sans font-bold text-agent-text tracking-wide">
             AlphaPolyBot HQ
           </span>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+        {/* Wraps on narrow phones so the settings link is never pushed off-screen */}
+        <div className="flex flex-wrap items-center justify-end gap-x-1.5 gap-y-1 sm:gap-3 min-w-0 flex-1">
           {/* Compact Bal / PnL — phones only */}
-          <div className="flex lg:hidden items-center gap-2 text-xs font-mono">
-            <div className="text-center px-1">
+          <div className="flex lg:hidden items-center gap-1.5 sm:gap-2 text-xs font-mono">
+            <div className="text-center sm:px-1">
               <div className="text-[9px] uppercase tracking-wider text-agent-text-muted font-sans">Bal</div>
               <div className="text-agent-text font-semibold tabular-nums">${balance.toFixed(2)}</div>
             </div>
-            <div className="text-center px-1">
+            <div className="text-center sm:px-1">
               <div className="text-[9px] uppercase tracking-wider text-agent-text-muted font-sans">PnL</div>
               <div className={`font-semibold tabular-nums ${todayPnl >= 0 ? 'text-agent-green' : 'text-agent-red'}`}>
                 {todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)}
@@ -137,7 +138,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
                   setConfirmLive(false)
                 }
               }}
-              className={`flex items-center gap-2 px-2.5 py-1 rounded-full border text-xs font-mono font-semibold cursor-pointer transition-all ${
+              className={`flex items-center gap-1.5 sm:gap-2 px-2 sm:px-2.5 py-1 rounded-full border text-xs font-mono font-semibold cursor-pointer transition-all ${
                 dryRun
                   ? 'bg-agent-cyan/10 border-agent-cyan/30 text-agent-cyan hover:bg-agent-cyan/20'
                   : 'bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20'
@@ -200,7 +201,7 @@ export const SniperTopBar: React.FC<SniperTopBarProps> = ({ activeTab, onTabChan
                   <rect width="20" height="14" x="2" y="5" rx="2" />
                   <path d="M2 10h20" />
                 </svg>
-                <span className="max-w-[80px] truncate">
+                <span className="hidden sm:inline max-w-[80px] truncate">
                   {wallets.find((w: WalletEntry) => w.id === activeWalletId)?.label ?? 'Wallet'}
                 </span>
                 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">

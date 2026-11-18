@@ -34,6 +34,7 @@ vi.mock('axios', () => {
 
 const mockMarket: PolyBacktestMarket = {
   market_id: 'mkt-001',
+  event_id: 'evt-001',
   slug: 'btc-updown-15m-1707926400',
   market_type: '15m',
   start_time: '2024-02-14T20:00:00Z',
@@ -46,11 +47,15 @@ const mockMarket: PolyBacktestMarket = {
   clob_token_down: 'tok-down',
   final_volume: 5000,
   final_liquidity: 2000,
+  resolved_at: null,
+  created_at: null,
+  updated_at: null,
 }
 
 const mockSnapshot: PolyBacktestSnapshot = {
   id: 'snap-001',
   time: '2024-02-14T20:05:00Z',
+  market_id: 'mkt-001',
   btc_price: 52050,
   price_up: 0.55,
   price_down: 0.45,
@@ -75,6 +80,7 @@ const mockSnapshotsResponse: PolyBacktestSnapshotsResponse = {
 
 const mockHealthResponse: PolyBacktestHealthResponse = {
   status: 'ok',
+  timestamp: '2024-02-14T20:05:00Z',
 }
 
 // ==========================================
@@ -100,7 +106,8 @@ describe('PolyBacktestClient', () => {
     } else {
       const { PolyBacktestClient } = await import('../PolyBacktestClient')
       client = new PolyBacktestClient()
-      mockAxiosInstance = (axios.create as ReturnType<typeof vi.fn>).mock.results.at(-1)?.value
+      const results = (axios.create as ReturnType<typeof vi.fn>).mock.results
+      mockAxiosInstance = results[results.length - 1]?.value
     }
 
     mockAxiosInstance.get.mockReset()

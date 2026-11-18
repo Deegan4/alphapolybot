@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 const DISMISS_KEY = 'apb:ios-install-dismissed'
 
@@ -32,6 +32,23 @@ export const IosInstallHint: React.FC = () => {
     setVisible(true)
   }, [])
 
+  // Reserve the tip's height at the bottom of the app (see .app-viewport) so it
+  // sits below the content instead of covering it.
+  const boxRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const box = boxRef.current
+    if (!visible || !box) return
+    const apply = () => root.style.setProperty('--install-hint-h', `${Math.ceil(box.getBoundingClientRect().height)}px`)
+    apply()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(apply) : null
+    observer?.observe(box)
+    return () => {
+      observer?.disconnect()
+      root.style.removeProperty('--install-hint-h')
+    }
+  }, [visible])
+
   if (!visible) return null
 
   const dismiss = () => {
@@ -41,26 +58,23 @@ export const IosInstallHint: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-x-3 z-[60] rounded-xl border border-agent-green/25 bg-agent-card/95 backdrop-blur-md shadow-lg px-3 py-3 sm:max-w-md sm:mx-auto"
-      style={{ bottom: 'max(1rem, calc(env(safe-area-inset-bottom, 0px) + 0.75rem))' }}
+      ref={boxRef}
+      data-testid="ios-install-hint"
+      className="fixed inset-x-0 bottom-0 z-[60] border-t border-agent-green/25 bg-agent-card px-3 pt-1"
+      style={{ paddingBottom: 'max(0.25rem, env(safe-area-inset-bottom, 0px))' }}
       role="status"
     >
-      <div className="flex items-start gap-3">
-        <div className="text-agent-green text-lg leading-none mt-0.5" aria-hidden>📱</div>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-sans font-semibold text-agent-text">
-            Install AlphaPolyBot on your iPhone
-          </p>
-          <p className="mt-1 text-xs font-sans text-agent-text-muted leading-relaxed">
-            Tap <span className="text-agent-cyan font-medium">Share</span>
-            {' '}→ <span className="text-agent-cyan font-medium">Add to Home Screen</span>
-            {' '}for a full-screen trading app.
-          </p>
-        </div>
+      <div className="flex items-center gap-2 sm:max-w-md sm:mx-auto">
+        <div className="text-base leading-none" aria-hidden>📱</div>
+        <p className="flex-1 min-w-0 text-xs font-sans text-agent-text-muted leading-snug">
+          <span className="font-semibold text-agent-text">Install the app:</span>
+          {' '}tap <span className="text-agent-cyan font-medium">Share</span>
+          {' '}→ <span className="text-agent-cyan font-medium">Add to Home Screen</span>
+        </p>
         <button
           type="button"
           onClick={dismiss}
-          className="text-agent-text-muted hover:text-agent-text min-h-[44px] min-w-[44px] -mr-1 -mt-1 inline-flex items-center justify-center"
+          className="text-agent-text-muted hover:text-agent-text min-h-[44px] min-w-[44px] -mr-1 inline-flex items-center justify-center"
           aria-label="Dismiss"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -1,6 +1,6 @@
 import { BaseStrategy } from './BaseStrategy'
 import type { BtcUpDownConfig, Market } from '@/types'
-import { polymarketUSClient, normalizeEventToMarkets } from '@/services/api'
+import { polymarketUSClient, normalizeEventToMarkets, priceForOutcome, upDownEventSlugs, type UpDownHorizon } from '@/services/api'
 import { priceOracleService } from '@/services/api/PriceOracleService'
 import { tradingService } from '@/services/trading/TradingService'
 import { activityLogger } from '@/services/trading/ActivityLogger'
@@ -10,17 +10,17 @@ import { edgeTracker } from '@/services/trading/EdgeTracker'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWalletStore } from '@/stores/walletStore'
 import { rejectionTracker } from '@/services/trading/RejectionTracker'
+import { btcSignalRecorder } from '@/services/trading/BtcSignalRecorder'
 import {
   computeSignal as _computeSignal,
-  computeVolatility as _computeVolatility,
   classifyRegime as _classifyRegime,
-  computeRSI as _computeRSI,
-  linearRegressionSlope as _linearRegressionSlope,
 } from './btcupdown/signalEngine'
 
 // Re-export types from signalEngine for backward compatibility
 export type { SignalInput, Signal } from './btcupdown/signalEngine'
 import type { SignalInput, Signal } from './btcupdown/signalEngine'
+import type { WireEvent } from '@/services/api/pmusWire'
+import type { RealtimeService } from '@/services/realtime/RealtimeService'
 
 // ==========================================
 // DEFAULTS
@@ -69,92 +69,40 @@ export const WINDOW_DURATIONS = {
 
 export type WindowDuration = keyof typeof WINDOW_DURATIONS
 
-const ASSET_NAMES: Record<string, string> = {
-  BTC: 'Bitcoin',
-  ETH: 'Ethereum',
-  SOL: 'Solana',
-  XRP: 'XRP',
+/**
+ * Polymarket US Up/Down event slug horizon per window duration.
+ * Slugs are `{asset}-updown-{horizon}-{YYYY-MM-DD-HHMM}z` (window start, UTC);
+ * daily windows start at 5pm New York time. There is no 9PM series on
+ * Polymarket US — `9pm` discovers nothing.
+ */
+export const UPDOWN_HORIZONS: Partial<Record<WindowDuration, UpDownHorizon>> = {
+  '5m': '5m',
+  '15m': '15m',
+  'hourly': '1h',
+  'daily': '1d',
 }
 
 /**
- * Slug prefixes for each asset × window duration on Polymarket.
- * Pattern: {asset}-updown-{duration}-{windowStartUnix}
+ * Whether Up/Down discovery should run for one asset+duration. It runs when
+ * no tracked market lasts beyond the pre-fetch lead, so the next window is
+ * fetched shortly before the current one ends. The lead is 20% of the window
+ * (30s–90s) plus a 5s stagger per asset, which spreads the lookups instead of
+ * every asset hitting the gateway in the same second after rollover.
  */
-export const ASSET_SLUG_PATTERNS: Record<string, Partial<Record<WindowDuration, string>>> = {
-  BTC: { '5m': 'btc-updown-5m-', '15m': 'btc-updown-15m-' },
-  ETH: { '5m': 'eth-updown-5m-', '15m': 'eth-updown-15m-' },
-  SOL: { '5m': 'sol-updown-5m-', '15m': 'sol-updown-15m-' },
-  XRP: { '5m': 'xrp-updown-5m-', '15m': 'xrp-updown-15m-' },
+export function needsUpDownDiscovery(
+  trackedWindowEndsMs: number[],
+  nowMs: number,
+  windowDurationMs: number,
+  assetIndex = 0,
+): boolean {
+  const leadMs = Math.min(90_000, Math.max(30_000, windowDurationMs * 0.2)) + Math.max(0, assetIndex) * 5_000
+  return !trackedWindowEndsMs.some(end => end > nowMs + leadMs)
 }
 
-/** Month names for 9PM event slug generation */
-const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june',
-  'july', 'august', 'september', 'october', 'november', 'december']
-
-/**
- * 9PM event slugs use a different format: {asset}-up-or-down-{month}-{day}-9pm-et
- * Unlike 5m/15m which are timestamp-based, these are human-readable date-based.
- */
-export const ASSET_9PM_SLUG_BUILDERS: Record<string, (date: Date) => string> = {
-  BTC: (d) => `bitcoin-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
-  ETH: (d) => `ethereum-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
-  SOL: (d) => `solana-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
-  XRP: (d) => `xrp-up-or-down-${MONTH_NAMES[d.getMonth()]}-${d.getDate()}-9pm-et`,
-}
-
-/** Full asset names used in human-readable hourly/daily slugs */
-const ASSET_FULL_NAMES: Record<string, string> = {
-  BTC: 'bitcoin',
-  ETH: 'ethereum',
-  SOL: 'solana',
-  XRP: 'xrp',
-}
-
-/**
- * Convert a UTC Date to Eastern Time hour components.
- * Returns { etDate, hour12, ampm } where hour12 is 1-12 and ampm is 'am'/'pm'.
- * Handles EST (UTC-5) and EDT (UTC-4) via Intl.DateTimeFormat.
- */
-function toEasternTime(utcDate: Date): { etDate: Date; hour12: number; ampm: string } {
-  // Use Intl to get the ET offset-aware date parts
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: 'numeric', hour12: false,
-  }).formatToParts(utcDate)
-
-  const get = (type: string) => parts.find(p => p.type === type)?.value ?? '0'
-  const etYear = parseInt(get('year'))
-  const etMonth = parseInt(get('month')) - 1
-  const etDay = parseInt(get('day'))
-  const etHour24 = parseInt(get('hour')) % 24 // Intl returns 24 for midnight in some locales
-
-  const etDate = new Date(etYear, etMonth, etDay)
-  const ampm = etHour24 >= 12 ? 'pm' : 'am'
-  const hour12 = etHour24 === 0 ? 12 : etHour24 > 12 ? etHour24 - 12 : etHour24
-  return { etDate, hour12, ampm }
-}
-
-/**
- * Hourly event slugs: {asset}-up-or-down-{month}-{day}-{hour}{am/pm}-et
- * e.g. bitcoin-up-or-down-february-14-1pm-et
- */
-function buildHourlySlug(asset: string, utcDate: Date): string {
-  const fullName = ASSET_FULL_NAMES[asset]
-  if (!fullName) return ''
-  const { etDate, hour12, ampm } = toEasternTime(utcDate)
-  return `${fullName}-up-or-down-${MONTH_NAMES[etDate.getMonth()]}-${etDate.getDate()}-${hour12}${ampm}-et`
-}
-
-/**
- * Daily event slugs: {asset}-up-or-down-on-{month}-{day}
- * e.g. bitcoin-up-or-down-on-february-15
- */
-function buildDailySlug(asset: string, utcDate: Date): string {
-  const fullName = ASSET_FULL_NAMES[asset]
-  if (!fullName) return ''
-  const { etDate } = toEasternTime(utcDate)
-  return `${fullName}-up-or-down-on-${MONTH_NAMES[etDate.getMonth()]}-${etDate.getDate()}`
+/** Current + next window event slugs for an asset/duration ([] if unsupported) */
+export function upDownSlugsFor(asset: string, duration: WindowDuration, now: Date = new Date()): string[] {
+  const horizon = UPDOWN_HORIZONS[duration]
+  return horizon ? upDownEventSlugs(asset, horizon, now) : []
 }
 
 // ==========================================
@@ -223,11 +171,12 @@ export class BtcUpDownStrategy extends BaseStrategy {
   /** Last computed signal per asset — exposed for dashboard display */
   private _lastSignals = new Map<string, { signal: Signal; windowOpenPrice: number; currentPrice: number }>()
   /** Cached RealtimeService reference (set in start(), null if unavailable) */
-  private realtimeServiceRef: any | null = null
+  private realtimeServiceRef: RealtimeService | null = null
   /** Map clobTokenId → { asset, outcomeIndex } for reverse-lookup on live price reads */
   private slugToOutcomeMap = new Map<string, { asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'; outcomeIndex: number }>()
   // Maps marketId → [outcomeSlug0, outcomeSlug1] for WS subscription and live price lookups
   private marketOutcomeSlugs = new Map<string, string[]>()
+  private unsupportedDurationLogged = new Set<string>()
   /** Unsubscribe function for RealtimeService price callback */
   private realtimeUnsubscribe: (() => void) | null = null
 
@@ -357,12 +306,35 @@ export class BtcUpDownStrategy extends BaseStrategy {
   // SCAN LOOP
   // ==========================================
 
+  /** Confidence and entry-price limits in force (for the confidence report) */
+  getEntryLimits(): { minConfidence: number; minEntryPrice: number; maxEntryPrice: number } {
+    const { minConfidence, minEntryPrice, maxEntryPrice } = this.btcConfig
+    return { minConfidence, minEntryPrice, maxEntryPrice }
+  }
+
+  private lastIdleMsg = ''
+  private lastIdleMsgAt = 0
+
   private async runScanCycle(): Promise<void> {
     if (!this._enabled || this._status !== 'running') return
 
     try {
       // 1. Discover markets for enabled assets
       await this.discoverMarkets()
+
+      // Settle recorded signals whose window has just ended (best-effort)
+      for (const asset of btcSignalRecorder.assetsToResolve(Date.now())) {
+        try {
+          const { priceUSD } = await priceOracleService.getPrice(asset as 'BTC' | 'ETH' | 'SOL' | 'XRP')
+          btcSignalRecorder.resolve(asset, priceUSD, Date.now())
+        } catch { /* price unavailable: retried next cycle until the grace period passes */ }
+      }
+      // The exchange's settlement overrides the provisional spot result
+      for (const { marketId, slug } of btcSignalRecorder.marketsAwaitingExchange(Date.now())) {
+        const yes = await polymarketUSClient.getSettlementPrice(slug)
+        if (yes != null) btcSignalRecorder.settleFromExchange(marketId, yes, Date.now())
+      }
+      btcSignalRecorder.prune(Date.now())
 
       if (this.activeMarkets.size === 0) {
         const assets: string[] = []
@@ -386,9 +358,21 @@ export class BtcUpDownStrategy extends BaseStrategy {
           return
         }
 
-        const msg = `BTC: No Up/Down markets found (scanning ${durations.join('/')} for ${assets.join('/')})`
-        console.log(`[BTC Scan] ${msg}`)
-        activityLogger.logScan(msg, { total: 0, eligible: 0 })
+        // Nothing can ever be found with no coin or no window length switched on:
+        // say so (once a minute, not every scan) instead of "no markets found".
+        const msg = assets.length === 0
+          ? 'Crypto Up/Down is running but no coin is switched on. Turn on BTC, ETH, SOL or XRP in Settings → BTC Up/Down.'
+          : durations.length === 0
+            ? 'Crypto Up/Down is running but no window length is switched on. Turn one on in Settings → BTC Up/Down.'
+            : `BTC: No Up/Down markets found (scanning ${durations.join('/')} for ${assets.join('/')})`
+        const now = Date.now()
+        if (msg !== this.lastIdleMsg || now - this.lastIdleMsgAt >= 60_000) {
+          this.lastIdleMsg = msg
+          this.lastIdleMsgAt = now
+          console.log(`[BTC Scan] ${msg}`)
+          if (assets.length === 0 || durations.length === 0) activityLogger.logWarning(msg)
+          else activityLogger.logScan(msg, { total: 0, eligible: 0 })
+        }
         return
       }
 
@@ -589,6 +573,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
           for (const s of evictedSlugs) {
             this.slugToOutcomeMap.delete(s)
           }
+          // The window is closed: stop keeping its full book in memory
+          this.realtimeServiceRef?.unwatchBooks?.(evictedSlugs)
           this.marketOutcomeSlugs.delete(id)
         }
         this.activeMarkets.delete(id)
@@ -615,11 +601,13 @@ export class BtcUpDownStrategy extends BaseStrategy {
         try {
           const windowDurationMs = WINDOW_DURATIONS[duration]
 
-          // Skip Gamma API call if we already have an active market for this asset+duration
-          const alreadyTracked = Array.from(this.activeMarkets.values()).some(
-            e => e.asset === asset && e.windowDurationMs === windowDurationMs && e.windowEndMs > now
-          )
-          if (alreadyTracked) continue
+          // Skip the lookup while a tracked market covers this asset+duration
+          // beyond the pre-fetch lead — then the next window is fetched just
+          // BEFORE rollover (staggered by asset) instead of every asset at once after it
+          const trackedEnds = Array.from(this.activeMarkets.values())
+            .filter(e => e.asset === asset && e.windowDurationMs === windowDurationMs)
+            .map(e => e.windowEndMs)
+          if (!needsUpDownDiscovery(trackedEnds, now, windowDurationMs, assets.indexOf(asset))) continue
 
           const markets = await this.discoverBySlug(asset, duration)
 
@@ -647,7 +635,8 @@ export class BtcUpDownStrategy extends BaseStrategy {
             }
 
             const windowStartMs = windowEndMs - windowDurationMs
-            const windowOpenPrice = await this.getWindowOpenPrice(asset, windowStartMs, market.question)
+            // Exchange-published reference price first (assetPriceTerms.priceToBeat)
+            const windowOpenPrice = market.priceToBeat ?? await this.getWindowOpenPrice(asset, windowStartMs, market.question)
 
             this.activeMarkets.set(market.id, { market, windowOpenPrice, asset, windowEndMs, windowDurationMs, durationKey: duration })
 
@@ -661,9 +650,13 @@ export class BtcUpDownStrategy extends BaseStrategy {
                   : 0
               const mDownIdx = mUpIdx === 0 ? 1 : 0
 
+              if (outcomeSlugs[mDownIdx] !== outcomeSlugs[mUpIdx]) {
+                this.slugToOutcomeMap.set(outcomeSlugs[mDownIdx], { asset, outcomeIndex: mDownIdx })
+              }
               this.slugToOutcomeMap.set(outcomeSlugs[mUpIdx], { asset, outcomeIndex: mUpIdx })
-              this.slugToOutcomeMap.set(outcomeSlugs[mDownIdx], { asset, outcomeIndex: mDownIdx })
-              this.realtimeServiceRef.subscribeMarket(outcomeSlugs)
+              this.realtimeServiceRef.subscribeMarket([...new Set(outcomeSlugs)])
+              // Full book too: the entry depth check then reads it from memory, not REST
+              this.realtimeServiceRef.watchBooks?.([...new Set(outcomeSlugs)])
               this.log(`[Discovery] Subscribed outcome slugs for ${asset} ${duration}`)
             }
 
@@ -677,61 +670,19 @@ export class BtcUpDownStrategy extends BaseStrategy {
   }
 
   /**
-   * Slug-based market discovery for Up/Down markets.
-   * Slugs follow the pattern: {asset}-updown-{5m|15m}-{windowStartUnix}
-   * where windowStartUnix aligns to 300-second (5m) or 900-second (15m) boundaries.
-   *
-   * Queries current window + next window (2 API calls per asset per duration).
+   * Slug-based discovery for Up/Down markets: current + next window
+   * (2 lookups per asset per duration). See upDownSlugsFor.
    */
   private async discoverBySlug(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP', duration: WindowDuration): Promise<Market[]> {
-    // Human-readable slug formats — delegate to dedicated methods
-    if (duration === '9pm') return this.discoverBySlug9pm(asset)
-    if (duration === 'hourly') return this.discoverBySlugHourly(asset)
-    if (duration === 'daily') return this.discoverBySlugDaily(asset)
-    const prefix = ASSET_SLUG_PATTERNS[asset]?.[duration]
-    if (!prefix) return []
-    const intervalSec = duration === '5m' ? 300 : 900
-    const nowSec = Math.floor(Date.now() / 1000)
-    const currentWindowStart = Math.floor(nowSec / intervalSec) * intervalSec
-    const nextWindowStart = currentWindowStart + intervalSec
-
-    const slugs = [
-      `${prefix}${currentWindowStart}`,
-      `${prefix}${nextWindowStart}`,
-    ]
-
-    return this.discoverFromEventSlugs(slugs, 'slug')
-  }
-
-  /**
-   * 9PM event discovery — uses human-readable date-based slugs.
-   * Format: {asset}-up-or-down-{month}-{day}-9pm-et
-   * Queries today's event + tomorrow's event.
-   */
-  private async discoverBySlug9pm(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<Market[]> {
-    const builder = ASSET_9PM_SLUG_BUILDERS[asset]
-    if (!builder) return []
-    const today = new Date()
-    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000)
-    return this.discoverFromEventSlugs([builder(today), builder(tomorrow)], '9PM')
-  }
-
-  private async discoverBySlugHourly(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<Market[]> {
-    const now = new Date()
-    const nextHour = new Date(now.getTime() + 60 * 60 * 1000)
-    return this.discoverFromEventSlugs(
-      [buildHourlySlug(asset, now), buildHourlySlug(asset, nextHour)].filter(Boolean) as string[],
-      'Hourly',
-    )
-  }
-
-  private async discoverBySlugDaily(asset: 'BTC' | 'ETH' | 'SOL' | 'XRP'): Promise<Market[]> {
-    const now = new Date()
-    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000)
-    return this.discoverFromEventSlugs(
-      [buildDailySlug(asset, now), buildDailySlug(asset, tomorrow)].filter(Boolean) as string[],
-      'Daily',
-    )
+    const slugs = upDownSlugsFor(asset, duration)
+    if (slugs.length === 0) {
+      if (!this.unsupportedDurationLogged.has(duration)) {
+        this.unsupportedDurationLogged.add(duration)
+        this.log(`[Discovery] No Polymarket US Up/Down series for "${duration}" windows — skipping`)
+      }
+      return []
+    }
+    return this.discoverFromEventSlugs(slugs, duration)
   }
 
   /**
@@ -747,19 +698,11 @@ export class BtcUpDownStrategy extends BaseStrategy {
         const event = await polymarketUSClient.getEventBySlug(slug)
         if (!event) continue
 
-        // Capture individual outcome slugs before normalization
-        const rawMarkets = (event as any).markets || []
-        const outcomeSlugs = rawMarkets
-          .filter((m: any) => m.active && !m.closed)
-          .map((m: any) => m.slug)
-
-        // Normalize US API event into unified Market objects
-        const eventMarkets = normalizeEventToMarkets(event as any)
-        for (const m of eventMarkets) {
+        // One binary market per event; Up = YES, Down = NO on the same slug
+        for (const m of normalizeEventToMarkets(event as unknown as WireEvent)) {
           if (m.active && !m.closed) {
             markets.push(m)
-            // Store outcome slugs keyed by market ID for WS subscriptions
-            this.marketOutcomeSlugs.set(m.id, outcomeSlugs)
+            this.marketOutcomeSlugs.set(m.id, m.outcomeSlugs ?? [m.slug, m.slug])
           }
         }
       } catch (error) {
@@ -815,10 +758,12 @@ export class BtcUpDownStrategy extends BaseStrategy {
    * Read live CLOB mid-price for an outcome token via RealtimeService.
    * Falls back to stale Gamma mid-price if WebSocket data unavailable.
    */
-  private getLiveOutcomePrice(slug: string | undefined, fallback: number): number {
+  private getLiveOutcomePrice(slug: string | undefined, outcomeIndex: number, fallback: number): number {
     if (!slug || !this.realtimeServiceRef) return fallback
     const pd = this.realtimeServiceRef.getPrice(slug)
-    return pd && pd.mid > 0 ? pd.mid : fallback
+    if (!pd || !(pd.mid > 0)) return fallback
+    // Feed is YES-quoted: outcome 0 (Up/Yes) is the mid, outcome 1 is 1 - mid
+    return priceForOutcome(pd, outcomeIndex === 0 ? 'yes' : 'no').mid
   }
 
   // ==========================================
@@ -848,10 +793,10 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // === Phase 3d: Liquidity pre-check ===
       try {
-        const { OrderBookDepth } = await import('@/services/trading/OrderBookDepth')
+        const { orderBookDepth } = await import('@/services/trading/OrderBookDepth')
         const firstSlug = this.marketOutcomeSlugs.get(market.id)?.[0]
         if (firstSlug) {
-          const depthCheck = await OrderBookDepth.checkBuyDepth(firstSlug, 0.50, 1.0)
+          const depthCheck = await orderBookDepth.checkBuyDepth(firstSlug, 0.50, 1.0)
           if (depthCheck.maxFillableUSD < 1.0) {
             rejectionTracker.record('liquidity', 'btc', `${asset} ${durationLabel} depth $${depthCheck.maxFillableUSD.toFixed(2)} < $1`)
             return
@@ -894,16 +839,16 @@ export class BtcUpDownStrategy extends BaseStrategy {
       if (hasUpDown) {
         upIndex = market.outcomes.indexOf('Up')
         downIndex = market.outcomes.indexOf('Down')
-        upPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[upIndex], market.outcomePrices[upIndex])
-        downPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[downIndex], market.outcomePrices[downIndex])
+        upPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[upIndex], upIndex, market.outcomePrices[upIndex])
+        downPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[downIndex], downIndex, market.outcomePrices[downIndex])
       } else if (hasYesNo) {
         const yesIndex = market.outcomes.indexOf('Yes')
         const noIndex = market.outcomes.indexOf('No')
         const questionMeansUp = market.question.toUpperCase().includes('UP')
         upIndex = questionMeansUp ? yesIndex : noIndex
         downIndex = questionMeansUp ? noIndex : yesIndex
-        upPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[upIndex], market.outcomePrices[upIndex])
-        downPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[downIndex], market.outcomePrices[downIndex])
+        upPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[upIndex], upIndex, market.outcomePrices[upIndex])
+        downPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[downIndex], downIndex, market.outcomePrices[downIndex])
       } else {
         console.warn(`[BTC] Unrecognized outcomes: ${JSON.stringify(market.outcomes)}`)
         return
@@ -957,9 +902,30 @@ export class BtcUpDownStrategy extends BaseStrategy {
         // Enrichment unavailable — continue without
       }
 
+      // Log the signal for the confidence report (resolved after the window ends)
+      try {
+        const sigIndex = signal.direction === 'up' ? upIndex : downIndex
+        btcSignalRecorder.record({
+          marketId: market.id,
+          asset,
+          duration: durationKey,
+          t: Date.now(),
+          direction: signal.direction,
+          confidence: signal.confidence,
+          price: this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[sigIndex], sigIndex, market.outcomePrices[sigIndex]),
+          refPrice: windowOpenPrice,
+          windowEndMs,
+          slug: market.slug,
+          yesMeansUp: upIndex === 0,
+        })
+      } catch { /* recording is best-effort */ }
+
       // Store for dashboard display + emit event for real-time UI updates
       this._lastSignals.set(asset, { signal, windowOpenPrice, currentPrice })
       this.emit('signalComputed', { asset, signal, windowOpenPrice, currentPrice })
+
+      // Recording-only mode: the signal is logged and shown; no LLM call, no trade
+      if (useSettingsStore.getState().signalRecordingOnly) return
 
       this.log(
         `${asset} ${durationLabel} signal: ${signal.direction.toUpperCase()} conf=${(signal.confidence * 100).toFixed(0)}% ` +
@@ -997,7 +963,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Gate: max entry price (cheap outcomes only for resolution-hold)
       const targetIndex = signal.direction === 'up' ? upIndex : downIndex
-      const targetPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[targetIndex], market.outcomePrices[targetIndex])
+      const targetPrice = this.getLiveOutcomePrice(this.marketOutcomeSlugs.get(market.id)?.[targetIndex], targetIndex, market.outcomePrices[targetIndex])
       if (targetPrice > this.btcConfig.maxEntryPrice) {
         rejectionTracker.record('market_filter', 'btc', `${asset} price ${(targetPrice * 100).toFixed(0)}c > ${(this.btcConfig.maxEntryPrice * 100).toFixed(0)}c max`)
         return
@@ -1074,7 +1040,7 @@ export class BtcUpDownStrategy extends BaseStrategy {
 
       // Log trade for backtest
       const kellyFraction = useSettingsStore.getState().kellyFraction
-      const fStar = KellySizer.polymarketKellyWithFee(signal.confidence, targetPrice, 1000)
+      const fStar = KellySizer.pmusKelly(signal.confidence, targetPrice, market.feeCoefficient)
       tradeLogger.logEntry({
         marketId: market.id,
         slug: market.slug,
@@ -1285,20 +1251,8 @@ Respond ONLY with JSON:
     }, imbalanceScore)
   }
 
-  private computeVolatility(prices: Array<{ price: number; timestamp: number }>): number {
-    return _computeVolatility(prices)
-  }
-
   classifyRegime(prices: Array<{ price: number; timestamp: number }>): 'choppy' | 'trending' | 'neutral' {
     return _classifyRegime(prices)
-  }
-
-  private computeRSI(prices: Array<{ price: number; timestamp: number }>, period = 14): number {
-    return _computeRSI(prices, period)
-  }
-
-  private linearRegressionSlope(points: Array<{ price: number; timestamp: number }>): number {
-    return _linearRegressionSlope(points)
   }
 
   // ==========================================
@@ -1316,9 +1270,9 @@ Respond ONLY with JSON:
 
     const bankroll = useWalletStore.getState().balance
     const kellyFraction = useSettingsStore.getState().kellyFraction
-    // Crypto markets have 1000 bps (10%) taker fee — use fee-adjusted Kelly
+    // PM US taker fee Θ·p·(1−p) per contract (Θ = 0.095 at tier 1)
     const adaptiveProb = edgeTracker.getAdaptiveModelProb('btc', confidence)
-    const fStar = KellySizer.polymarketKellyWithFee(adaptiveProb, marketPrice, 1000)
+    const fStar = KellySizer.pmusKelly(adaptiveProb, marketPrice)
     return Math.round(KellySizer.sizeBet({ kellyFraction, bankroll, fullKelly: fStar }) * 100) / 100
   }
 

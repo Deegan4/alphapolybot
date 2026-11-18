@@ -26,6 +26,7 @@ const baseTime = new Date('2024-02-14T20:00:00Z').getTime()
 function makeMarket(overrides?: Partial<PolyBacktestMarket>): PolyBacktestMarket {
   return {
     market_id: 'mkt-test',
+    event_id: 'evt-test',
     slug: 'btc-updown-15m-test',
     market_type: '15m',
     start_time: new Date(baseTime).toISOString(),
@@ -38,6 +39,9 @@ function makeMarket(overrides?: Partial<PolyBacktestMarket>): PolyBacktestMarket
     clob_token_down: 'tok-down',
     final_volume: 10000,
     final_liquidity: 5000,
+    resolved_at: null,
+    created_at: null,
+    updated_at: null,
     ...overrides,
   }
 }
@@ -70,6 +74,7 @@ function makeSnapshots(
     snapshots.push({
       id: `snap-${i}`,
       time: new Date(timeMs).toISOString(),
+      market_id: 'mkt-test',
       btc_price: btcPrice,
       price_up: upPrice,
       price_down: downPrice,
@@ -209,6 +214,7 @@ describe('BacktestRunner', () => {
       const lateSnapshot: PolyBacktestSnapshot = {
         id: 'snap-late',
         time: new Date(baseTime + 14.5 * 60 * 1000).toISOString(), // 30 sec left
+        market_id: 'mkt-test',
         btc_price: 65200,
         price_up: 0.35,
         price_down: 0.65,

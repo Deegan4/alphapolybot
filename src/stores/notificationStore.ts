@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Notification, NotificationType } from '@/types'
+import type { Notification } from '@/types'
 
 const MAX_NOTIFICATIONS = 5
 

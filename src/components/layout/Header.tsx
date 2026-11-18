@@ -39,7 +39,7 @@ HeaderClock.displayName = 'HeaderClock'
  * Header - Glass header with gradient border and breathing live indicator
  */
 export const Header: React.FC = () => {
-  const { isConnected, startPolling, stopPolling } = useWalletStore()
+  const { isConnected } = useWalletStore()
   const dryRun = useSettingsStore((s) => s.dryRun)
   const pennyTraderMode = useSettingsStore((s) => s.pennyTraderMode)
   const [strategies, setStrategies] = useState(strategyManager.getStates())
@@ -49,12 +49,8 @@ export const Header: React.FC = () => {
     return strategyManager.subscribe(setStrategies)
   }, [])
 
-  // Start/stop centralized balance polling based on connection state
-  useEffect(() => {
-    if (!isConnected) return
-    startPolling()
-    return () => stopPolling()
-  }, [isConnected, startPolling, stopPolling])
+  // Balance polling is owned by walletStore.connect()/disconnect() so it survives
+  // routes without a Header (Dashboard). Nothing to start/stop here.
 
   const activeStrategies = strategies.filter(s => s.enabled)
 

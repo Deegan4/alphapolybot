@@ -1,5 +1,8 @@
 export { BaseApiClient } from './BaseApiClient'
 export { PolymarketUSClient, polymarketUSClient, normalizeEventToMarkets } from './PolymarketUSClient'
+export { getRequestMetrics, RequestDroppedError, type BucketMetrics } from './requestThrottle'
+export { priceForOutcome, bookForOutcome, upDownEventSlugs, reportedPriceForOutcome, roundOrderQuantity, isTransientLatencyReject, makerEntryPrice, takerAfterExpiryPlan, urgencyAdjustedChase, makerOrderOutlivesWindow, type UpDownHorizon } from './pmusWire'
 export { PriceOracleService, priceOracleService, type AssetPrice } from './PriceOracleService'
 export { CoinbaseClient, coinbaseClient, CANDLE_GRANULARITY } from './CoinbaseClient'
 export { PolyBacktestClient, polyBacktestClient } from './PolyBacktestClient'
+export { orderBookFromWire, type WireBook } from './pmusWire'
