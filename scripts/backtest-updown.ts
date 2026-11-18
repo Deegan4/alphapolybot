@@ -6,12 +6,12 @@
  * Usage:
  *   npm run backtest                         # BTC, 15m windows, last 24 hours
  *   npm run backtest -- --asset ETH --hours 48
- *   npm run backtest -- --horizon 5m --hours 24  # 5-minute windows
+ *   npm run backtest -- --horizon 5m --hours 24  # 5-minute windows (also: 1h)
  *   npm run backtest -- --asset BTC,ETH,SOL --hours 72 --out results.json
  */
 import { writeFileSync } from 'node:fs'
 import {
-  DEFAULT_REPLAY_CONFIG, readWindow, tradeFromReadings, summarize, settlePnlPerShare,
+  DEFAULT_REPLAY_CONFIG, readWindow, tradeFromReadings, makerTradeFromReadings, summarize, settlePnlPerShare,
   type WindowData, type PricePoint, type ReplayReading, type ReplayTrade,
 } from '../src/services/strategies/btcupdown/exchangeBacktest'
 
@@ -21,9 +21,10 @@ const BINANCE = 'https://api.binance.us'
 const QUOTE = 'USD'
 /** Spot trades are fetched in chunks this long */
 const TICK_CHUNK_MS = 15 * 60_000
-const HORIZON = arg('horizon', '15m') as '5m' | '15m'
-if (HORIZON !== '5m' && HORIZON !== '15m') throw new Error('--horizon must be 5m or 15m')
-const WINDOW_MS = (HORIZON === '5m' ? 5 : 15) * 60_000
+const HORIZON_MINUTES = { '5m': 5, '15m': 15, '1h': 60 } as const
+const HORIZON = arg('horizon', '15m') as keyof typeof HORIZON_MINUTES
+if (!(HORIZON in HORIZON_MINUTES)) throw new Error('--horizon must be 5m, 15m or 1h')
+const WINDOW_MS = HORIZON_MINUTES[HORIZON] * 60_000
 const DEFAULT_FEE = 0.095
 type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
@@ -190,7 +191,7 @@ async function main() {
   const upShare = windows.filter(w => w.upWon).length / Math.max(1, windows.length)
 
   const lines: string[] = []
-  lines.push(`Crypto Up/Down backtest: ${assets.join(', ')} · ${HORIZON === '5m' ? '5' : '15'}-minute windows · last ${hours}h`)
+  lines.push(`Crypto Up/Down backtest: ${assets.join(', ')} · ${HORIZON_MINUTES[HORIZON]}-minute windows · last ${hours}h`)
   lines.push(`Windows with data: ${windows.length} (${missing} missing) · settled Up: ${pct(upShare)} · strongest signal seen: ${pct(maxConfidence)}`)
   lines.push(`Spot feed (Binance.US ${QUOTE}) vs the exchange's reference price at window start: ${(avgGap * 100).toFixed(3)}% on average, ${(avgAbsGap * 100).toFixed(3)}% typical size`)
   lines.push(`Signal direction right — measuring spot against the exchange's reference: ${pct(directionRight(readingsByReference.exchange))}; against the feed's own window-start price: ${pct(directionRight(readingsByReference.venue))}`)
@@ -215,6 +216,28 @@ async function main() {
     return { threshold, ...s }
   })
 
+  // Resting orders: no taker fee and a better price, but they only fill when someone sells to them
+  const makerAt = (minConfidence: number, fill: 'conservative' | 'bestCase'): ReplayTrade[] =>
+    windows.map((w, i) => makerTradeFromReadings(readings[i], w, { minConfidence, minEntryPrice: config.minEntryPrice, maxEntryPrice: config.maxEntryPrice }, fill))
+      .filter((t): t is ReplayTrade => t !== null)
+  lines.push('')
+  lines.push('Same entries with a resting buy order at the bid instead of taking the ask (no fee):')
+  lines.push('             ---- filled only if the price came down to it ----   -- if every order filled (upper bound) --')
+  lines.push('  threshold  trades  win rate  avg price  $1/trade result          trades  win rate  $1/trade result')
+  const makerSweep = [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55].map(threshold => {
+    const c = summarize(makerAt(threshold, 'conservative'), windows.length, 0)
+    const b = summarize(makerAt(threshold, 'bestCase'), windows.length, 0)
+    lines.push(`  ${pct(threshold).padStart(8)}  ${String(c.trades).padStart(6)}  ${(c.trades ? pct(c.winRate) : '--').padStart(8)}  ${(c.trades ? c.avgEntryPrice.toFixed(3) : '--').padStart(9)}  ${(c.trades ? usd(c.pnlPerDollarStaked) : '--').padStart(15)}          ${String(b.trades).padStart(6)}  ${(b.trades ? pct(b.winRate) : '--').padStart(8)}  ${(b.trades ? usd(b.pnlPerDollarStaked) : '--').padStart(15)}`)
+    return { threshold, conservative: c, bestCase: b }
+  })
+
+  // Two-sided check (the old Dip Arbitrage idea): can Up and Down ever be bought together for under $1?
+  const sums = allReadings.map(r => r.upAsk + r.downAsk)
+  const minSum = sums.reduce((m, x) => Math.min(m, x), Infinity)
+  const below = sums.filter(x => x < 1 - 1e-9).length
+  lines.push('')
+  lines.push(`Buying both sides at once: Up ask + Down ask was never below $${Number.isFinite(minSum) ? minSum.toFixed(2) : '--'} (${below} of ${sums.length} readings under $1.00), so there is ${below === 0 ? 'no' : 'rarely any'} risk-free pair to buy.`)
+
   // Is the signal's direction any better than the market's own price?
   lines.push('')
   lines.push('Does the signal beat the market price? (every scan, any price, by confidence)')
@@ -235,7 +258,7 @@ async function main() {
   console.log(lines.join('\n'))
 
   if (out) {
-    writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), assets, hours, config, reference: referenceArg, spotGap: { average: avgGap, typical: avgAbsGap }, directionRight: { exchange: directionRight(readingsByReference.exchange), venue: directionRight(readingsByReference.venue) }, summary, sweep, buckets, trades: live }, null, 2))
+    writeFileSync(out, JSON.stringify({ generatedAt: new Date().toISOString(), assets, hours, config, reference: referenceArg, spotGap: { average: avgGap, typical: avgAbsGap }, directionRight: { exchange: directionRight(readingsByReference.exchange), venue: directionRight(readingsByReference.venue) }, horizon: HORIZON, summary, sweep, makerSweep, bothSides: { minSum, readingsBelowOne: below, readings: sums.length }, buckets, trades: live }, null, 2))
     process.stderr.write(`Saved ${out}\n`)
   }
 }

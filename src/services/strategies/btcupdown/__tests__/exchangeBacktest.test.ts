@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  DEFAULT_REPLAY_CONFIG, readWindow, tradeFromReadings, summarize, settlePnlPerShare, takerFee,
+  DEFAULT_REPLAY_CONFIG, readWindow, tradeFromReadings, makerTradeFromReadings, summarize, settlePnlPerShare, takerFee,
   type WindowData, type PricePoint, type ReplayReading,
 } from '../exchangeBacktest'
 
@@ -90,7 +90,7 @@ describe('readWindow', () => {
 
 describe('tradeFromReadings', () => {
   const reading = (confidence: number, price: number, won = true, entryMs = START + 60_000): ReplayReading =>
-    ({ slug: 's', entryMs, direction: 'up', confidence, price, won })
+    ({ slug: 's', entryMs, direction: 'up', confidence, price, won, upAsk: price, downAsk: 1.01 - price })
 
   it('takes the first reading that passes confidence and price limits', () => {
     const trade = tradeFromReadings(
@@ -106,11 +106,40 @@ describe('tradeFromReadings', () => {
   })
 })
 
+describe('makerTradeFromReadings', () => {
+  const at = (entryMs: number, upAsk: number, downAsk: number, confidence = 0.6, won = true): ReplayReading =>
+    ({ slug: 's', entryMs, direction: 'up', confidence, price: upAsk, won, upAsk, downAsk })
+
+  it('best case fills at the bid (1 − the other side\'s ask) with no fee', () => {
+    const trade = makerTradeFromReadings([at(1, 0.40, 0.62)], makeWindow(), DEFAULT_REPLAY_CONFIG, 'bestCase')
+    expect(trade?.entryPrice).toBeCloseTo(0.38, 6)
+    expect(trade?.pnlPerShare).toBeCloseTo(0.62, 6)
+  })
+
+  it('conservative fill needs the ask to come down to the bid later in the window', () => {
+    const stays = [at(1, 0.40, 0.62), at(2, 0.41, 0.61), at(3, 0.45, 0.57)]
+    expect(makerTradeFromReadings(stays, makeWindow(), DEFAULT_REPLAY_CONFIG, 'conservative')).toBeNull()
+    const dips = [at(1, 0.40, 0.62), at(2, 0.38, 0.64, 0.1), at(3, 0.45, 0.57)]
+    const trade = makerTradeFromReadings(dips, makeWindow(), DEFAULT_REPLAY_CONFIG, 'conservative')
+    expect(trade?.entryMs).toBe(2)
+    expect(trade?.entryPrice).toBeCloseTo(0.38, 6)
+  })
+
+  it('a losing fill costs the bid and nothing more', () => {
+    const trade = makerTradeFromReadings([at(1, 0.40, 0.62, 0.6, false)], makeWindow(), DEFAULT_REPLAY_CONFIG, 'bestCase')
+    expect(trade?.pnlPerShare).toBeCloseTo(-0.38, 6)
+  })
+
+  it('applies the price limits to the bid', () => {
+    expect(makerTradeFromReadings([at(1, 0.50, 0.52)], makeWindow(), DEFAULT_REPLAY_CONFIG, 'bestCase')).toBeNull() // bid 0.48 > 0.45
+  })
+})
+
 describe('summarize', () => {
   it('reports win rate, break-even and the result of $1 stakes', () => {
     const window = makeWindow()
-    const win = tradeFromReadings([{ slug: 's', entryMs: 1, direction: 'up', confidence: 0.6, price: 0.4, won: true }], window, DEFAULT_REPLAY_CONFIG)!
-    const loss = tradeFromReadings([{ slug: 's', entryMs: 1, direction: 'up', confidence: 0.6, price: 0.4, won: false }], window, DEFAULT_REPLAY_CONFIG)!
+    const win = tradeFromReadings([{ slug: 's', entryMs: 1, direction: 'up', confidence: 0.6, price: 0.4, won: true, upAsk: 0.4, downAsk: 0.61 }], window, DEFAULT_REPLAY_CONFIG)!
+    const loss = tradeFromReadings([{ slug: 's', entryMs: 1, direction: 'up', confidence: 0.6, price: 0.4, won: false, upAsk: 0.4, downAsk: 0.61 }], window, DEFAULT_REPLAY_CONFIG)!
     const s = summarize([win, loss, loss], 10, 0.095)
     expect(s.trades).toBe(3)
     expect(s.winRate).toBeCloseTo(1 / 3, 6)

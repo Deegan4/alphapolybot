@@ -90,8 +90,12 @@ export interface ReplayReading {
   entryMs: number
   direction: 'up' | 'down'
   confidence: number
+  /** Ask of the side the signal picked (what a taker pays) */
   price: number
   won: boolean
+  /** Up and Down asks at this scan; the bid of one side is 1 − the other's ask */
+  upAsk: number
+  downAsk: number
 }
 
 const BASELINE_WINDOW_MS = 15 * 60 * 1000
@@ -166,6 +170,8 @@ export function readWindow(window: WindowData, ticks: PricePoint[], config: Repl
       confidence: signal.confidence,
       price: signal.direction === 'up' ? quote.up : quote.down,
       won: (signal.direction === 'up') === window.upWon,
+      upAsk: quote.up,
+      downAsk: quote.down,
     })
   }
   return readings
@@ -189,6 +195,52 @@ export function tradeFromReadings(
     won: hit.won,
     pnlPerShare,
     pnlPerDollar: pnlPerShare / hit.price,
+  }
+}
+
+/**
+ * The same entry made with a resting buy order at the bid instead of taking
+ * the ask. Makers pay no fee, but a resting order only fills if someone sells
+ * to it, which tends to happen when the price is moving against the buyer.
+ *
+ *   'conservative' — filled only if a later reading in the window shows the
+ *                    picked side's ask at or below our bid (the market came
+ *                    down to the order). Unfilled orders are no trade.
+ *   'bestCase'     — always filled at the bid. An upper bound, not a forecast.
+ */
+export function makerTradeFromReadings(
+  readings: ReplayReading[],
+  window: WindowData,
+  config: Pick<ReplayConfig, 'minConfidence' | 'minEntryPrice' | 'maxEntryPrice'>,
+  fill: 'conservative' | 'bestCase',
+): ReplayTrade | null {
+  const bidOf = (r: ReplayReading, direction: 'up' | 'down') => 1 - (direction === 'up' ? r.downAsk : r.upAsk)
+  const askOf = (r: ReplayReading, direction: 'up' | 'down') => (direction === 'up' ? r.upAsk : r.downAsk)
+  const index = readings.findIndex(r => {
+    const bid = bidOf(r, r.direction)
+    return r.confidence >= config.minConfidence && bid >= config.minEntryPrice && bid <= config.maxEntryPrice
+  })
+  if (index < 0) return null
+  const signal = readings[index]
+  const bid = Math.round(bidOf(signal, signal.direction) * 1e4) / 1e4
+  if (!(bid > 0 && bid < 1)) return null
+  let entryMs = signal.entryMs
+  if (fill === 'conservative') {
+    const filledAt = readings.slice(index + 1).find(r => askOf(r, signal.direction) <= bid + 1e-9)
+    if (!filledAt) return null
+    entryMs = filledAt.entryMs
+  }
+  const pnlPerShare = signal.won ? 1 - bid : -bid // makers pay no fee
+  return {
+    slug: window.slug,
+    asset: window.asset,
+    entryMs,
+    direction: signal.direction,
+    confidence: signal.confidence,
+    entryPrice: bid,
+    won: signal.won,
+    pnlPerShare,
+    pnlPerDollar: pnlPerShare / bid,
   }
 }
 
