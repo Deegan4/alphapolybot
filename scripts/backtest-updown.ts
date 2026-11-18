@@ -6,6 +6,7 @@
  * Usage:
  *   npm run backtest                         # BTC, 15m windows, last 24 hours
  *   npm run backtest -- --asset ETH --hours 48
+ *   npm run backtest -- --horizon 5m --hours 24  # 5-minute windows
  *   npm run backtest -- --asset BTC,ETH,SOL --hours 72 --out results.json
  */
 import { writeFileSync } from 'node:fs'
@@ -18,7 +19,11 @@ const GATEWAY = 'https://gateway.polymarket.us'
 const BINANCE = 'https://api.binance.us'
 /** Spot pair suffix: USD tracks the (USD) settlement index more closely than USDT */
 const QUOTE = 'USD'
-const WINDOW_MS = 15 * 60_000
+/** Spot trades are fetched in chunks this long */
+const TICK_CHUNK_MS = 15 * 60_000
+const HORIZON = arg('horizon', '15m') as '5m' | '15m'
+if (HORIZON !== '5m' && HORIZON !== '15m') throw new Error('--horizon must be 5m or 15m')
+const WINDOW_MS = (HORIZON === '5m' ? 5 : 15) * 60_000
 const DEFAULT_FEE = 0.095
 type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
@@ -64,7 +69,7 @@ interface RawEvent {
 }
 
 async function loadWindow(asset: Asset, startMs: number): Promise<{ window: WindowData; disagreed: boolean } | null> {
-  const eventSlug = `${asset.toLowerCase()}-updown-15m-${slugTime(startMs)}`
+  const eventSlug = `${asset.toLowerCase()}-updown-${HORIZON}-${slugTime(startMs)}`
   const data = await getJson<{ event?: RawEvent } & RawEvent>(`${GATEWAY}/v1/events/slug/${eventSlug}`)
   const market = (data?.event ?? data)?.markets?.[0]
   const terms = market?.assetPriceTerms
@@ -82,11 +87,11 @@ async function loadWindow(asset: Asset, startMs: number): Promise<{ window: Wind
 
   const s = Math.floor(startMs / 1000)
   const history = await getJson<{ history?: Array<{ timestamp: number; longPrice: number; shortPrice: number }> }>(
-    `${GATEWAY}/v1/price-history?symbol=${market.slug}&timestamp.startTimestamp=${s}&timestamp.endTimestamp=${s + 900}&fidelity=1`)
+    `${GATEWAY}/v1/price-history?symbol=${market.slug}&timestamp.startTimestamp=${s}&timestamp.endTimestamp=${s + WINDOW_MS / 1000}&fidelity=1`)
   const marketPrices = (history?.history ?? [])
     .map(p => ({ timestamp: p.timestamp * 1000, up: Number(p.longPrice), down: Number(p.shortPrice) }))
     .sort((a, b) => a.timestamp - b.timestamp)
-  if (marketPrices.length < 5) return null
+  if (marketPrices.length < (HORIZON === '5m' ? 3 : 5)) return null
 
   return {
     disagreed,
@@ -107,9 +112,9 @@ async function loadWindow(asset: Asset, startMs: number): Promise<{ window: Wind
 /** Spot trades for [fromMs, toMs), one reading per second at most */
 async function loadTicks(asset: Asset, fromMs: number, toMs: number): Promise<PricePoint[]> {
   const ticks: PricePoint[] = []
-  for (let start = fromMs; start < toMs; start += WINDOW_MS) {
+  for (let start = fromMs; start < toMs; start += TICK_CHUNK_MS) {
     let cursor = start
-    const end = Math.min(start + WINDOW_MS, toMs)
+    const end = Math.min(start + TICK_CHUNK_MS, toMs)
     // A busy 15 minutes can exceed the 1000-trade page: keep paging forward
     for (let page = 0; page < 20 && cursor < end; page++) {
       const trades = await getJson<Array<{ p: string; T: number }>>(
@@ -136,7 +141,7 @@ async function main() {
   const hours = Number(arg('hours', '24'))
   const out = arg('out', '')
   const lastStart = Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS - 2 * WINDOW_MS // settled windows only
-  const count = Math.round(hours * 4)
+  const count = Math.round(hours * 3_600_000 / WINDOW_MS)
   const config = DEFAULT_REPLAY_CONFIG
 
   const windows: WindowData[] = []
@@ -161,7 +166,7 @@ async function main() {
       if (atStart && loaded.window.startMs - atStart.timestamp <= 60_000) {
         gaps.push((atStart.price - loaded.window.priceToBeat) / loaded.window.priceToBeat)
       }
-      if ((i + 1) % 24 === 0) process.stderr.write(`${asset}: ${i + 1}/${count}\n`)
+      if ((i + 1) % 48 === 0) process.stderr.write(`${asset}: ${i + 1}/${count}\n`)
     }
   }
 
@@ -185,7 +190,7 @@ async function main() {
   const upShare = windows.filter(w => w.upWon).length / Math.max(1, windows.length)
 
   const lines: string[] = []
-  lines.push(`Crypto Up/Down backtest: ${assets.join(', ')} · 15-minute windows · last ${hours}h`)
+  lines.push(`Crypto Up/Down backtest: ${assets.join(', ')} · ${HORIZON === '5m' ? '5' : '15'}-minute windows · last ${hours}h`)
   lines.push(`Windows with data: ${windows.length} (${missing} missing) · settled Up: ${pct(upShare)} · strongest signal seen: ${pct(maxConfidence)}`)
   lines.push(`Spot feed (Binance.US ${QUOTE}) vs the exchange's reference price at window start: ${(avgGap * 100).toFixed(3)}% on average, ${(avgAbsGap * 100).toFixed(3)}% typical size`)
   lines.push(`Signal direction right — measuring spot against the exchange's reference: ${pct(directionRight(readingsByReference.exchange))}; against the feed's own window-start price: ${pct(directionRight(readingsByReference.venue))}`)
