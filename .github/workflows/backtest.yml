@@ -17,18 +17,21 @@ on:
       hours:
         description: 'Hours of history'
         default: '24'
+      horizon:
+        description: 'Window length: 5m, 15m or 1h'
+        default: '15m'
 
 permissions:
   contents: read
 
 concurrency:
-  group: backtest
+  group: backtest-${{ inputs.horizon || '15m' }}
   cancel-in-progress: true
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -46,8 +49,9 @@ jobs:
         env:
           ASSETS: ${{ inputs.assets || 'BTC,ETH,SOL' }}
           HOURS: ${{ inputs.hours || '24' }}
+          HORIZON: ${{ inputs.horizon || '15m' }}
         run: |
-          npm run -s backtest -- --asset "$ASSETS" --hours "$HOURS" --out backtest.json | tee backtest.txt
+          npm run -s backtest -- --asset "$ASSETS" --hours "$HOURS" --horizon "$HORIZON" --out backtest.json | tee backtest.txt
           {
             echo '```'
             cat backtest.txt
